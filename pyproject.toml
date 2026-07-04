@@ -1,0 +1,38 @@
+[project]
+name = "trading"
+version = "0.1.0"
+description = "Momentum swing trading system: rankings, paper trading, backtests"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas==2.3.1",
+    "pyarrow==20.0.0",
+    "ccxt==4.4.95",
+    "yfinance==0.2.65",
+    "rich==14.0.0",
+]
+
+[project.scripts]
+trading = "trading.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.1",
+    "ruff==0.12.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trading"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
