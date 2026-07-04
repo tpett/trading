@@ -305,6 +305,11 @@ feature weights.
 
 ## Open Items
 
+- **Kraken history cap (discovered during M1):** Kraken's public OHLC
+  endpoint serves only the ~720 most-recent daily candles regardless of
+  pagination (live-verified 2026-07-04). Fine for live rankings (500-day
+  window); M3's 2018+ crypto backtests need a deeper-history source
+  (Coinbase or Bitstamp via ccxt) behind the same adapter interface.
 - Robinhood Crypto API `is_api_tradable` subset + per-pair min order sizes:
   confirm when/if API keys are created.
 - Agentic crypto GA date and its constraints: watch Robinhood announcements.
