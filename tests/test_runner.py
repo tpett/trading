@@ -261,7 +261,7 @@ def test_journal_append_failure_leaves_state_untouched(tmp_path, monkeypatch):
     assert state_file.read_text() == before  # byte-identical: journal-first ordering
 
 
-def test_first_run_state_write_failure_does_not_double_bootstrap(tmp_path, monkeypatch):
+def test_first_run_state_write_failure_refuses_until_restored(tmp_path, monkeypatch):
     def boom(path, state):
         raise OSError("disk full")
 
@@ -271,6 +271,58 @@ def test_first_run_state_write_failure_does_not_double_bootstrap(tmp_path, monke
     assert outcome.status == "failed"
     assert notes
 
+    # Journal has bootstrap + run 1 but no state file: the next run must
+    # refuse (not re-bootstrap and silently drop run 1's pending orders).
+    outcome, notes = _run(tmp_path, now=NOW + datetime.timedelta(days=1))
+    assert outcome.status == "failed"
+    assert "behind journal" in outcome.message
+    assert len(notes) == 1
+    assert not state_path(tmp_path / "state", "equities").exists()
+
+    restore_from_journal("equities", tmp_path / "state", tmp_path / "journal")
+    outcome, _ = _run(tmp_path, now=NOW + datetime.timedelta(days=1))
+    assert outcome.status == "ok"
+    events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
+    assert [e["event"] for e in events].count("bootstrap") == 1
+
+
+def test_state_behind_journal_refuses_until_restored(tmp_path):
+    _run(tmp_path)
+    state_file = state_path(tmp_path / "state", "equities")
+    stale = state_file.read_text()  # state as of run 1
+    _run(tmp_path, now=NOW + datetime.timedelta(days=1))  # run 2 persists normally
+    state_file.write_text(stale)  # rewind: journal is now one run ahead
+
+    outcome, notes = _run(tmp_path, now=NOW + datetime.timedelta(days=2))
+    assert outcome.status == "failed"
+    assert "behind journal" in outcome.message
+    assert "restore-from-journal" in outcome.message
+    assert len(notes) == 1  # notified exactly once
+    assert state_file.read_text() == stale  # untouched
+
+    restore_from_journal("equities", tmp_path / "state", tmp_path / "journal")
+    outcome, notes = _run(tmp_path, now=NOW + datetime.timedelta(days=2))
+    assert outcome.status == "ok"  # reconciled: the same run now proceeds
+    assert notes == []
+
+
+def test_bootstrap_event_is_reused_after_crash_before_first_run_event(tmp_path, monkeypatch):
+    real_append = Journal.append
+
+    def fail_run_events(self, event):
+        if event["event"] == "run":
+            raise OSError("disk full")
+        return real_append(self, event)
+
+    with monkeypatch.context() as m:
+        m.setattr(Journal, "append", fail_run_events)
+        outcome, notes = _run(tmp_path)
+    assert outcome.status == "failed"
+    assert notes
+    assert not state_path(tmp_path / "state", "equities").exists()
+
+    # Journal has only the bootstrap event: not behind, so the next run
+    # proceeds and reuses it rather than appending a second one.
     outcome, _ = _run(tmp_path, now=NOW + datetime.timedelta(days=1))
     assert outcome.status == "ok"
     events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
@@ -317,3 +369,18 @@ def test_stale_lock_reclaim_race_loser_retries_via_atomic_create(tmp_path, monke
     assert rename_calls  # the stale lock was claimed via atomic rename, not unlink
     assert path.read_text() == str(os.getpid())  # single lockfile, winner's pid
     assert list(tmp_path.iterdir()) == [path]  # no leftover .reclaim files
+
+
+def test_orphaned_reclaim_files_from_dead_processes_are_swept(tmp_path):
+    import os
+
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    orphan = tmp_path / f".lock.reclaim.{dead.pid}"
+    orphan.write_text(str(dead.pid))  # crashed between rename and unlink
+    live = tmp_path / f".lock.reclaim.{os.getpid()}"
+    live.write_text(str(os.getpid()))  # a live reclaim in flight
+
+    assert RunLock(tmp_path / ".lock").acquire() is True
+    assert not orphan.exists()  # dead-pid orphan swept on acquire
+    assert live.exists()  # live process's reclaim left alone

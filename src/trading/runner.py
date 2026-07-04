@@ -93,8 +93,20 @@ class RunLock:
     def __init__(self, path: Path):
         self._path = path
 
+    def _sweep_orphaned_reclaims(self) -> None:
+        """Remove <lock>.reclaim.<pid> files whose reclaimer died between
+        the rename and the unlink; a live pid's reclaim is left alone."""
+        for orphan in self._path.parent.glob(f"{self._path.name}.reclaim.*"):
+            try:
+                pid = int(orphan.name.rsplit(".", 1)[-1])
+            except ValueError:
+                continue
+            if not _pid_alive(pid):
+                orphan.unlink(missing_ok=True)
+
     def acquire(self) -> bool:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._sweep_orphaned_reclaims()
         for _ in range(3):
             try:
                 fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -210,6 +222,19 @@ def run_venue(
                 f"corrupt state file ({exc}); recover with "
                 f"'trading run --venue {venue} --restore-from-journal'",
             )
+
+        # Fail-safe: if the journal's tail is ahead of the persisted state
+        # (a state write failed and was never reconciled), proceeding would
+        # silently and permanently drop the missing run's fills and orders —
+        # has_run guarantees that run_key is never reprocessed. Refuse.
+        last_run = journal.last_event(types=frozenset({"run"}))
+        if last_run is not None and (state is None or state.last_run_key != last_run["run_key"]):
+            message = (
+                f"state file behind journal; run "
+                f"'trading run --venue {venue} --restore-from-journal'"
+            )
+            notify("trading: state behind journal", f"{venue}: {message}")
+            return RunOutcome(venue, "failed", message)
 
         try:
             rankings = build_rankings(config, adapter, cache, now.date())
