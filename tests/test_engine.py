@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -139,3 +141,24 @@ def test_rank_breaks_composite_ties_by_symbol():
     expected = ["B", "A", "Z", "C"]
     assert list(rank(features).index) == expected
     assert list(rank(features).index) == expected  # repeatable
+
+
+def test_partial_nan_feature_gives_nan_composite_and_clean_cross_section():
+    """A symbol with one NaN feature must not poison the cross-section: its
+    composite is NaN (ranks last) and the others' percentiles are computed
+    over the non-NaN subset only."""
+    bars = {
+        "UP": _trending_bars(0.01),
+        "FLAT": _trending_bars(0.0),
+        "ZEROVOL": _trending_bars(0.005).assign(volume=0.0),  # volume_surge -> NaN
+    }
+    out = compute_features(bars, bars["UP"].index[-1], CONFIG)
+    assert math.isnan(out.loc["ZEROVOL", "volume_surge"])
+    assert math.isnan(out.loc["ZEROVOL", "composite"])
+    # volume_surge is dollar-volume-weighted (close * volume), so UP's and
+    # FLAT's differing price drift keeps them from tying; the property this
+    # pins is that pct-rank excludes ZEROVOL's NaN from the denominator: over
+    # the 2-symbol non-NaN subset the ranks land at exactly {0.5, 1.0}, not
+    # values implying a 3-symbol pool.
+    assert sorted(out.loc[["UP", "FLAT"], "volume_surge"]) == [0.5, 1.0]
+    assert list(rank(out).index)[-1] == "ZEROVOL"

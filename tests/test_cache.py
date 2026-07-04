@@ -144,3 +144,27 @@ def test_full_refetch_preserves_cached_rows_after_requested_end(tmp_path):
 def test_path_for_sanitizes_pair_symbols(tmp_path):
     cache = OhlcvCache(tmp_path / "cache", refetch_days=30)
     assert cache.path_for("BTC/USD").name == "BTC-USD.parquet"
+
+
+def test_full_refetch_gappy_fresh_is_authoritative_in_range(tmp_path):
+    """Full refetch (request needs more history than cached): fresh data is
+    authoritative for the fetched range — cached in-range days missing from
+    fresh are dropped, while cached rows after the requested end survive."""
+    cache = OhlcvCache(tmp_path / "cache", refetch_days=30)
+    cache.fetch("AAPL", datetime.date(2026, 2, 1), END, RecordingFetcher(1.0))
+
+    gap = pd.date_range("2026-02-10", "2026-02-12", freq="D", tz="UTC")
+
+    def gappy(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+        return _frame(start, end, 2.0).drop(gap)
+
+    # start=START < cached min (2026-02-01) => full refetch path.
+    cache.fetch("AAPL", START, datetime.date(2026, 2, 15), gappy)
+
+    on_disk = pd.read_parquet(cache.path_for("AAPL"))
+    # Fresh wins the refetched range: the gap days are gone, not backfilled.
+    assert pd.Timestamp("2026-02-11", tz="UTC") not in on_disk.index
+    assert on_disk.loc[pd.Timestamp("2026-02-05", tz="UTC"), "close"] == 2.0
+    # Cached tail past the requested end is preserved.
+    assert on_disk.loc[pd.Timestamp("2026-02-20", tz="UTC"), "close"] == 1.0
+    assert not on_disk.index.duplicated().any()
