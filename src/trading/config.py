@@ -67,6 +67,7 @@ class PortfolioConfig:
     min_raw_return_cost_multiple: float
     earnings_blackout_sessions: int
     staleness_hours: int
+    atr_window: int
 
 
 @dataclass(frozen=True)

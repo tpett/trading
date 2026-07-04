@@ -22,6 +22,7 @@ def test_load_equities_config():
     assert config.portfolio.max_positions == 5
     assert config.data.min_coverage == 0.90
     assert config.data.max_daily_move == 0.40
+    assert config.portfolio.atr_window == 20
 
 
 def test_load_crypto_config():
