@@ -41,7 +41,8 @@ time_stop_bars = 30                 # 30 calendar days = 30 daily bars (24/7 ven
 stop_atr_multiple = 1.5
 regime_flush_atr_multiple = 1.0
 cooldown_days = 7
-max_daily_deployment_pct = 0.25
+max_daily_deployment_pct = 0.35     # must exceed position_size_pct (0.30) or entries deadlock;
+                                    # still allows only ONE new crypto position per day
 drawdown_halt_pct = 0.20
 entry_score_threshold = 0.70
 min_raw_return_cost_multiple = 3.0  # raw 30d return must exceed 3x round-trip cost (spec)
