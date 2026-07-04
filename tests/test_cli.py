@@ -273,3 +273,19 @@ def test_run_restore_from_journal_requires_typed_confirmation(tmp_path, monkeypa
     monkeypatch.setattr("builtins.input", lambda prompt="": "RESTORE")
     assert main(_run_args(tmp_path, cfg_dir, extra=["--restore-from-journal"])) == 0
     assert json.loads(state_file.read_text()) == json.loads(good)
+
+
+def test_run_restore_with_corrupt_journal_fails_cleanly(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    journal_file = tmp_path / "journal" / "equities.jsonl"
+    journal_file.write_text("{ corrupt\n" + journal_file.read_text())
+    state_file = tmp_path / "state" / "equities" / "portfolio.json"
+    state_file.write_text("garbage")
+    capsys.readouterr()
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESTORE")
+    assert main(_run_args(tmp_path, cfg_dir, extra=["--restore-from-journal"])) == 1
+    assert "ERROR" in capsys.readouterr().err  # clean message, no traceback
+    assert state_file.read_text() == "garbage"  # state untouched

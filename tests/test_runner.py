@@ -211,3 +211,109 @@ def test_run_lock_is_reentrant_safe(tmp_path):
     assert RunLock(tmp_path / ".lock").acquire() is False  # our own pid is alive
     lock.release()
     assert RunLock(tmp_path / ".lock").acquire() is True
+
+
+# --- crash-safe persistence ordering (review findings) ---
+
+
+def test_state_write_failure_after_journal_append_is_recoverable(tmp_path, monkeypatch):
+    _run(tmp_path)
+    state_file = state_path(tmp_path / "state", "equities")
+    before = state_file.read_text()
+
+    def boom(path, state):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr("trading.runner.save_state", boom)
+        outcome, notes = _run(tmp_path, now=NOW + datetime.timedelta(days=1))
+
+    assert outcome.status == "failed"
+    assert "restore-from-journal" in outcome.message
+    assert notes  # operator is paged
+
+    # Journal is AHEAD of state: the run event landed, state is one run behind.
+    run_event = Journal(tmp_path / "journal" / "equities.jsonl").last_event(
+        types=frozenset({"run"})
+    )
+    assert run_event["run_key"] == "equities:2026-07-02T00:00:00+00:00"
+    assert state_file.read_text() == before  # untouched by the failed write
+
+    # The anticipated recovery: replay the journal's last snapshot.
+    restore_from_journal("equities", tmp_path / "state", tmp_path / "journal")
+    restored = load_state(state_file)
+    assert restored.last_run_key == run_event["run_key"]
+    assert json.loads(state_file.read_text()) == {**run_event["state_after"]}
+
+
+def test_journal_append_failure_leaves_state_untouched(tmp_path, monkeypatch):
+    _run(tmp_path)
+    state_file = state_path(tmp_path / "state", "equities")
+    before = state_file.read_text()
+
+    def boom(self, event):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Journal, "append", boom)
+    outcome, notes = _run(tmp_path, now=NOW + datetime.timedelta(days=1))
+    assert outcome.status == "failed"
+    assert notes
+    assert state_file.read_text() == before  # byte-identical: journal-first ordering
+
+
+def test_first_run_state_write_failure_does_not_double_bootstrap(tmp_path, monkeypatch):
+    def boom(path, state):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr("trading.runner.save_state", boom)
+        outcome, notes = _run(tmp_path)
+    assert outcome.status == "failed"
+    assert notes
+
+    outcome, _ = _run(tmp_path, now=NOW + datetime.timedelta(days=1))
+    assert outcome.status == "ok"
+    events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
+    assert [e["event"] for e in events].count("bootstrap") == 1
+    # The reused bootstrap keeps the original benchmark baseline and birthdate.
+    boot = events[0]
+    state = load_state(state_path(tmp_path / "state", "equities"))
+    assert state.benchmark_start_price == boot["benchmark_start_price"]
+    assert state.created_at == boot["ts"]
+
+
+def test_restore_from_journal_corrupt_journal_raises_runner_error(tmp_path):
+    from trading.runner import RunnerError
+
+    _run(tmp_path)
+    journal_file = tmp_path / "journal" / "equities.jsonl"
+    journal_file.write_text("{ corrupt\n" + journal_file.read_text())
+    state_file = state_path(tmp_path / "state", "equities")
+    before = state_file.read_text()
+    with pytest.raises(RunnerError, match="journal corrupt"):
+        restore_from_journal("equities", tmp_path / "state", tmp_path / "journal")
+    assert state_file.read_text() == before  # refused before touching state
+
+
+def test_stale_lock_reclaim_race_loser_retries_via_atomic_create(tmp_path, monkeypatch):
+    import os
+
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    path = tmp_path / ".lock"
+    path.write_text(str(dead.pid))
+
+    rename_calls = []
+
+    def racing_rename(src, dst):
+        # Simulate losing the reclaim race: another process renamed the stale
+        # lock away between our read and our rename.
+        rename_calls.append((src, dst))
+        os.unlink(src)
+        raise FileNotFoundError(src)
+
+    monkeypatch.setattr("trading.runner.os.rename", racing_rename)
+    assert RunLock(path).acquire() is True  # loser retried and won via O_EXCL
+    assert rename_calls  # the stale lock was claimed via atomic rename, not unlink
+    assert path.read_text() == str(os.getpid())  # single lockfile, winner's pid
+    assert list(tmp_path.iterdir()) == [path]  # no leftover .reclaim files

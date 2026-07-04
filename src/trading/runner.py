@@ -21,7 +21,7 @@ import pandas as pd
 from trading.config import VenueConfig
 from trading.data.cache import OhlcvCache
 from trading.earnings import fetch_earnings_dates
-from trading.journal import Journal, config_hash
+from trading.journal import Journal, JournalError, config_hash
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
 from trading.simulator.core import StepResult, decision_bar, make_run_key, step
 from trading.simulator.state import (
@@ -95,7 +95,7 @@ class RunLock:
 
     def acquire(self) -> bool:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
+        for _ in range(3):
             try:
                 fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
@@ -105,12 +105,21 @@ class RunLock:
                     pid = None
                 if pid is not None and _pid_alive(pid):
                     return False
-                self._path.unlink(missing_ok=True)  # stale lock from a dead process
+                # Claim the stale lock ATOMICALLY: exactly one reclaimer wins
+                # the rename; a plain unlink would let two racing processes
+                # both remove it and both "acquire". Losers get
+                # FileNotFoundError and retry the O_EXCL create.
+                reclaim = self._path.with_name(f"{self._path.name}.reclaim.{os.getpid()}")
+                try:
+                    os.rename(self._path, reclaim)
+                except FileNotFoundError:
+                    continue  # another process won the reclaim; retry
+                reclaim.unlink(missing_ok=True)
                 continue
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
             return True
-        return False
+        return False  # bounded retries: treat persistent contention as lock-held
 
     def release(self) -> None:
         self._path.unlink(missing_ok=True)
@@ -219,19 +228,28 @@ def run_venue(
             )
 
         if state is None:  # explicit bootstrap path, journaled (spec)
-            benchmark_close = float(rankings.benchmark_bars["close"].iloc[-1])
+            # Reuse an already-journaled bootstrap (crash between the bootstrap
+            # append and the first state write) so the event is never doubled
+            # and the benchmark baseline/birthdate stay those of the original.
+            boot = journal.last_event(types=frozenset({"bootstrap"}))
+            if boot is None:
+                benchmark_close = float(rankings.benchmark_bars["close"].iloc[-1])
+                created_at = now.isoformat()
+                journal.append(
+                    {
+                        "event": "bootstrap",
+                        "venue": venue,
+                        "ts": created_at,
+                        "starting_balance": config.portfolio.starting_balance,
+                        "benchmark_start_price": benchmark_close,
+                        "config_hash": config_hash(config),
+                    }
+                )
+            else:
+                benchmark_close = float(boot["benchmark_start_price"])
+                created_at = boot["ts"]
             state = initial_state(
-                venue, config.portfolio.starting_balance, benchmark_close, now.isoformat()
-            )
-            journal.append(
-                {
-                    "event": "bootstrap",
-                    "venue": venue,
-                    "ts": now.isoformat(),
-                    "starting_balance": config.portfolio.starting_balance,
-                    "benchmark_start_price": benchmark_close,
-                    "config_hash": config_hash(config),
-                }
+                venue, config.portfolio.starting_balance, benchmark_close, created_at
             )
 
         # Staleness (spec: Execution Split #4): a late run still processes
@@ -263,8 +281,30 @@ def run_venue(
             earnings=earnings,
         )
 
-        save_state(state_path(state_root, venue), result.state)
-        journal.append(_run_event(result, rankings, config, now, extra_warnings))
+        # Persist journal-FIRST (crash-safe ordering): a crash between the two
+        # writes leaves state one run BEHIND the journal — the anticipated,
+        # recoverable condition (--restore-from-journal replays the last run
+        # event's state_after). The reverse order would leave mutated state
+        # with no run_key in the journal, and a restart would re-execute
+        # step() on refetched (possibly different) data: double-processing.
+        try:
+            journal.append(_run_event(result, rankings, config, now, extra_warnings))
+        except Exception as exc:
+            notify("trading: journal write failed", f"{venue}: {exc}")
+            return RunOutcome(
+                venue, "failed", f"journal append failed ({exc}); state untouched", run_key
+            )
+        try:
+            save_state(state_path(state_root, venue), result.state)
+        except Exception as exc:
+            notify("trading: state write failed", f"{venue}: {exc}")
+            return RunOutcome(
+                venue,
+                "failed",
+                f"state write failed after journal append ({exc}); state is one run "
+                f"behind — recover with 'trading run --venue {venue} --restore-from-journal'",
+                run_key,
+            )
 
         if result.breaker_tripped_now:
             notify(
@@ -284,7 +324,10 @@ def restore_from_journal(venue: str, state_root: Path, journal_root: Path) -> st
     """Recovery for a corrupt state file: replay the last journaled snapshot.
     The CLI gates this behind typed operator confirmation."""
     journal = Journal(journal_root / f"{venue}.jsonl")
-    last = journal.last_event(types=frozenset({"run"}))
+    try:
+        last = journal.last_event(types=frozenset({"run"}))
+    except JournalError as exc:
+        raise RunnerError(f"journal corrupt: {exc}") from exc
     if last is None or "state_after" not in last:
         raise RunnerError(f"no run event with state_after in {venue} journal")
     state = state_from_dict(last["state_after"])
