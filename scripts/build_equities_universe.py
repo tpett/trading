@@ -8,6 +8,7 @@ Run from the repo root:
     uv run --with lxml python scripts/build_equities_universe.py
 """
 
+import datetime
 import io
 import urllib.request
 from pathlib import Path
@@ -37,7 +38,11 @@ def main() -> None:
     # yfinance uses '-' for share classes (BRK.B -> BRK-B).
     symbols = sorted({str(s).strip().replace(".", "-") for s in sp500 + ndx})
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text("symbol\n" + "\n".join(symbols) + "\n")
+    header = (
+        f"# S&P 500 + Nasdaq-100 snapshot built {datetime.date.today().isoformat()} "
+        "from Wikipedia constituent lists by scripts/build_equities_universe.py\n"
+    )
+    OUT.write_text(header + "symbol\n" + "\n".join(symbols) + "\n")
     print(f"wrote {len(symbols)} symbols to {OUT}")
 
 

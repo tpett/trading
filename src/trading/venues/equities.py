@@ -46,7 +46,7 @@ class EquitiesAdapter:
 
     def universe(self, as_of: datetime.date) -> list[SymbolInfo]:
         # as_of is part of the locked protocol; the static M1 snapshot ignores it.
-        df = pd.read_csv(self._universe_csv)
+        df = pd.read_csv(self._universe_csv, comment="#")
         return [SymbolInfo(symbol=s, status="tradable") for s in df["symbol"]]
 
     def constraints(self) -> VenueConstraints:

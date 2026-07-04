@@ -77,3 +77,13 @@ def test_fetch_ohlcv_empty_raises(monkeypatch):
     adapter = EquitiesAdapter(CONFIG)
     with pytest.raises(DataFetchError):
         adapter.fetch_ohlcv("AAPL", datetime.date(2026, 1, 5), datetime.date(2026, 1, 9))
+
+
+def test_committed_equities_csv_has_provenance_comment_and_loads():
+    from trading.venues.equities import DEFAULT_UNIVERSE_CSV
+
+    first_line = DEFAULT_UNIVERSE_CSV.read_text().splitlines()[0]
+    assert first_line.startswith("#")  # build-date provenance comment
+    config = load_venue_config("equities", Path("config"))
+    infos = EquitiesAdapter(config).universe(datetime.date(2026, 7, 4))
+    assert len(infos) >= 500
