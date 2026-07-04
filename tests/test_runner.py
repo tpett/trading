@@ -394,3 +394,22 @@ def test_run_writes_daily_digest(tmp_path):
     text = digest_file.read_text()
     assert "## equities" in text
     assert "Top 5 ranking" in text
+
+
+def test_digest_write_failure_never_blocks_state_save(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("trading.runner.write_digest", boom)
+    outcome, notes = _run(tmp_path)
+
+    # The digest is pure reporting: state and journal must be durable and
+    # the run must still succeed — a missing digest file is a reporting gap.
+    assert outcome.status == "ok"
+    state = load_state(state_path(tmp_path / "state", "equities"))
+    assert state is not None and state.last_run_key == outcome.run_key
+    events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
+    assert [e["event"] for e in events] == ["bootstrap", "run"]
+    assert not (tmp_path / "digest" / "2026-07-01.md").exists()
+    digest_notes = [n for n in notes if "digest" in n[0]]
+    assert len(digest_notes) == 1  # notified exactly once, then carried on

@@ -10,6 +10,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+VENUES = ["equities", "crypto"]
+
 
 @dataclass(frozen=True)
 class CostsConfig:

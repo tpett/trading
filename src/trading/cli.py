@@ -16,14 +16,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from trading.config import load_venue_config
+from trading.config import VENUES, load_venue_config
 from trading.data.cache import OhlcvCache
 from trading.notify import notify
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
 from trading.runner import RunnerError, restore_from_journal, run_venue
 from trading.venues import make_adapter
-
-VENUES = ["equities", "crypto"]
 
 
 def _utcnow() -> datetime.datetime:

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trading.config import VenueConfig
+from trading.config import VENUES, VenueConfig
 from trading.data.cache import OhlcvCache
 from trading.digest import collect_run_events, write_digest
 from trading.earnings import fetch_earnings_dates
@@ -321,13 +321,6 @@ def run_venue(
             return RunOutcome(
                 venue, "failed", f"journal append failed ({exc}); state untouched", run_key
             )
-        if digest_root is not None:
-            date_iso = now.date().isoformat()
-            write_digest(
-                digest_root,
-                date_iso,
-                collect_run_events(journal_root, ["equities", "crypto"], date_iso),
-            )
         try:
             save_state(state_path(state_root, venue), result.state)
         except Exception as exc:
@@ -339,6 +332,19 @@ def run_venue(
                 f"behind — recover with 'trading run --venue {venue} --restore-from-journal'",
                 run_key,
             )
+
+        # Pure reporting, only after state is durable: a digest failure must
+        # never block the state save or fail the run — notify and carry on.
+        if digest_root is not None:
+            date_iso = now.date().isoformat()
+            try:
+                write_digest(
+                    digest_root,
+                    date_iso,
+                    collect_run_events(journal_root, VENUES, date_iso),
+                )
+            except Exception as exc:
+                notify("trading: digest write failed", f"{venue}: {exc}")
 
         if result.breaker_tripped_now:
             notify(
