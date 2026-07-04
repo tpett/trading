@@ -76,6 +76,7 @@ class DataConfig:
     min_coverage: float
     max_daily_move: float
     history_days: int
+    quarantine_window_days: int
 
 
 @dataclass(frozen=True)

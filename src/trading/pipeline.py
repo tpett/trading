@@ -62,7 +62,9 @@ def build_rankings(
             f"{config.data.min_coverage:.0%}; missing: {', '.join(coverage.missing)}"
         )
 
-    clean, quarantined = quarantine_outliers(bars, config.data.max_daily_move)
+    clean, quarantined = quarantine_outliers(
+        bars, config.data.max_daily_move, config.data.quarantine_window_days
+    )
 
     try:
         benchmark = cache.fetch(config.benchmark, start, as_of, adapter.fetch_ohlcv)

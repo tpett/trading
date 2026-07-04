@@ -52,5 +52,11 @@ staleness_hours = 2
 cache_dir = "data/equities"
 refetch_days = 30       # trailing window always re-fetched (adjusted history rewrites)
 min_coverage = 0.90     # below this, abort the run (spec)
-max_daily_move = 0.40   # sanity quarantine bound (spec default)
+max_daily_move = 0.40   # sanity quarantine bound (spec default); equities don't see
+                        # the 40-60% single-day moves crypto does, so this is unchanged
 history_days = 500      # calendar days fetched; covers 200-day SMA + 252-obs vol percentile
+# Outlier scan only looks at the trailing N calendar days of each symbol's
+# own history, anchored to its last bar. Window ~= refetch_days: the point
+# is recent-data sanity (bad prints in the live-refetched tail), not
+# history-wide policing of moves that happened many months ago.
+quarantine_window_days = 40

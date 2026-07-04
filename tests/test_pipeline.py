@@ -96,11 +96,26 @@ def test_below_min_coverage_raises(tmp_path):
 
 def test_quarantined_symbol_is_excluded_and_reported(tmp_path):
     adapter, cache, frames = _make(tmp_path)
-    spike_at = frames["S5"].index[200]
-    frames["S5"].loc[spike_at, "close"] = frames["S5"]["close"].iloc[199] * 1.7
+    # Spike near the end of the frame (a handful of trading days back), well
+    # inside the quarantine_window_days lookback, so it still trips the gate.
+    spike_at = frames["S5"].index[-5]
+    prior_at = frames["S5"].index[-6]
+    frames["S5"].loc[spike_at, "close"] = frames["S5"]["close"].loc[prior_at] * 1.7
     result = build_rankings(CONFIG, adapter, cache, AS_OF)
     assert result.quarantined == ("S5",)
     assert "S5" not in result.table.index
+
+
+def test_old_spike_outside_quarantine_window_is_not_quarantined(tmp_path):
+    adapter, cache, frames = _make(tmp_path)
+    # Same spike shape as above, but far in the past: outside the
+    # quarantine_window_days lookback, so it must not exclude the symbol.
+    spike_at = frames["S5"].index[200]
+    prior_at = frames["S5"].index[199]
+    frames["S5"].loc[spike_at, "close"] = frames["S5"]["close"].loc[prior_at] * 1.7
+    result = build_rankings(CONFIG, adapter, cache, AS_OF)
+    assert result.quarantined == ()
+    assert "S5" in result.table.index
 
 
 def test_insufficient_history_reported_not_ranked(tmp_path):

@@ -52,5 +52,10 @@ staleness_hours = 6
 cache_dir = "data/crypto"
 refetch_days = 30
 min_coverage = 0.90
-max_daily_move = 0.40
+max_daily_move = 0.60          # mid-cap crypto legitimately has 40-60% days
 history_days = 500
+# Outlier scan only looks at the trailing N calendar days of each symbol's
+# own history, anchored to its last bar. Window ~= refetch_days: the point
+# is recent-data sanity (bad prints in the live-refetched tail), not
+# history-wide policing of moves that happened many months ago.
+quarantine_window_days = 40
