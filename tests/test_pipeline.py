@@ -41,6 +41,7 @@ class FakeAdapter:
         self.frames = frames
         self.infos = infos
         self.fail = fail
+        self.fetch_calls: dict[str, int] = {}
 
     def universe(self, as_of: datetime.date) -> list[SymbolInfo]:
         return self.infos
@@ -49,6 +50,7 @@ class FakeAdapter:
         return VenueConstraints(0.0, 0.0, 5.0, 1, False)
 
     def fetch_ohlcv(self, symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+        self.fetch_calls[symbol] = self.fetch_calls.get(symbol, 0) + 1
         if symbol in self.fail:
             raise DataFetchError(symbol)
         df = self.frames[symbol]
@@ -163,6 +165,25 @@ def test_drop_incomplete_last_bar_matches_manual_removal(tmp_path):
     with_drop = build_rankings(_with_drop(True), full_adapter, full_cache, AS_OF)
 
     pd.testing.assert_frame_equal(with_drop.table, baseline.table)
+
+
+def test_corrupted_benchmark_raises_pipeline_data_error(tmp_path):
+    adapter, cache, frames = _make(tmp_path)
+    # Recent (within the quarantine window), implausible benchmark move: a
+    # corrupt print must abort the run, not silently distort the regime gate.
+    spike_at = frames["SPY"].index[-5]
+    prior_at = frames["SPY"].index[-6]
+    frames["SPY"].loc[spike_at, "close"] = frames["SPY"]["close"].loc[prior_at] * 1.7
+    with pytest.raises(PipelineDataError, match="benchmark"):
+        build_rankings(CONFIG, adapter, cache, AS_OF)
+
+
+def test_benchmark_symbol_already_in_universe_is_not_fetched_twice(tmp_path):
+    adapter, cache, frames = _make(tmp_path)
+    adapter.infos.append(SymbolInfo("SPY", "tradable"))
+    result = build_rankings(CONFIG, adapter, cache, AS_OF)
+    assert adapter.fetch_calls.get("SPY") == 1
+    assert "SPY" in result.table.index
 
 
 def test_drop_incomplete_last_bar_flag_changes_rankings(tmp_path):

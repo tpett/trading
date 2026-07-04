@@ -80,12 +80,32 @@ def build_rankings(
         bars, config.data.max_daily_move, config.data.quarantine_window_days
     )
 
-    try:
-        benchmark = cache.fetch(config.benchmark, start, as_of, adapter.fetch_ohlcv)
-    except Exception as exc:
-        raise PipelineDataError(f"benchmark {config.benchmark} fetch failed: {exc}") from exc
-    if config.data.drop_incomplete_last_bar:
-        benchmark = _drop_incomplete_last_bar(benchmark, as_of)
+    # The benchmark symbol is often also a universe member (e.g. crypto's BTC
+    # benchmark is also ranked); reuse the bars already fetched above instead
+    # of issuing a second fetch for the same symbol.
+    if config.benchmark in bars:
+        benchmark = bars[config.benchmark]
+    else:
+        try:
+            benchmark = cache.fetch(config.benchmark, start, as_of, adapter.fetch_ohlcv)
+        except Exception as exc:
+            raise PipelineDataError(f"benchmark {config.benchmark} fetch failed: {exc}") from exc
+        if config.data.drop_incomplete_last_bar:
+            benchmark = _drop_incomplete_last_bar(benchmark, as_of)
+
+    # A corrupt benchmark print must not silently flip venue-wide exposure/
+    # regime: run it through the same recent-window sanity check universe
+    # symbols get, but fail loudly instead of quietly excluding it.
+    _, benchmark_quarantined = quarantine_outliers(
+        {config.benchmark: benchmark},
+        config.data.max_daily_move,
+        config.data.quarantine_window_days,
+    )
+    if benchmark_quarantined:
+        raise PipelineDataError(
+            f"benchmark {config.benchmark} failed data-sanity check: outlier move "
+            f"within the trailing {config.data.quarantine_window_days}d window"
+        )
 
     as_of_ts = pd.Timestamp(as_of, tz="UTC")
     regime = compute_regime(benchmark, as_of_ts, config.regime)
