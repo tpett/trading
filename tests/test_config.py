@@ -23,6 +23,7 @@ def test_load_equities_config():
     assert config.data.min_coverage == 0.90
     assert config.data.max_daily_move == 0.40
     assert config.portfolio.atr_window == 20
+    assert config.portfolio.earnings_blackout_enabled is True
 
 
 def test_load_crypto_config():
@@ -35,6 +36,7 @@ def test_load_crypto_config():
     assert config.signals.calendar_days is True
     assert config.portfolio.max_positions == 3
     assert config.portfolio.min_raw_return_cost_multiple == 3.0
+    assert config.portfolio.earnings_blackout_enabled is False
 
 
 def test_config_is_frozen():

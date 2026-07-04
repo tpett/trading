@@ -66,6 +66,7 @@ class PortfolioConfig:
     entry_score_threshold: float
     min_raw_return_cost_multiple: float
     earnings_blackout_sessions: int
+    earnings_blackout_enabled: bool
     staleness_hours: int
     atr_window: int
 

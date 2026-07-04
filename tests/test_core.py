@@ -21,6 +21,13 @@ def _rankings(end="2026-07-01", **kwargs):
     return make_rankings(EQ, bars, make_table(rows), **kwargs)
 
 
+def test_step_passes_earnings_through_to_entries():
+    state = make_state(EQ)
+    blocked = step(state, _rankings(), EQ, earnings={"AAA": ("2026-07-02",)})
+    assert all(o.symbol != "AAA" for o in blocked.new_orders)
+    assert any(s.reason == "earnings_blackout" for s in blocked.skips)
+
+
 def test_decision_bar_is_max_last_bar_and_run_key_format():
     rankings = _rankings()
     assert decision_bar(rankings) == JUL1

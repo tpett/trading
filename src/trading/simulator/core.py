@@ -8,6 +8,7 @@ clock-dependent rule) is decided by the runner and passed in as allow_entries.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import pandas as pd
@@ -107,6 +108,7 @@ def step(
     *,
     allow_entries: bool = True,
     stale_reason: str | None = None,
+    earnings: Mapping[str, tuple[str, ...]] | None = None,
 ) -> StepResult:
     state = copy.deepcopy(state)
     decision_ts = decision_bar(rankings)
@@ -144,7 +146,7 @@ def step(
     entry_orders: list[PendingOrder] = []
     if allow_entries:
         entry_orders, entry_skips = evaluate_entries(
-            state, rankings, config, decision_ts, snapshot.value
+            state, rankings, config, decision_ts, snapshot.value, earnings=earnings
         )
         skips.extend(entry_skips)
     else:

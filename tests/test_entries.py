@@ -167,3 +167,33 @@ def test_nan_composite_stops_iteration():
     (orders, skips), _ = _entries(EQ, {"AAA": frame()}, {"AAA": _row(composite=math.nan)})
     assert orders == []
     assert skips == []
+
+
+def test_earnings_within_blackout_blocks_entry():
+    earnings = {"AAA": ("2026-07-06",)}  # 3 business days after 2026-07-01
+    state = make_state(EQ)
+    rankings = make_rankings(EQ, {"AAA": frame()}, make_table({"AAA": _row()}))
+    orders, skips = evaluate_entries(state, rankings, EQ, DECISION, VALUE, earnings=earnings)
+    assert orders == []
+    assert Skip("AAA", "entry", "earnings_blackout") in skips
+
+
+def test_earnings_beyond_blackout_and_none_do_not_block():
+    state = make_state(EQ)
+    rankings = make_rankings(EQ, {"AAA": frame()}, make_table({"AAA": _row()}))
+    # 2026-07-01 + 5 business days = 2026-07-08; the 9th is outside the window.
+    far = {"AAA": ("2026-07-09",)}
+    orders, _ = evaluate_entries(state, rankings, EQ, DECISION, VALUE, earnings=far)
+    assert len(orders) == 1
+    # earnings=None (filter disabled/degraded symbol) never blocks.
+    orders, _ = evaluate_entries(state, rankings, EQ, DECISION, VALUE, earnings=None)
+    assert len(orders) == 1
+
+
+def test_earnings_day_of_decision_blocks():
+    earnings = {"AAA": ("2026-07-01",)}
+    state = make_state(EQ)
+    rankings = make_rankings(EQ, {"AAA": frame()}, make_table({"AAA": _row()}))
+    orders, skips = evaluate_entries(state, rankings, EQ, DECISION, VALUE, earnings=earnings)
+    assert orders == []
+    assert Skip("AAA", "entry", "earnings_blackout") in skips

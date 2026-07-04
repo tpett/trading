@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import math
+from collections.abc import Mapping
 
 import pandas as pd
 
@@ -19,12 +20,22 @@ from trading.simulator.fills import atr
 from trading.simulator.state import PendingOrder, PortfolioState, Skip
 
 
+def _within_earnings_blackout(
+    dates: tuple[str, ...], decision_date: datetime.date, sessions: int
+) -> bool:
+    if sessions <= 0 or not dates:
+        return False
+    horizon = pd.bdate_range(decision_date, periods=sessions + 1)[-1].date()
+    return any(decision_date <= datetime.date.fromisoformat(d) <= horizon for d in dates)
+
+
 def evaluate_entries(
     state: PortfolioState,
     rankings: RankingsResult,
     config: VenueConfig,
     decision_ts: pd.Timestamp,
     portfolio_value: float,
+    earnings: Mapping[str, tuple[str, ...]] | None = None,
 ) -> tuple[list[PendingOrder], list[Skip]]:
     p = config.portfolio
     if state.breaker_tripped:
@@ -60,6 +71,11 @@ def evaluate_entries(
         cooldown = state.cooldowns.get(symbol)
         if cooldown is not None and decision_date < datetime.date.fromisoformat(cooldown):
             skips.append(Skip(symbol, "entry", "cooldown"))
+            continue
+        if earnings is not None and _within_earnings_blackout(
+            earnings.get(symbol, ()), decision_date, p.earnings_blackout_sessions
+        ):
+            skips.append(Skip(symbol, "entry", "earnings_blackout"))
             continue
         df = rankings.bars.get(symbol)
         window = df[df.index <= decision_ts] if df is not None else None
