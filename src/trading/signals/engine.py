@@ -82,4 +82,9 @@ def compute_features(
 
 
 def rank(features: pd.DataFrame) -> pd.DataFrame:
-    return features.sort_values("composite", ascending=False, na_position="last")
+    # Sort the symbol index first, then stable-sort by composite so ties (common
+    # with percentile-derived composites) resolve alphabetically — deterministic
+    # ranking is required for reproducible backtests.
+    return features.sort_index().sort_values(
+        "composite", ascending=False, na_position="last", kind="mergesort"
+    )

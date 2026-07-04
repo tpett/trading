@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from trading.config import SignalConfig
 from trading.signals.engine import FEATURE_COLUMNS, OUTPUT_COLUMNS, compute_features, rank
@@ -80,6 +81,15 @@ def test_compute_features_ranks_momentum_cross_sectionally():
     assert out.loc["UP", "raw_return_30d"] > 0 > out.loc["DOWN", "raw_return_30d"]
     feats = out[FEATURE_COLUMNS]
     assert ((feats >= 0) & (feats <= 1)).all().all()
+    # Pin the equal-weight blend and overextension inversion by exact value.
+    # UP leads on every feature: percentiles all 1.0, so
+    # composite = (1 + 1 + 1 + 1 + 1 + (1 - 1)) / 6 = 5/6.
+    assert (out.loc["UP", FEATURE_COLUMNS] == 1.0).all()
+    assert out.loc["UP", "composite"] == pytest.approx(5 / 6)
+    # DOWN trails on every feature: percentiles all 1/3, so
+    # composite = (5 * (1/3) + (1 - 1/3)) / 6 = 7/18.
+    assert (out.loc["DOWN", FEATURE_COLUMNS] == 1 / 3).all()
+    assert out.loc["DOWN", "composite"] == pytest.approx(7 / 18)
 
 
 def test_symbol_with_short_history_is_dropped():
@@ -119,3 +129,13 @@ def test_rank_sorts_by_composite_desc_nans_last():
         {"composite": [0.2, 0.9, float("nan"), 0.5]}, index=["A", "B", "C", "D"]
     )
     assert list(rank(features).index) == ["B", "D", "A", "C"]
+
+
+def test_rank_breaks_composite_ties_by_symbol():
+    """Ties resolve symbol-alphabetically so ranking is deterministic across runs."""
+    features = pd.DataFrame(
+        {"composite": [0.5, 0.9, 0.5, float("nan")]}, index=["Z", "B", "A", "C"]
+    )
+    expected = ["B", "A", "Z", "C"]
+    assert list(rank(features).index) == expected
+    assert list(rank(features).index) == expected  # repeatable
