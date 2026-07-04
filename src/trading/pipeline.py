@@ -44,6 +44,8 @@ class RankingsResult:
     quarantined: tuple[str, ...]
     fetch_failures: tuple[str, ...]
     insufficient_history: tuple[str, ...]
+    bars: dict[str, pd.DataFrame]  # clean (quarantine-passed) universe bars, for the M2 simulator
+    benchmark_bars: pd.DataFrame
 
 
 def build_rankings(
@@ -125,4 +127,6 @@ def build_rankings(
         quarantined=quarantined,
         fetch_failures=tuple(sorted(failures)),
         insufficient_history=insufficient,
+        bars=clean,
+        benchmark_bars=benchmark,
     )

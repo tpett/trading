@@ -199,3 +199,20 @@ def test_drop_incomplete_last_bar_flag_changes_rankings(tmp_path):
     without_drop = build_rankings(_with_drop(False), adapter_b, cache_b, AS_OF)
 
     assert not with_drop.table["composite"].equals(without_drop.table["composite"])
+
+
+def test_result_exposes_clean_bars_and_benchmark_bars(tmp_path):
+    adapter, cache, frames = _make(tmp_path)
+    result = build_rankings(CONFIG, adapter, cache, AS_OF)
+    assert set(result.bars) == {f"S{i}" for i in range(10)}
+    pd.testing.assert_frame_equal(result.bars["S1"], frames["S1"])
+    pd.testing.assert_frame_equal(result.benchmark_bars, frames["SPY"])
+
+
+def test_quarantined_symbol_is_excluded_from_bars(tmp_path):
+    adapter, cache, frames = _make(tmp_path)
+    spike_at = frames["S5"].index[-5]
+    prior_at = frames["S5"].index[-6]
+    frames["S5"].loc[spike_at, "close"] = frames["S5"]["close"].loc[prior_at] * 1.7
+    result = build_rankings(CONFIG, adapter, cache, AS_OF)
+    assert "S5" not in result.bars
