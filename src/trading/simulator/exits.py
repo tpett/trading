@@ -1,8 +1,9 @@
 """Exit rules (spec: Portfolio Simulator — exits checked before entries).
 
 Evaluated against the UNFILTERED ranking: held names always remain rankable
-(except insufficient-history names, whose composite is NaN — their stop and
-time-stop still evaluate; only trend-break is skipped with a warning), so
+(names whose composite is NaN due to degenerate signal inputs (e.g. zero
+volatility or volume) are held but unranked — distinct from
+insufficient_history, which excludes symbols from the table entirely), so
 entry-filter mechanics can never manufacture a spurious exit. Quarantined or
 fetch-failed held symbols are never traded this run (bad data), only warned
 about. Exits emit pending sell orders that fill next run.
@@ -38,7 +39,7 @@ def evaluate_exits(
     warnings: list[str] = []
     pending_sells = {o.symbol for o in state.pending_orders if o.side == "sell"}
     # Trend-break "top half" is judged among genuinely ranked names only:
-    # NaN-composite rows (insufficient history) must not pad the denominator.
+    # NaN-composite rows (degenerate signal inputs) must not pad the denominator.
     ranked = list(rankings.table.index[rankings.table["composite"].notna()])
 
     for symbol, position in sorted(state.positions.items()):
