@@ -307,3 +307,95 @@ def test_digest_command_prints_latest_and_specific(tmp_path, monkeypatch, capsys
     assert "equities" in capsys.readouterr().out
 
     assert main(["digest", "--date", "1999-01-01", *digest_args]) == 1
+
+
+# --- trading status / reset-breaker (Task 12) ---
+
+
+def _store_args(tmp_path):
+    return ["--state-dir", str(tmp_path / "state"), "--journal-dir", str(tmp_path / "journal")]
+
+
+def test_status_reports_both_venues(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+    _freeze_now(monkeypatch, "2026-07-02T01:30:00+00:00")  # 3h after the run
+
+    assert main(["status", "--json", *_store_args(tmp_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_venue = {v["venue"]: v for v in payload["venues"]}
+    equities = by_venue["equities"]
+    assert equities["state"] == "ok"
+    assert equities["value"] == pytest.approx(1000.0)
+    assert equities["pnl_pct"] == pytest.approx(0.0)
+    assert "benchmark_pnl_pct" in equities
+    assert equities["breaker_tripped"] is False
+    assert equities["hours_since_last_success"] == pytest.approx(3.0)
+    assert by_venue["crypto"]["state"] == "not bootstrapped"
+
+
+def test_status_flags_corrupt_state(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    (tmp_path / "state" / "equities" / "portfolio.json").write_text("garbage")
+    capsys.readouterr()
+    assert main(["status", "--json", *_store_args(tmp_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_venue = {v["venue"]: v for v in payload["venues"]}
+    assert by_venue["equities"]["state"] == "corrupt"
+
+
+def test_status_human_output_renders(tmp_path, monkeypatch, capsys):
+    _freeze_now(monkeypatch, "2026-07-02T01:30:00+00:00")
+    assert main(["status", *_store_args(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "equities" in out and "crypto" in out
+
+
+def test_reset_breaker_requires_typed_confirmation(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+
+    from trading.runner import load_state, save_state, state_path
+
+    path = state_path(tmp_path / "state", "equities")
+    state = load_state(path)
+    state.breaker_tripped = True
+    state.breaker_tripped_at = "2026-07-01T00:00:00+00:00"
+    state.high_water_mark = 5000.0
+    save_state(path, state)
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "nope")
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
+    assert load_state(path).breaker_tripped is True
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESET")
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 0
+    restored = load_state(path)
+    assert restored.breaker_tripped is False
+    assert restored.breaker_tripped_at is None
+    # HWM rebased to the last journaled snapshot value, not the stale 5000.
+    assert restored.high_water_mark == pytest.approx(1000.0)
+
+    from trading.journal import Journal
+
+    events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
+    assert events[-1]["event"] == "breaker_reset"
+
+
+def test_reset_breaker_when_not_tripped_is_a_noop(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 0
+    assert "not tripped" in capsys.readouterr().out
+
+
+def test_reset_breaker_without_state_errors(tmp_path, capsys):
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1

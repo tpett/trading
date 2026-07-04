@@ -18,9 +18,18 @@ import pandas as pd
 
 from trading.config import VENUES, load_venue_config
 from trading.data.cache import OhlcvCache
+from trading.journal import Journal
 from trading.notify import notify
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
-from trading.runner import RunnerError, restore_from_journal, run_venue
+from trading.runner import (
+    RunnerError,
+    load_state,
+    restore_from_journal,
+    run_venue,
+    save_state,
+    state_path,
+)
+from trading.simulator.state import StateError
 from trading.venues import make_adapter
 
 
@@ -69,6 +78,16 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--json", action="store_true", help="machine-readable output")
     digest.add_argument("--digest-dir", default="digest", help="daily digest directory")
 
+    status = sub.add_parser("status", help="portfolios, P&L vs benchmark, last-run health")
+    status.add_argument("--json", action="store_true", help="machine-readable output")
+    status.add_argument("--state-dir", default="state", help="portfolio state root")
+    status.add_argument("--journal-dir", default="journal", help="journal root")
+
+    breaker = sub.add_parser("reset-breaker", help="manually reset the circuit breaker (confirms)")
+    breaker.add_argument("--venue", choices=VENUES, required=True)
+    breaker.add_argument("--state-dir", default="state", help="portfolio state root")
+    breaker.add_argument("--journal-dir", default="journal", help="journal root")
+
     return parser
 
 
@@ -78,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
         "rankings": _cmd_rankings,
         "run": _cmd_run,
         "digest": _cmd_digest,
+        "status": _cmd_status,
+        "reset-breaker": _cmd_reset_breaker,
     }
     return handlers[args.command](args)
 
@@ -227,4 +248,92 @@ def _cmd_digest(args: argparse.Namespace) -> int:
         print(json.dumps({"date": path.stem, "markdown": path.read_text()}))
     else:
         print(path.read_text())
+    return 0
+
+
+def _venue_status(venue: str, state_dir: Path, journal_dir: Path, now: datetime.datetime) -> dict:
+    info: dict[str, object] = {"venue": venue, "state": "ok"}
+    try:
+        state = load_state(state_path(state_dir, venue))
+    except StateError:
+        return {"venue": venue, "state": "corrupt"}
+    if state is None:
+        return {"venue": venue, "state": "not bootstrapped"}
+    info["breaker_tripped"] = state.breaker_tripped
+    info["positions"] = len(state.positions)
+
+    journal = Journal(journal_dir / f"{venue}.jsonl")
+    last_run = journal.last_event(types=frozenset({"run"}))
+    if last_run is not None:
+        snapshot = last_run["snapshot"]
+        start = float(last_run["starting_balance"])
+        bench = last_run["benchmark"]
+        info["value"] = float(snapshot["value"])
+        info["pnl_pct"] = float(snapshot["value"]) / start - 1.0
+        info["benchmark_pnl_pct"] = float(bench["close"]) / float(bench["start_price"]) - 1.0
+    last_ok = journal.last_event(types=frozenset({"run", "bootstrap"}))
+    if last_ok is not None:
+        last_ts = datetime.datetime.fromisoformat(last_ok["ts"])
+        info["hours_since_last_success"] = (now - last_ts).total_seconds() / 3600
+    return info
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    now = _utcnow()
+    venues = [_venue_status(v, Path(args.state_dir), Path(args.journal_dir), now) for v in VENUES]
+    if args.json:
+        print(json.dumps({"as_of": now.isoformat(), "venues": venues}))
+        return 0
+
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title=f"trading status — {now.isoformat(timespec='seconds')}")
+    for col in ["venue", "state", "value", "P&L", "benchmark", "positions", "breaker", "last run"]:
+        table.add_column(col)
+    for v in venues:
+        table.add_row(
+            str(v["venue"]),
+            str(v["state"]),
+            f"${v['value']:,.2f}" if "value" in v else "-",
+            f"{v['pnl_pct']:+.2%}" if "pnl_pct" in v else "-",
+            f"{v['benchmark_pnl_pct']:+.2%}" if "benchmark_pnl_pct" in v else "-",
+            str(v.get("positions", "-")),
+            "TRIPPED" if v.get("breaker_tripped") else "armed",
+            f"{v['hours_since_last_success']:.1f}h ago"
+            if "hours_since_last_success" in v
+            else "never",
+        )
+    Console().print(table)
+    return 0
+
+
+def _cmd_reset_breaker(args: argparse.Namespace) -> int:
+    path = state_path(Path(args.state_dir), args.venue)
+    try:
+        state = load_state(path)
+    except StateError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if state is None:
+        print(f"no state for {args.venue}; nothing to reset", file=sys.stderr)
+        return 1
+    if not state.breaker_tripped:
+        print(f"{args.venue}: breaker is not tripped")
+        return 0
+    print(f"Circuit breaker for {args.venue} tripped at {state.breaker_tripped_at}.")
+    if input("Type RESET to re-enable entries: ").strip() != "RESET":
+        print("aborted")
+        return 1
+    journal = Journal(Path(args.journal_dir) / f"{args.venue}.jsonl")
+    last_run = journal.last_event(types=frozenset({"run"}))
+    if last_run is not None:
+        # Rebase the high-water mark to the last marked value; otherwise the
+        # unchanged HWM re-trips the breaker on the very next run.
+        state.high_water_mark = float(last_run["snapshot"]["value"])
+    state.breaker_tripped = False
+    state.breaker_tripped_at = None
+    save_state(path, state)
+    journal.append({"event": "breaker_reset", "venue": args.venue, "ts": _utcnow().isoformat()})
+    print(f"{args.venue}: breaker reset; entries re-enabled")
     return 0
