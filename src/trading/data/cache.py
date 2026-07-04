@@ -42,16 +42,29 @@ class OhlcvCache:
         end_ts = pd.Timestamp(end, tz="UTC")
         cutoff = end - datetime.timedelta(days=self._refetch_days)
 
+        cached: pd.DataFrame | None = None
         keep: pd.DataFrame | None = None
         fetch_start = start
         if path.exists():
             cached = pd.read_parquet(path)
             if not cached.empty and cached.index.min() <= start_ts + _START_TOLERANCE:
                 keep = cached[cached.index < pd.Timestamp(cutoff, tz="UTC")]
-                fetch_start = max(cutoff, start)
+                # Always refetch from the cutoff (not max(cutoff, start)):
+                # a narrower request must never drop cached rows in
+                # [cutoff, start) from the persisted file.
+                fetch_start = cutoff
 
         fresh = fetch_fn(symbol, fetch_start, end)
-        merged = fresh if keep is None or keep.empty else pd.concat([keep, fresh])
+        parts = [fresh] if keep is None or keep.empty else [keep, fresh]
+        if keep is not None and cached is not None:
+            # Preserve cached rows beyond the fetched range so a request with
+            # an earlier `end` never truncates the tail of the cache file.
+            tail = cached[cached.index > fresh.index.max()]
+            if not tail.empty:
+                parts.append(tail)
+        merged = parts[0] if len(parts) == 1 else pd.concat(parts)
+        # Dedup is a safety net for adapters that over-fetch beyond the
+        # requested bounds; keep/fresh/tail are disjoint by construction.
         merged = merged[~merged.index.duplicated(keep="last")].sort_index()
 
         tmp = path.with_suffix(".parquet.tmp")

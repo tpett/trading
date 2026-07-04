@@ -70,6 +70,34 @@ def test_cache_missing_early_history_triggers_full_refetch(tmp_path):
     assert second.calls == [("AAPL", START, END)]
 
 
+def test_narrow_request_does_not_truncate_cache_file(tmp_path):
+    cache = OhlcvCache(tmp_path / "cache", refetch_days=30)
+    cache.fetch("AAPL", START, END, RecordingFetcher(1.0))
+
+    # Narrow request: start after the cutoff, end before the cached max.
+    narrow_start = datetime.date(2026, 2, 5)
+    narrow_end = datetime.date(2026, 2, 20)
+    df = cache.fetch("AAPL", narrow_start, narrow_end, RecordingFetcher(2.0))
+
+    # Returned frame is the narrow slice.
+    assert df.index.min() == pd.Timestamp(narrow_start, tz="UTC")
+    assert df.index.max() == pd.Timestamp(narrow_end, tz="UTC")
+
+    # On-disk file still spans the full original range.
+    on_disk = pd.read_parquet(cache.path_for("AAPL"))
+    assert on_disk.index.min() == pd.Timestamp(START, tz="UTC")
+    assert on_disk.index.max() == pd.Timestamp(END, tz="UTC")
+    # Rows before the cutoff (2026-01-21) still come from the original cache.
+    assert on_disk.loc[pd.Timestamp("2026-01-15", tz="UTC"), "close"] == 1.0
+    # Rows in [cutoff, narrow_start) were refetched, not deleted.
+    assert on_disk.loc[pd.Timestamp("2026-01-25", tz="UTC"), "close"] == 2.0
+    # Rows in the refetch window carry the fresh values.
+    assert on_disk.loc[pd.Timestamp("2026-02-10", tz="UTC"), "close"] == 2.0
+    # Rows after the narrow end are preserved.
+    assert on_disk.loc[pd.Timestamp("2026-02-25", tz="UTC"), "close"] == 1.0
+    assert not on_disk.index.duplicated().any()
+
+
 def test_path_for_sanitizes_pair_symbols(tmp_path):
     cache = OhlcvCache(tmp_path / "cache", refetch_days=30)
     assert cache.path_for("BTC/USD").name == "BTC-USD.parquet"
