@@ -20,6 +20,7 @@ import pandas as pd
 
 from trading.config import VenueConfig
 from trading.data.cache import OhlcvCache
+from trading.digest import collect_run_events, write_digest
 from trading.earnings import fetch_earnings_dates
 from trading.journal import Journal, JournalError, config_hash
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
@@ -204,6 +205,7 @@ def run_venue(
     state_root: Path,
     journal_root: Path,
     notify: Notifier,
+    digest_root: Path | None = None,
 ) -> RunOutcome:
     venue = config.name
     journal = Journal(journal_root / f"{venue}.jsonl")
@@ -318,6 +320,13 @@ def run_venue(
             notify("trading: journal write failed", f"{venue}: {exc}")
             return RunOutcome(
                 venue, "failed", f"journal append failed ({exc}); state untouched", run_key
+            )
+        if digest_root is not None:
+            date_iso = now.date().isoformat()
+            write_digest(
+                digest_root,
+                date_iso,
+                collect_run_events(journal_root, ["equities", "crypto"], date_iso),
             )
         try:
             save_state(state_path(state_root, venue), result.state)

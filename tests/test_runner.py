@@ -79,6 +79,7 @@ def _run(tmp_path, now=NOW, fail=frozenset(), notes=None):
         state_root=tmp_path / "state",
         journal_root=tmp_path / "journal",
         notify=lambda title, message: notes.append((title, message)),
+        digest_root=tmp_path / "digest",
     )
     return outcome, notes
 
@@ -384,3 +385,12 @@ def test_orphaned_reclaim_files_from_dead_processes_are_swept(tmp_path):
     assert RunLock(tmp_path / ".lock").acquire() is True
     assert not orphan.exists()  # dead-pid orphan swept on acquire
     assert live.exists()  # live process's reclaim left alone
+
+
+def test_run_writes_daily_digest(tmp_path):
+    _run(tmp_path)
+    digest_file = tmp_path / "digest" / "2026-07-01.md"
+    assert digest_file.exists()
+    text = digest_file.read_text()
+    assert "## equities" in text
+    assert "Top 5 ranking" in text

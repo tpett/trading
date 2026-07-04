@@ -35,6 +35,7 @@ def _add_store_dirs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config-dir", default="config", help="directory with <venue>.toml")
     parser.add_argument("--state-dir", default="state", help="portfolio state root")
     parser.add_argument("--journal-dir", default="journal", help="journal root")
+    parser.add_argument("--digest-dir", default="digest", help="daily digest directory")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="rebuild state/<venue>/portfolio.json from the last journal snapshot (confirms)",
     )
     _add_store_dirs(run)
+
+    digest = sub.add_parser("digest", help="print a daily digest (default: latest)")
+    digest.add_argument("--date", default=None, help="digest date, YYYY-MM-DD")
+    digest.add_argument("--json", action="store_true", help="machine-readable output")
+    digest.add_argument("--digest-dir", default="digest", help="daily digest directory")
+
     return parser
 
 
@@ -72,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "rankings": _cmd_rankings,
         "run": _cmd_run,
+        "digest": _cmd_digest,
     }
     return handlers[args.command](args)
 
@@ -120,6 +128,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             state_root=state_root,
             journal_root=journal_root,
             notify=notify,
+            digest_root=Path(args.digest_dir),
         )
     except Exception as exc:  # a silent dead pipeline is the worst failure (spec)
         notify("trading: run crashed", f"{args.venue}: {exc}")
@@ -204,3 +213,20 @@ def _render(result: RankingsResult, top: int) -> None:
         console.print(
             f"[yellow]insufficient history:[/yellow] {', '.join(result.insufficient_history)}"
         )
+
+
+def _cmd_digest(args: argparse.Namespace) -> int:
+    digest_dir = Path(args.digest_dir)
+    if args.date:
+        path = digest_dir / f"{args.date}.md"
+    else:
+        candidates = sorted(digest_dir.glob("*.md"))
+        path = candidates[-1] if candidates else None
+    if path is None or not path.exists():
+        print("no digest found", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"date": path.stem, "markdown": path.read_text()}))
+    else:
+        print(path.read_text())
+    return 0

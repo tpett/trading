@@ -207,6 +207,8 @@ def _run_args(tmp_path, cfg_dir, extra=()):
         str(tmp_path / "state"),
         "--journal-dir",
         str(tmp_path / "journal"),
+        "--digest-dir",
+        str(tmp_path / "digest"),
         *extra,
     ]
 
@@ -289,3 +291,19 @@ def test_run_restore_with_corrupt_journal_fails_cleanly(tmp_path, monkeypatch, c
     assert main(_run_args(tmp_path, cfg_dir, extra=["--restore-from-journal"])) == 1
     assert "ERROR" in capsys.readouterr().err  # clean message, no traceback
     assert state_file.read_text() == "garbage"  # state untouched
+
+
+def test_digest_command_prints_latest_and_specific(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    digest_args = ["--digest-dir", str(tmp_path / "digest")]
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+
+    assert main(["digest", *digest_args]) == 0
+    assert "Trading digest — 2026-07-01" in capsys.readouterr().out
+
+    assert main(["digest", "--date", "2026-07-01", *digest_args]) == 0
+    assert "equities" in capsys.readouterr().out
+
+    assert main(["digest", "--date", "1999-01-01", *digest_args]) == 1
