@@ -51,6 +51,34 @@ def test_torn_final_line_is_skipped(tmp_path):
     assert [e["n"] for e in journal.events()] == [1]
 
 
+def test_append_after_torn_final_line_preserves_new_event(tmp_path):
+    journal = _journal(tmp_path)
+    journal.append({"event": "run", "n": 1})
+    with (tmp_path / "journal" / "equities.jsonl").open("a") as f:
+        f.write('{"event": "run", "n"')  # crash mid-append
+    journal.append({"event": "run", "n": 2})
+    assert [e["n"] for e in journal.events()] == [1, 2]
+
+
+def test_append_after_torn_final_line_has_run_sees_new_key(tmp_path):
+    journal = _journal(tmp_path)
+    journal.append({"event": "run", "run_key": "equities:2026-07-01T00:00:00+00:00"})
+    with (tmp_path / "journal" / "equities.jsonl").open("a") as f:
+        f.write('{"event": "run", "run_key": "equities:2026-07-02T00:00')  # torn
+    journal.append({"event": "run", "run_key": "equities:2026-07-03T00:00:00+00:00"})
+    assert journal.has_run("equities:2026-07-03T00:00:00+00:00") is True
+    # The torn record was never durable; it must not count as run.
+    assert journal.has_run("equities:2026-07-02T00:00:00+00:00") is False
+
+
+def test_append_to_empty_file_works(tmp_path):
+    path = tmp_path / "journal" / "equities.jsonl"
+    journal = Journal(path)
+    path.touch()
+    journal.append({"event": "run", "n": 1})
+    assert [e["n"] for e in journal.events()] == [1]
+
+
 def test_corruption_mid_file_raises(tmp_path):
     path = tmp_path / "journal" / "equities.jsonl"
     journal = Journal(path)
