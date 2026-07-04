@@ -1,0 +1,56 @@
+[venue]
+name = "equities"
+benchmark = "SPY"
+
+[costs]
+taker_fee_bps = 0.0      # zero commission (spec)
+maker_fee_bps = 0.0
+slippage_bps = 5.0       # spec: 5 bps slippage assumption
+settlement_days = 1      # T+1 cash account (spec)
+trades_24_7 = false
+
+[universe]
+min_dollar_volume = 20000000.0  # entry-filter floor (M2 applies it; spec: config)
+
+[signals]
+momentum_windows = [5, 20, 60]  # trading days (spec)
+calendar_days = false           # lookbacks in trading-day rows
+vol_window = 20                 # realized-vol window for vol adjustment
+volume_week = 5                 # "current week" = 5 trading days
+volume_baseline = 63            # trailing 3 months = 63 trading days
+breakout_windows = [20, 60]     # spec: distance from 20/60-day highs
+rsi_window = 14                 # spec: RSI-14 stretch
+mean_window = 20                # spec: distance above 20-day mean
+raw_return_days = 30            # raw 30-day return (calendar), feeds M2 crypto fee gate
+
+[regime]
+sma_fast = 50
+sma_slow = 200
+vol_window = 20
+vol_lookback = 252
+vol_high_percentile = 0.80
+exposure_risk_on = 1.0
+exposure_neutral = 0.5
+exposure_risk_off = 0.0
+
+[portfolio]  # consumed by the M2 simulator; shaped now so M2 does not restructure config
+max_positions = 5
+position_size_pct = 0.18
+starting_balance = 1000.0
+time_stop_bars = 20                 # 20 sessions (spec)
+stop_atr_multiple = 1.5
+regime_flush_atr_multiple = 1.0
+cooldown_days = 7
+max_daily_deployment_pct = 0.25
+drawdown_halt_pct = 0.20
+entry_score_threshold = 0.70        # tunable hyperparameter #1 (spec)
+min_raw_return_cost_multiple = 0.0  # fee gate off for equities
+earnings_blackout_sessions = 5
+staleness_hours = 2
+
+[data]
+cache_dir = "data/equities"
+refetch_days = 30       # trailing window always re-fetched (adjusted history rewrites)
+min_coverage = 0.90     # below this, abort the run (spec)
+max_daily_move = 0.40   # sanity quarantine bound (spec default)
+history_days = 500      # calendar days fetched; covers 200-day SMA + 252-obs vol percentile

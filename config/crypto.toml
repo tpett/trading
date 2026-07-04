@@ -1,0 +1,56 @@
+[venue]
+name = "crypto"
+benchmark = "BTC"  # fetched through the crypto adapter as BTC/USD on Kraken
+
+[costs]
+taker_fee_bps = 95.0   # 0.95% taker at <$10K 30-day volume (spec, June 2026 schedule)
+maker_fee_bps = 50.0   # 0.50% maker
+slippage_bps = 5.0
+settlement_days = 0
+trades_24_7 = true
+
+[universe]
+min_dollar_volume = 0.0  # no dollar-volume floor for crypto in v1
+
+[signals]
+momentum_windows = [7, 30, 90]  # calendar days (spec)
+calendar_days = true
+vol_window = 20
+volume_week = 7                 # "current week" = 7 calendar days
+volume_baseline = 90            # trailing 3 months = 90 calendar days
+breakout_windows = [20, 60]
+rsi_window = 14
+mean_window = 20
+raw_return_days = 30
+
+[regime]
+sma_fast = 50
+sma_slow = 200
+vol_window = 20
+vol_lookback = 252
+vol_high_percentile = 0.80
+exposure_risk_on = 1.0
+exposure_neutral = 0.5
+exposure_risk_off = 0.0
+
+[portfolio]  # consumed by the M2 simulator
+max_positions = 3
+position_size_pct = 0.30
+starting_balance = 1000.0
+time_stop_bars = 30                 # 30 calendar days = 30 daily bars (24/7 venue)
+stop_atr_multiple = 1.5
+regime_flush_atr_multiple = 1.0
+cooldown_days = 7
+max_daily_deployment_pct = 0.25
+drawdown_halt_pct = 0.20
+entry_score_threshold = 0.70
+min_raw_return_cost_multiple = 3.0  # raw 30d return must exceed 3x round-trip cost (spec)
+earnings_blackout_sessions = 0      # no earnings in crypto
+staleness_hours = 6
+
+[data]
+cache_dir = "data/crypto"
+refetch_days = 30
+min_coverage = 0.90
+max_daily_move = 0.40
+history_days = 500
