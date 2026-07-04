@@ -55,13 +55,23 @@ class OhlcvCache:
                 fetch_start = cutoff
 
         fresh = fetch_fn(symbol, fetch_start, end)
-        parts = [fresh] if keep is None or keep.empty else [keep, fresh]
-        if keep is not None and cached is not None:
-            # Preserve cached rows beyond the fetched range so a request with
-            # an earlier `end` never truncates the tail of the cache file.
-            tail = cached[cached.index > fresh.index.max()]
+        if fresh.empty and cached is not None:
+            # A data-source gap must never shrink the file: leave the cached
+            # frame untouched and serve the requested slice from it.
+            return cached.loc[start_ts:end_ts]
+
+        parts: list[pd.DataFrame] = []
+        if keep is not None and not keep.empty:
+            parts.append(keep)
+        if cached is not None:
+            # Preserve cached rows after the requested end so a narrower
+            # request (warm or full-refetch) never truncates the tail of the
+            # cache file. Bounded by end_ts, not fresh.index.max(), which
+            # would be NaT for an empty fresh frame.
+            tail = cached[cached.index > end_ts]
             if not tail.empty:
                 parts.append(tail)
+        parts.append(fresh)  # last: fresh values win any dedup overlap
         merged = parts[0] if len(parts) == 1 else pd.concat(parts)
         # Dedup is a safety net for adapters that over-fetch beyond the
         # requested bounds; keep/fresh/tail are disjoint by construction.
