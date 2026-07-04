@@ -104,6 +104,25 @@ def test_trend_break_requires_bottom_half_rank_and_close_below_mean():
     assert [(o.symbol, o.reason) for o in orders] == [("AAA", "trend_break")]
 
 
+def test_trend_break_denominator_ignores_nan_composite_rows():
+    # 4 valid + 2 NaN-composite rows. AAA is rank 3 of 4 valid (bottom half);
+    # NaN padding to 6 would wrongly call it top half (3 > 3 is false).
+    down = frame(drift=-0.01, start_price=200.0)
+    bars = {s: frame() for s in ("BBB", "CCC", "DDD", "EEE", "FFF")}
+    bars["AAA"] = down
+    rows = {
+        "BBB": _row(composite=0.9),
+        "CCC": _row(composite=0.8),
+        "AAA": _row(composite=0.2),  # rank 3 of 4 valid: bottom half
+        "DDD": _row(composite=0.1),
+        "EEE": _row(composite=float("nan")),  # insufficient history
+        "FFF": _row(composite=float("nan")),
+    }
+    state = make_state(EQ, positions={"AAA": _position("AAA", stop=1.0)})  # stop can't fire
+    orders, _, _ = evaluate_exits(state, _rankings(bars, rows), EQ, DECISION)
+    assert [(o.symbol, o.reason) for o in orders] == [("AAA", "trend_break")]
+
+
 def test_no_trend_break_when_bottom_half_but_above_mean():
     up = frame(drift=0.01)  # rising: close above its 20-day mean
     bars = {"AAA": up, "BBB": frame(), "CCC": frame(), "DDD": frame()}

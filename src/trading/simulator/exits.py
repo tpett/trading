@@ -1,9 +1,11 @@
 """Exit rules (spec: Portfolio Simulator — exits checked before entries).
 
-Evaluated against the UNFILTERED ranking: held names always remain rankable,
-so entry-filter mechanics can never manufacture a spurious exit. Quarantined
-or fetch-failed held symbols are never traded this run (bad data), only
-warned about. Exits emit pending sell orders that fill next run.
+Evaluated against the UNFILTERED ranking: held names always remain rankable
+(except insufficient-history names, whose composite is NaN — their stop and
+time-stop still evaluate; only trend-break is skipped with a warning), so
+entry-filter mechanics can never manufacture a spurious exit. Quarantined or
+fetch-failed held symbols are never traded this run (bad data), only warned
+about. Exits emit pending sell orders that fill next run.
 """
 
 from __future__ import annotations
@@ -35,7 +37,9 @@ def evaluate_exits(
     skips: list[Skip] = []
     warnings: list[str] = []
     pending_sells = {o.symbol for o in state.pending_orders if o.side == "sell"}
-    ranked = list(rankings.table.index)
+    # Trend-break "top half" is judged among genuinely ranked names only:
+    # NaN-composite rows (insufficient history) must not pad the denominator.
+    ranked = list(rankings.table.index[rankings.table["composite"].notna()])
 
     for symbol, position in sorted(state.positions.items()):
         if symbol in pending_sells:
@@ -80,7 +84,7 @@ def evaluate_exits(
             orders.append(_sell(symbol, decision_ts, "stop_loss"))
             continue
 
-        if in_table:
+        if symbol in ranked:
             rank_pos = ranked.index(symbol) + 1
             mean = float(window["close"].iloc[-config.signals.mean_window :].mean())
             if rank_pos > len(ranked) / 2 and last_close < mean:
