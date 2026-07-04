@@ -50,7 +50,7 @@ def test_universe_rejects_unknown_status(tmp_path):
 def test_committed_universe_csv_is_valid():
     adapter = CryptoAdapter(CONFIG, universe_csv=DEFAULT_UNIVERSE_CSV)
     infos = adapter.universe(datetime.date(2026, 7, 1))
-    assert len(infos) >= 40
+    assert len(infos) >= 80
     assert SymbolInfo("BTC", "tradable") in infos
 
 
@@ -99,3 +99,36 @@ def test_fetch_ohlcv_empty_raises(monkeypatch):
     adapter = CryptoAdapter(CONFIG)
     with pytest.raises(DataFetchError):
         adapter.fetch_ohlcv("BTC", datetime.date(2026, 6, 22), datetime.date(2026, 7, 1))
+
+
+def test_fetch_ohlcv_paginates_over_page_limit(monkeypatch):
+    """Ranges longer than one Kraken page are stitched from multiple fetches."""
+    all_rows = _kraken_rows(10, datetime.date(2026, 7, 1))
+    day_ms = 86_400_000
+    calls: list[int] = []
+
+    def fake_fetch(pair: str, since_ms: int) -> list[list[float]]:
+        calls.append(since_ms)
+        # 4-row pages, overlapping one day back like a real exchange might.
+        return [r for r in all_rows if r[0] >= since_ms - day_ms][:4]
+
+    monkeypatch.setattr("trading.venues.crypto._kraken_fetch", fake_fetch)
+    adapter = CryptoAdapter(CONFIG)
+    df = adapter.fetch_ohlcv("BTC", datetime.date(2026, 6, 22), datetime.date(2026, 7, 1))
+    assert len(calls) > 1  # actually paginated
+    assert len(df) == 10  # full range covered
+    assert not df.index.duplicated().any()  # page overlap deduplicated
+    assert df.index.min() == pd.Timestamp("2026-06-22", tz="UTC")
+    assert df.index.max() == pd.Timestamp("2026-07-01", tz="UTC")
+
+
+def test_fetch_ohlcv_wraps_ccxt_errors_as_data_fetch_error(monkeypatch):
+    import ccxt
+
+    def fake_fetch(pair: str, since_ms: int) -> list[list[float]]:
+        raise ccxt.BadSymbol(f"kraken does not have market symbol {pair}")
+
+    monkeypatch.setattr("trading.venues.crypto._kraken_fetch", fake_fetch)
+    adapter = CryptoAdapter(CONFIG)
+    with pytest.raises(DataFetchError, match="NOPE/USD"):
+        adapter.fetch_ohlcv("NOPE", datetime.date(2026, 6, 22), datetime.date(2026, 7, 1))
