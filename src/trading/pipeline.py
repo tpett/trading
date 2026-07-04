@@ -24,6 +24,16 @@ class PipelineDataError(RuntimeError):
     """Fresh data could not be assembled; the run must not proceed (spec)."""
 
 
+def _drop_incomplete_last_bar(df: pd.DataFrame, as_of: datetime.date) -> pd.DataFrame:
+    """Drop bars dated as_of or later: they may still be in progress (Kraken's
+    current UTC day, a partial yfinance intraday print). Decisions use data
+    through the last COMPLETED bar only (spec). Frames are assumed indexed by
+    a tz-aware UTC timestamp normalized to the bar's date.
+    """
+    cutoff = pd.Timestamp(as_of, tz="UTC")
+    return df[df.index < cutoff]
+
+
 @dataclass(frozen=True)
 class RankingsResult:
     venue: str
@@ -49,11 +59,15 @@ def build_rankings(
     failures: list[str] = []
     for info in infos:
         try:
-            bars[info.symbol] = cache.fetch(info.symbol, start, as_of, adapter.fetch_ohlcv)
+            frame = cache.fetch(info.symbol, start, as_of, adapter.fetch_ohlcv)
         except Exception:
             # Any per-symbol failure (network, missing pair, bad frame) is an
             # exclusion; the coverage gate below is the safety net.
             failures.append(info.symbol)
+            continue
+        if config.data.drop_incomplete_last_bar:
+            frame = _drop_incomplete_last_bar(frame, as_of)
+        bars[info.symbol] = frame
 
     coverage = check_coverage([i.symbol for i in infos], bars, config.data.min_coverage)
     if not coverage.ok:
@@ -70,6 +84,8 @@ def build_rankings(
         benchmark = cache.fetch(config.benchmark, start, as_of, adapter.fetch_ohlcv)
     except Exception as exc:
         raise PipelineDataError(f"benchmark {config.benchmark} fetch failed: {exc}") from exc
+    if config.data.drop_incomplete_last_bar:
+        benchmark = _drop_incomplete_last_bar(benchmark, as_of)
 
     as_of_ts = pd.Timestamp(as_of, tz="UTC")
     regime = compute_regime(benchmark, as_of_ts, config.regime)

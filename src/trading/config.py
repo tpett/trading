@@ -77,6 +77,7 @@ class DataConfig:
     max_daily_move: float
     history_days: int
     quarantine_window_days: int
+    drop_incomplete_last_bar: bool
 
 
 @dataclass(frozen=True)

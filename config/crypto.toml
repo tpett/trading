@@ -59,3 +59,8 @@ history_days = 500
 # is recent-data sanity (bad prints in the live-refetched tail), not
 # history-wide policing of moves that happened many months ago.
 quarantine_window_days = 40
+# Kraken serves the current UTC day's candle while it's still in progress.
+# A day-D candle only completes at D+1, so drop any bar dated as_of or
+# later before computing signals -- decisions use data through the last
+# completed bar only (spec).
+drop_incomplete_last_bar = true

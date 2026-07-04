@@ -1,3 +1,4 @@
+import dataclasses
 import datetime
 from pathlib import Path
 
@@ -138,3 +139,42 @@ def test_benchmark_failure_raises(tmp_path):
     adapter, cache, _ = _make(tmp_path, fail=frozenset({"SPY"}))
     with pytest.raises(PipelineDataError, match="benchmark"):
         build_rankings(CONFIG, adapter, cache, AS_OF)
+
+
+def _with_drop(enabled: bool):
+    return dataclasses.replace(
+        CONFIG, data=dataclasses.replace(CONFIG.data, drop_incomplete_last_bar=enabled)
+    )
+
+
+def test_drop_incomplete_last_bar_matches_manual_removal(tmp_path):
+    # Every frame here (from _bars/_make) ends exactly on AS_OF, so its last
+    # row is the as-of-dated (potentially still-forming) bar.
+    _, _, frames = _make(tmp_path)
+    infos = [SymbolInfo(s, "tradable") for s in frames if s != "SPY"]
+
+    stripped = {s: df.iloc[:-1] for s, df in frames.items()}
+    baseline_adapter = FakeAdapter(stripped, infos)
+    baseline_cache = OhlcvCache(tmp_path / "cache_baseline", CONFIG.data.refetch_days)
+    baseline = build_rankings(_with_drop(False), baseline_adapter, baseline_cache, AS_OF)
+
+    full_adapter = FakeAdapter(frames, infos)
+    full_cache = OhlcvCache(tmp_path / "cache_full", CONFIG.data.refetch_days)
+    with_drop = build_rankings(_with_drop(True), full_adapter, full_cache, AS_OF)
+
+    pd.testing.assert_frame_equal(with_drop.table, baseline.table)
+
+
+def test_drop_incomplete_last_bar_flag_changes_rankings(tmp_path):
+    _, _, frames = _make(tmp_path)
+    infos = [SymbolInfo(s, "tradable") for s in frames if s != "SPY"]
+
+    adapter_a = FakeAdapter(frames, infos)
+    cache_a = OhlcvCache(tmp_path / "cache_a", CONFIG.data.refetch_days)
+    with_drop = build_rankings(_with_drop(True), adapter_a, cache_a, AS_OF)
+
+    adapter_b = FakeAdapter(frames, infos)
+    cache_b = OhlcvCache(tmp_path / "cache_b", CONFIG.data.refetch_days)
+    without_drop = build_rankings(_with_drop(False), adapter_b, cache_b, AS_OF)
+
+    assert not with_drop.table["composite"].equals(without_drop.table["composite"])
