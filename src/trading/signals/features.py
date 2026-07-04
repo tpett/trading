@@ -14,7 +14,7 @@ import pandas as pd
 
 def _lookback_price(close: pd.Series, lookback: int, calendar_days: bool) -> float:
     if calendar_days:
-        target = close.index[-1] - pd.Timedelta(days=lookback)
+        target = close.index[-1] - pd.Timedelta(lookback, unit="D")
         if target < close.index[0]:
             return math.nan
         return float(close.asof(target))
@@ -80,10 +80,7 @@ def overextension(close: pd.Series, rsi_window: int, mean_window: int) -> float:
 
 def raw_return(close: pd.Series, days: int) -> float:
     """Un-normalized calendar-day return; feeds the M2 crypto fee-adjusted entry gate."""
-    target = close.index[-1] - pd.Timedelta(days=days)
-    if target < close.index[0]:
-        return math.nan
-    past = float(close.asof(target))
-    if not past > 0:
+    past = _lookback_price(close, days, calendar_days=True)
+    if math.isnan(past) or not past > 0:
         return math.nan
     return float(close.iloc[-1]) / past - 1.0

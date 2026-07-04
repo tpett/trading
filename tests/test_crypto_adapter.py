@@ -13,10 +13,10 @@ CONFIG = load_venue_config("crypto", Path("config"))
 
 def _kraken_rows(n: int, end: datetime.date) -> list[list[float]]:
     """Mimic ccxt fetch_ohlcv: [ms_timestamp, open, high, low, close, volume] rows."""
-    start_ts = pd.Timestamp(end, tz="UTC") - pd.Timedelta(days=n - 1)
+    start_ts = pd.Timestamp(end, tz="UTC") - pd.Timedelta(n - 1, unit="D")
     return [
         [
-            int((start_ts + pd.Timedelta(days=i)).timestamp() * 1000),
+            int((start_ts + pd.Timedelta(i, unit="D")).timestamp() * 1000),
             100.0 + i,
             101.0 + i,
             99.0 + i,

@@ -29,6 +29,13 @@ packages = ["src/trading"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    # Third-party noise we don't control; our own code must stay warning-clean.
+    "ignore::DeprecationWarning:ccxt.*",
+    "ignore::DeprecationWarning:yfinance.*",
+    "ignore::DeprecationWarning:websockets.*",
+]
 
 [tool.ruff]
 line-length = 100

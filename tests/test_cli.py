@@ -88,11 +88,11 @@ def _fake_kraken(pair: str, since_ms: int) -> list[list[float]]:
     rng = np.random.default_rng(sum(map(ord, pair)))
     n = 520
     end = pd.Timestamp(AS_OF, tz="UTC")
-    start = end - pd.Timedelta(days=n - 1)
+    start = end - pd.Timedelta(n - 1, unit="D")
     close = 100 * np.cumprod(1 + rng.normal(0.001, 0.02, n))
     rows = []
     for i in range(n):
-        ts = int((start + pd.Timedelta(days=i)).timestamp() * 1000)
+        ts = int((start + pd.Timedelta(i, unit="D")).timestamp() * 1000)
         c = float(close[i])
         rows.append([ts, c, c * 1.01, c * 0.99, c, float(rng.uniform(1e5, 1e6))])
     return rows
