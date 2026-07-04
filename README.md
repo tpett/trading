@@ -30,5 +30,44 @@ Exits 1 with a `WARNING` on stderr when fresh data cannot be assembled
   are re-fetched every run, so deleting `data/` is always safe.
 - `src/trading/venues/universes/*.csv` — committed universe snapshots.
 
-All timestamps are UTC. First equities run fetches ~580 symbols from
+All timestamps are UTC. First equities run fetches 517 symbols from
 yfinance and takes several minutes; later runs hit the Parquet cache.
+
+## Reading the output
+
+Each row's sub-scores are cross-sectional percentiles (0-1, higher = more
+favorable) computed within that run's ranked universe:
+
+- `mom_short` / `mom_med` / `mom_long` — volatility-adjusted momentum
+  percentile over the venue's short/med/long lookback windows.
+- `volume_surge` — current week's dollar volume vs its trailing 3-month
+  average, percentile.
+- `breakout` — closeness to the 20/60-day highs, percentile.
+- `overextension` — RSI-stretch guard; **lower is better**, and it enters
+  the composite inverted (`1 - percentile`).
+- `composite` — equal-weight average of the six scores above; this is what
+  the table is ranked on.
+- `raw_return_30d` — un-normalized 30-day return (not a percentile); used
+  downstream by the crypto fee gate in M2, not by the ranking itself.
+
+`status` (from the venue's listing) is one of:
+
+- `tradable` — normal entries and exits allowed.
+- `sell_only` — still ranked and shown, but M2 will not open new positions.
+- `untradable` — excluded from the venue universe entirely.
+
+The `regime` line shows the benchmark-driven gate: `risk_on` / `neutral` /
+`risk_off`, mapping to exposure multipliers `1.0` / `0.5` / `0.0`. This
+governs how aggressively M2 deploys new entries; it does not affect the
+rankings themselves.
+
+Warning lines below the table:
+
+- `fetch failures` — symbols whose fetch errored; they count against the
+  90% coverage gate (the run aborts if coverage drops below it).
+- `quarantined` — symbols that failed the recent-window data-sanity check
+  (an implausible price move within the trailing quarantine window) and are
+  excluded from ranking.
+- `insufficient history` — fetched fine, but too few bars to compute all
+  required features yet (e.g. a recent listing); excluded from ranking
+  until enough history accumulates.
