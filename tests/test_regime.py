@@ -62,6 +62,36 @@ def test_uptrend_with_vol_spike_is_neutral():
     assert regime == Regime(state="neutral", exposure_multiplier=0.5)
 
 
+def test_volatile_dip_below_fast_sma_is_risk_off():
+    # Long calm uptrend, then a volatile sharp dip: price falls below SMA50 but
+    # stays above SMA200 while realized vol spikes to the top percentile. This
+    # exercises the second risk_off disjunct (close < SMA_fast AND high vol).
+    calm = _decaying_jitter(290, drift=0.004)
+    dip = np.tile([-0.06, 0.02], 5)
+    bars = _bars_from_rets(np.concatenate([calm, dip]))
+    close = bars["close"]
+    # Premise checks: the fixture must not trigger the first disjunct.
+    assert float(close.iloc[-1]) > float(close.iloc[-200:].mean())  # above SMA200
+    assert float(close.iloc[-1]) < float(close.iloc[-50:].mean())  # below SMA50
+    regime = compute_regime(bars, bars.index[-1], CONFIG)
+    assert regime == Regime(state="risk_off", exposure_multiplier=0.0)
+
+
+def test_calm_dip_between_smas_is_neutral():
+    # Same shape as the volatile-dip fixture but the pullback is slow and
+    # steady: price ends below SMA50, above SMA200, with rock-bottom vol.
+    # Not risk_off (vol is low), not risk_on (below SMA50) -> neutral.
+    calm = _decaying_jitter(270, drift=0.004)
+    dip = np.full(30, -0.004)
+    bars = _bars_from_rets(np.concatenate([calm, dip]))
+    close = bars["close"]
+    # Premise checks so the fixture can't silently drift out of this branch.
+    assert float(close.iloc[-1]) > float(close.iloc[-200:].mean())  # above SMA200
+    assert float(close.iloc[-1]) < float(close.iloc[-50:].mean())  # below SMA50
+    regime = compute_regime(bars, bars.index[-1], CONFIG)
+    assert regime == Regime(state="neutral", exposure_multiplier=0.5)
+
+
 def test_short_history_is_neutral():
     bars = _bars_from_rets(_decaying_jitter(100, drift=0.004))
     regime = compute_regime(bars, bars.index[-1], CONFIG)

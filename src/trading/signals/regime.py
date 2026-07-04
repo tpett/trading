@@ -42,6 +42,8 @@ def compute_regime(
         return Regime(state="neutral", exposure_multiplier=config.exposure_neutral)
     trailing = vols.iloc[-config.vol_lookback :]
     current_vol = float(trailing.iloc[-1])
+    # Deliberate: the current observation stays in the denominator; strict <
+    # keeps it out of the numerator, so a constant-vol series reads as low-vol.
     vol_pct = float((trailing < current_vol).mean())
     high_vol = vol_pct >= config.vol_high_percentile
 
