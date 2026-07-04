@@ -104,6 +104,7 @@ def _setup_equities(tmp_path, monkeypatch) -> Path:
     universe.write_text("symbol\nAAA\nBBB\nCCC\nDDD\n")
     monkeypatch.setattr("trading.venues.equities.DEFAULT_UNIVERSE_CSV", universe)
     monkeypatch.setattr("trading.venues.equities._yf_download", _fake_history)
+    monkeypatch.setattr("trading.runner.fetch_earnings_dates", lambda symbols: ({}, False))
     return cfg_dir
 
 
@@ -190,3 +191,85 @@ def test_coverage_failure_warns_and_exits_nonzero(tmp_path, monkeypatch, capsys)
     )
     assert rc == 1
     assert "WARNING" in capsys.readouterr().err
+
+
+# --- trading run (Task 10) ---
+
+
+def _run_args(tmp_path, cfg_dir, extra=()):
+    return [
+        "run",
+        "--venue",
+        "equities",
+        "--config-dir",
+        str(cfg_dir),
+        "--state-dir",
+        str(tmp_path / "state"),
+        "--journal-dir",
+        str(tmp_path / "journal"),
+        *extra,
+    ]
+
+
+def _freeze_now(monkeypatch, iso: str):
+    frozen = datetime.datetime.fromisoformat(iso)
+    monkeypatch.setattr("trading.cli._utcnow", lambda: frozen)
+
+
+def test_run_bootstraps_then_noops_same_bar(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    assert main(_run_args(tmp_path, cfg_dir)) == 0
+    assert (tmp_path / "state" / "equities" / "portfolio.json").exists()
+    assert (tmp_path / "journal" / "equities.jsonl").exists()
+    capsys.readouterr()
+
+    assert main(_run_args(tmp_path, cfg_dir)) == 0
+    assert "noop" in capsys.readouterr().out
+
+
+def test_run_next_day_fills_and_reports_json(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+    _freeze_now(monkeypatch, "2026-07-02T22:30:00+00:00")
+    rc = main(_run_args(tmp_path, cfg_dir, extra=["--json"]))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert payload["run_key"] == "equities:2026-07-02T00:00:00+00:00"
+
+
+def test_run_coverage_failure_exits_nonzero_and_notifies(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+
+    def flaky(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+        if symbol in {"BBB", "CCC"}:
+            raise DataFetchError(f"boom {symbol}")
+        return _fake_history(symbol, start, end)
+
+    monkeypatch.setattr("trading.venues.equities._yf_download", flaky)
+    notes = []
+    monkeypatch.setattr("trading.cli.notify", lambda t, m: notes.append((t, m)))
+    assert main(_run_args(tmp_path, cfg_dir)) == 1
+    assert notes  # every failed run fires a notification
+
+
+def test_run_restore_from_journal_requires_typed_confirmation(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    state_file = tmp_path / "state" / "equities" / "portfolio.json"
+    good = state_file.read_text()
+    state_file.write_text("garbage")
+    capsys.readouterr()
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "no")
+    assert main(_run_args(tmp_path, cfg_dir, extra=["--restore-from-journal"])) == 1
+    assert state_file.read_text() == "garbage"
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESTORE")
+    assert main(_run_args(tmp_path, cfg_dir, extra=["--restore-from-journal"])) == 0
+    assert json.loads(state_file.read_text()) == json.loads(good)

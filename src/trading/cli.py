@@ -18,10 +18,23 @@ import pandas as pd
 
 from trading.config import load_venue_config
 from trading.data.cache import OhlcvCache
+from trading.notify import notify
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
+from trading.runner import RunnerError, restore_from_journal, run_venue
 from trading.venues import make_adapter
 
 VENUES = ["equities", "crypto"]
+
+
+def _utcnow() -> datetime.datetime:
+    """The CLI is the only module allowed to read the clock."""
+    return datetime.datetime.now(datetime.UTC)
+
+
+def _add_store_dirs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config-dir", default="config", help="directory with <venue>.toml")
+    parser.add_argument("--state-dir", default="state", help="portfolio state root")
+    parser.add_argument("--journal-dir", default="journal", help="journal root")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,14 +54,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rankings.add_argument("--json", action="store_true", help="machine-readable output")
     rankings.add_argument("--config-dir", default="config", help="directory with <venue>.toml")
+
+    run = sub.add_parser("run", help="one live-paper cycle now")
+    run.add_argument("--venue", choices=VENUES, required=True)
+    run.add_argument("--json", action="store_true", help="machine-readable output")
+    run.add_argument(
+        "--restore-from-journal",
+        action="store_true",
+        help="rebuild state/<venue>/portfolio.json from the last journal snapshot (confirms)",
+    )
+    _add_store_dirs(run)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "rankings":
-        return _cmd_rankings(args)
-    return 2  # unreachable: subparsers are required
+    handlers = {
+        "rankings": _cmd_rankings,
+        "run": _cmd_run,
+    }
+    return handlers[args.command](args)
 
 
 def _cmd_rankings(args: argparse.Namespace) -> int:
@@ -66,6 +91,53 @@ def _cmd_rankings(args: argparse.Namespace) -> int:
     else:
         _render(result, top=args.top)
     return 0
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    config = load_venue_config(args.venue, Path(args.config_dir))
+    state_root, journal_root = Path(args.state_dir), Path(args.journal_dir)
+
+    if args.restore_from_journal:
+        print(f"This will overwrite {state_root / args.venue / 'portfolio.json'} from the journal.")
+        if input("Type RESTORE to confirm: ").strip() != "RESTORE":
+            print("aborted")
+            return 1
+        try:
+            print(restore_from_journal(args.venue, state_root, journal_root))
+        except RunnerError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    adapter = make_adapter(config)
+    cache = OhlcvCache(Path(config.data.cache_dir), config.data.refetch_days)
+    try:
+        outcome = run_venue(
+            config,
+            adapter,
+            cache,
+            now=_utcnow(),
+            state_root=state_root,
+            journal_root=journal_root,
+            notify=notify,
+        )
+    except Exception as exc:  # a silent dead pipeline is the worst failure (spec)
+        notify("trading: run crashed", f"{args.venue}: {exc}")
+        raise
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "venue": outcome.venue,
+                    "status": outcome.status,
+                    "message": outcome.message,
+                    "run_key": outcome.run_key,
+                }
+            )
+        )
+    else:
+        print(f"{outcome.venue}: {outcome.status} — {outcome.message}")
+    return 0 if outcome.status in ("ok", "noop") else 1
 
 
 def _to_json(result: RankingsResult) -> dict:
