@@ -122,25 +122,57 @@ class CryptoAdapter:
         )
 
     def fetch_ohlcv(self, symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+        """Daily bars over [start, end], spliced from Kraken + the backfill exchange.
+
+        Kraken's public OHLC retention is anchored to TODAY (~720 most recent
+        candles), not to the requested window, so coverage is judged from what
+        Kraken actually RETURNED -- never from clock/config arithmetic. Kraken
+        is fetched first; the backfill exchange fills only the head Kraken
+        could not serve; Kraken wins any overlap.
+        """
         import ccxt
 
         pair = f"{symbol}/USD"
         cfg = self._config.data
-        boundary = end - datetime.timedelta(days=cfg.backfill_before_days)
-        frames: list[pd.DataFrame] = []
-        kraken_start = start
+        start_ts = pd.Timestamp(start, tz="UTC")
+        end_ts = pd.Timestamp(end, tz="UTC")
 
+        try:
+            kraken_rows = _paginate(lambda since_ms: _kraken_fetch(pair, since_ms), start, end)
+        except ccxt.BaseError as e:
+            raise DataFetchError(f"kraken fetch failed for {pair}: {e}") from e
+        # A fully-historical request can come back empty-in-range (Kraken only
+        # returns rows from today-720d onward, all AFTER the requested end) or
+        # starting mid-window. Only in-range rows count as coverage.
+        start_ms = int(start_ts.timestamp() * 1000)
+        end_ms = int(end_ts.timestamp() * 1000)
+        kraken_in_range = [r for r in kraken_rows if start_ms <= r[0] <= end_ms]
+        kraken_first: pd.Timestamp | None = None
+        if kraken_in_range:
+            kraken_first = pd.Timestamp(kraken_in_range[0][0], unit="ms", tz="UTC")
+
+        # Head covered by Kraken alone (the live path: end ~ today, start
+        # inside the retention window)? Then the backfill exchange is never
+        # contacted. seam_max_gap_days doubles as the tolerance here: the same
+        # small hole we would accept at a splice seam is acceptable at the head.
+        head_covered = (
+            kraken_first is not None and (kraken_first - start_ts).days <= cfg.seam_max_gap_days
+        )
+
+        frames: list[pd.DataFrame] = []
         backfill_last: pd.Timestamp | None = None
-        if cfg.backfill_exchange and start < boundary:
-            # Deep request: rows before the boundary come from the backfill
-            # exchange; Kraken owns [boundary, end].
+        if cfg.backfill_exchange and not head_covered:
+            # Backfill the head Kraken could not serve: up to Kraken's first
+            # in-range row (inclusive, so the sources overlap and Kraken wins
+            # the shared day), or the whole range if Kraken had nothing in it.
+            backfill_end = min(kraken_first.date(), end) if kraken_first is not None else end
             try:
                 deep_rows = _paginate(
                     lambda since_ms: _backfill_fetch(
                         cfg.backfill_exchange, pair, since_ms, cfg.backfill_page_limit
                     ),
                     start,
-                    boundary,
+                    backfill_end,
                 )
                 if deep_rows:
                     deep_frame = _rows_to_frame(deep_rows)
@@ -149,36 +181,22 @@ class CryptoAdapter:
             except DataFetchError as e:
                 # A pair the backfill exchange does not list is not an error --
                 # it simply has Kraken-depth history only. Anything else
-                # (network, rate limit) must propagate: silently downgrading a
-                # 2018 request to ~700 days would corrupt the backtest.
+                # (network, rate limit) must propagate: silently truncating a
+                # deep request would corrupt the backtest.
                 if not isinstance(e.__cause__, ccxt.BadSymbol):
                     raise
-            kraken_start = boundary
+        if kraken_in_range:
+            frames.append(_rows_to_frame(kraken_in_range))
 
-        try:
-            kraken_rows = _paginate(
-                lambda since_ms: _kraken_fetch(pair, since_ms), kraken_start, end
-            )
-        except ccxt.BaseError as e:
-            raise DataFetchError(f"kraken fetch failed for {pair}: {e}") from e
-        if kraken_rows:
-            kraken_frame = _rows_to_frame(kraken_rows)
-            frames.append(kraken_frame)
-
-        if backfill_last is not None:
-            # Seam guard: if Kraken's real retention window ever shrinks below
-            # backfill_before_days (or the config drifts), the date hole
-            # between the two sources must fail loudly here rather than reach
-            # signal computation silently.
-            seam_ok = (
-                bool(kraken_rows)
-                and (kraken_frame.index[0] - backfill_last).days <= cfg.seam_max_gap_days
-            )
-            if not seam_ok:
-                kraken_first = kraken_frame.index[0].date() if kraken_rows else None
+        if backfill_last is not None and kraken_first is not None:
+            # Seam guard, only when BOTH sources contributed: a date hole
+            # between the backfill's last row and Kraken's first row must fail
+            # loudly here rather than reach signal computation silently.
+            # Full-backfill and full-Kraken results have no seam to check.
+            if (kraken_first - backfill_last).days > cfg.seam_max_gap_days:
                 raise DataFetchError(
                     f"deep history seam gap for {pair}: backfill ends "
-                    f"{backfill_last.date()}, kraken starts {kraken_first} "
+                    f"{backfill_last.date()}, kraken starts {kraken_first.date()} "
                     f"(seam_max_gap_days={cfg.seam_max_gap_days})"
                 )
 
@@ -188,5 +206,5 @@ class CryptoAdapter:
         # Kraken appended last: keep="last" makes Kraken win any overlap (the
         # documented splice precedence; both sources are spot USD prices).
         df = df[~df.index.duplicated(keep="last")].sort_index()
-        df = df.loc[pd.Timestamp(start, tz="UTC") : pd.Timestamp(end, tz="UTC")]
+        df = df.loc[start_ts:end_ts]
         return validate_ohlcv(df)

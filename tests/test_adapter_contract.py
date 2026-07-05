@@ -51,6 +51,11 @@ def make_adapter(venue: str, monkeypatch, tmp_path, empty: bool = False):
     universe.write_text("symbol,status\nBTC,tradable\nETH,sell_only\n")
     fetch = (lambda p, s: []) if empty else _fake_kraken
     monkeypatch.setattr("trading.venues.crypto._kraken_fetch", fetch)
+    # When Kraken serves nothing in range the adapter consults the deep-history
+    # backfill exchange; keep the contract offline by patching it empty too.
+    monkeypatch.setattr(
+        "trading.venues.crypto._backfill_fetch", lambda exchange_id, p, s, limit: []
+    )
     return CryptoAdapter(config, universe_csv=universe), config, "BTC"
 
 

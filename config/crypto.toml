@@ -72,19 +72,21 @@ quarantine_window_days = 40
 drop_incomplete_last_bar = true
 
 # --- M3 deep-history backfill (spec Open Item: Kraken caps daily history) ---
-# Kraken's public OHLC endpoint serves only the ~720 most-recent daily candles.
-# Requests starting earlier than (end - backfill_before_days) fetch the older
-# rows from backfill_exchange via ccxt. Precedence: Kraken owns
-# [end - backfill_before_days, end]; the backfill exchange owns older rows;
-# Kraken wins any overlap. Live rankings (history_days = 500) never hit this.
+# Kraken's public OHLC endpoint serves only the ~720 most-recent daily candles,
+# anchored to TODAY -- not to the requested window. The adapter fetches Kraken
+# first, judges coverage from what it actually returned, and fills only the
+# head Kraken could not serve from backfill_exchange via ccxt (including fully
+# historical windows where Kraken returns nothing in range). Precedence:
+# Kraken wins any overlap. Live rankings (history_days = 500, end ~ today)
+# are always fully covered by Kraken and never touch the backfill exchange.
 backfill_exchange = "coinbase"    # ccxt exchange id verified at implementation; "" disables
 backfill_page_limit = 300         # candles per page on the backfill exchange
-backfill_before_days = 700        # inside Kraken's ~720-candle window, with margin
-# Seam guard: if Kraken's retention window ever shrinks below
-# backfill_before_days (or this config drifts), the date hole between the two
-# sources must fail the fetch loudly instead of reaching signal computation
-# silently. Crypto trades 24/7 so daily bars are contiguous; a small tolerance
-# absorbs isolated exchange-outage days.
+# Seam guard AND head tolerance: when both sources contribute, a date hole
+# between the backfill's last row and Kraken's first row beyond this many
+# calendar days fails the fetch loudly instead of reaching signal computation
+# silently; the same tolerance decides whether Kraken alone covers a request
+# from its start. Crypto trades 24/7 so daily bars are contiguous; a small
+# tolerance absorbs isolated exchange-outage days.
 seam_max_gap_days = 3
 
 [backtest]  # spec: Backtesting & Validation

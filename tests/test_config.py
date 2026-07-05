@@ -59,7 +59,6 @@ def test_backfill_config_loaded():
     crypto = load_venue_config("crypto", Path("config"))
     assert crypto.data.backfill_exchange != ""
     assert crypto.data.backfill_page_limit > 0
-    assert crypto.data.backfill_before_days > 0
     assert crypto.data.seam_max_gap_days > 0
     equities = load_venue_config("equities", Path("config"))
     assert equities.data.backfill_exchange == ""

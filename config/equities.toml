@@ -81,7 +81,6 @@ drop_incomplete_last_bar = false
 # yfinance serves full adjusted history directly. Disabled here.
 backfill_exchange = ""
 backfill_page_limit = 0
-backfill_before_days = 0
 seam_max_gap_days = 0
 
 [backtest]  # spec: Backtesting & Validation

@@ -61,7 +61,6 @@ quarantine_window_days = 10
 drop_incomplete_last_bar = false
 backfill_exchange = ""
 backfill_page_limit = 0
-backfill_before_days = 0
 # backfill_exchange = "" disables backfill entirely, so the seam guard never
 # fires; the value below is inert but required by DataConfig's schema.
 seam_max_gap_days = 3
