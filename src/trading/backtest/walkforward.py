@@ -75,8 +75,15 @@ def generate_windows(
     windows: list[Window] = []
     cursor = start
     while True:
-        train_end = add_months(cursor, train_months)
-        test_end = add_months(train_end, test_months)
+        try:
+            train_end = add_months(cursor, train_months)
+            test_end = add_months(train_end, test_months)
+        except ValueError as exc:
+            # add_months rejects day-of-month > 28 (no reliable "same day next
+            # month" for those); surface as a WalkForwardError so the CLI's
+            # existing (WalkForwardError, BacktestError) catch renders it
+            # cleanly instead of an uncaught traceback.
+            raise WalkForwardError(f"walk-forward window generation failed: {exc}") from exc
         if test_end > end:
             break  # only FULL test windows count as OOS
         windows.append(Window(cursor, train_end, train_end, test_end))
@@ -141,9 +148,14 @@ def run_walk_forward(
             f"span {start}..{end} is shorter than one train+test window "
             f"({bt.train_months}+{bt.test_months} months)"
         )
-    assert all(w.test_end <= bt.holdout_start for w in windows), (
-        "walk-forward window crossed into holdout despite the end-date clamp; generate_windows bug"
-    )
+    if not all(w.test_end <= bt.holdout_start for w in windows):
+        # Was a bare assert -- strips under -O, and this is a correctness
+        # invariant (holdout must never leak into walk-forward), not a
+        # debug-only check.
+        raise WalkForwardError(
+            "walk-forward window crossed into holdout despite the end-date clamp; "
+            "generate_windows bug"
+        )
     one_day = datetime.timedelta(days=1)
     results: list[WindowResult] = []
     for window in windows:

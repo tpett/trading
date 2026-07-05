@@ -23,6 +23,16 @@ def test_add_months_rolls_years_and_rejects_late_month_days():
         add_months(datetime.date(2018, 1, 31), 1)
 
 
+def test_generate_windows_wraps_day_over_28_as_walk_forward_error():
+    # add_months raises a bare ValueError for day-of-month > 28; generate_windows
+    # must translate it to WalkForwardError so the CLI's (WalkForwardError,
+    # BacktestError) catch renders a clean message instead of a traceback.
+    with pytest.raises(WalkForwardError, match="walk-forward window generation failed"):
+        generate_windows(
+            datetime.date(2023, 1, 31), datetime.date(2024, 1, 1), train_months=6, test_months=2
+        )
+
+
 def test_generate_windows_rolls_by_test_months_and_only_full_windows():
     windows = generate_windows(
         datetime.date(2018, 1, 1), datetime.date(2021, 1, 1), train_months=24, test_months=3

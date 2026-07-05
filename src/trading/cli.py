@@ -710,6 +710,8 @@ def _render_backtest(
         ("trades", str(metrics.trade_count)),
         ("turnover (annualized)", _fmt_num(metrics.turnover) + "x"),
         ("fee drag", f"${metrics.fees_paid:,.2f} ({metrics.fee_drag:.2%} of start)"),
+        ("gross profit", f"${metrics.gross_profit:,.2f}"),
+        ("fee drag vs gross profit (go-live: <30%)", _fmt_pct(metrics.fee_drag_vs_gross)),
         ("benchmark total return", _fmt_pct(metrics.benchmark_total_return)),
         ("benchmark sharpe", _fmt_num(metrics.benchmark_sharpe)),
         ("GATE (sharpe > benchmark AND total > 0)", "PASS" if metrics.gate_passed else "FAIL"),

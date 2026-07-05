@@ -109,6 +109,30 @@ def test_backtest_json_reports_metrics_gate_and_experiment_count(backtest_env, c
     assert event["grid_point"]["entry_score_threshold"] == 0.55  # TOML value, journaled
 
 
+def test_backtest_human_table_shows_fee_drag_vs_gross_and_gross_profit(backtest_env, capsys):
+    # The crypto go-live criterion (fee drag < 30% of gross returns) must be
+    # visible in the default human-rendered table, not just --json.
+    rc = main(
+        [
+            "backtest",
+            "--venue",
+            "crypto",
+            "--from",
+            "2025-03-01",
+            "--to",
+            "2025-06-30",
+            "--config-dir",
+            str(backtest_env / "config"),
+            "--journal-dir",
+            str(backtest_env / "journal"),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gross profit" in out
+    assert "fee drag vs gross profit" in out
+
+
 def test_backtest_clamps_to_before_holdout(backtest_env, capsys):
     rc = main(
         [
@@ -147,6 +171,28 @@ def test_backtest_from_inside_holdout_is_an_error(backtest_env, capsys):
     )
     assert rc == 1
     assert "holdout" in capsys.readouterr().err.lower()
+
+
+def test_walk_forward_day_over_28_from_date_is_a_clean_error(backtest_env, capsys):
+    # add_months can't roll a day-of-month > 28 forward; this must surface as
+    # a caught WalkForwardError (ERROR: ... on stderr, rc 1), not an uncaught
+    # ValueError/traceback out of main().
+    rc = main(
+        [
+            "backtest",
+            "--venue",
+            "crypto",
+            "--walk-forward",
+            "--from",
+            "2023-01-31",
+            "--config-dir",
+            str(backtest_env / "config"),
+            "--journal-dir",
+            str(backtest_env / "journal"),
+        ]
+    )
+    assert rc == 1
+    assert "ERROR" in capsys.readouterr().err
 
 
 def test_walk_forward_journals_every_window_plus_summary(backtest_env, capsys):
