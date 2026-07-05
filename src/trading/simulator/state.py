@@ -30,6 +30,7 @@ class Position:
     flushed: bool  # one-way regime-flush ratchet already applied
     entry_composite: float  # ranking evidence at decision time (journal/digest rationale)
     entry_rank: int
+    entry_fee: float = 0.0  # buy-side fee paid at fill; folded into realized_pnl on exit
 
 
 @dataclass(frozen=True)

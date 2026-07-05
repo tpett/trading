@@ -1,5 +1,6 @@
 import datetime
 import math
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -196,6 +197,30 @@ def test_fill_price_within_next_bar_range_plus_slippage():
     fill_bar = bars["AAA"].loc[pd.Timestamp("2026-07-01", tz="UTC")]
     slip = 5.0 / 1e4
     assert fill_bar["low"] * (1 - slip) <= fills[0].price <= fill_bar["high"] * (1 + slip)
+
+
+def test_buy_fill_stores_entry_fee_on_position():
+    bars = {"BTC": frame(end="2026-07-01")}
+    state = make_state(CR, pending_orders=[_buy_order(symbol="BTC", notional=300.0)])
+    apply_fills(state, bars, CR)
+    assert state.positions["BTC"].entry_fee == pytest.approx(300.0 * 95.0 / 1e4)
+
+
+def test_sell_realized_pnl_includes_entry_fee():
+    bars = {"BTC": frame(end="2026-07-01")}
+    position = _position(symbol="BTC")
+    position = replace(position, entry_fee=2.85)
+    state = make_state(CR, positions={"BTC": position}, cash=0.0)
+    state.pending_orders = [
+        PendingOrder(
+            symbol="BTC", side="sell", notional=0.0, decision_ts=DECISION, reason="time_stop"
+        )
+    ]
+    fills, _ = apply_fills(state, bars, CR)
+    price = 100.0 * (1 - 5.0 / 1e4)
+    gross = 2.0 * price
+    proceeds = gross - gross * 95.0 / 1e4
+    assert fills[0].realized_pnl == pytest.approx(proceeds - 2.0 * 90.0 - 2.85)
 
 
 def test_settlement_crosses_weekend_t_plus_1():

@@ -105,3 +105,13 @@ def test_unknown_version_raises_state_error():
     payload["version"] = 99
     with pytest.raises(StateError, match="version"):
         state_from_dict(payload)
+
+
+def test_position_without_entry_fee_loads_as_zero():
+    # Old (pre-M3) state files have no entry_fee; they must load with 0.0.
+    state = _populated_state()
+    payload = to_state_dict(state)
+    for position in payload["positions"].values():
+        del position["entry_fee"]
+    restored = state_from_dict(payload)
+    assert all(p.entry_fee == 0.0 for p in restored.positions.values())

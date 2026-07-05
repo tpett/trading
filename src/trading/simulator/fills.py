@@ -100,6 +100,7 @@ def apply_fills(
                 flushed=False,
                 entry_composite=order.composite,
                 entry_rank=order.rank,
+                entry_fee=fee,
             )
             fills.append(
                 Fill(order.symbol, "buy", qty, price, fee, bar_ts.isoformat(), order.reason, None)
@@ -132,7 +133,7 @@ def apply_fills(
                     fee,
                     bar_ts.isoformat(),
                     order.reason,
-                    proceeds - position.qty * position.entry_price,
+                    proceeds - position.qty * position.entry_price - position.entry_fee,
                 )
             )
 
