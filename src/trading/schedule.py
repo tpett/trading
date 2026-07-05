@@ -62,6 +62,10 @@ def build_plist(venue: str, repo_root: Path, uv_path: str) -> bytes:
             "StartCalendarInterval": _SCHEDULES[venue],
             "StandardOutPath": str(log),
             "StandardErrorPath": str(log),
+            # launchd defaults the soft file limit to 256; a cold-cache fetch
+            # across hundreds of symbols exhausts it (curl handles + parquet +
+            # yfinance's sqlite), failing live symbols with DNS/thread errors.
+            "SoftResourceLimits": {"NumberOfFiles": 4096},
         }
     )
 

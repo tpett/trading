@@ -42,11 +42,14 @@ def test_equities_plist_runs_weekday_evenings_in_local_time():
         {"Weekday": w, "Hour": 18, "Minute": 30} for w in (1, 2, 3, 4, 5)
     ]
     assert payload["StandardErrorPath"].endswith("state/equities/launchd.log")
+    # launchd's default soft file limit (256) starves cold-cache fetches.
+    assert payload["SoftResourceLimits"] == {"NumberOfFiles": 4096}
 
 
 def test_crypto_plist_runs_daily_0100_local():
     payload = plistlib.loads(build_plist("crypto", Path("/repo"), "/usr/local/bin/uv"))
     assert payload["StartCalendarInterval"] == [{"Hour": 1, "Minute": 0}]
+    assert payload["SoftResourceLimits"] == {"NumberOfFiles": 4096}
 
 
 def _ok(*args, **kwargs):
