@@ -16,6 +16,15 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading.backtest.engine import BacktestError, BacktestResult, prepare, replay
+from trading.backtest.experiments import (
+    experiment_count,
+    experiments_journal,
+    log_experiment,
+    prior_holdout,
+)
+from trading.backtest.metrics import BacktestMetrics, compute_metrics
+from trading.backtest.walkforward import WalkForwardError, WalkForwardResult, run_walk_forward
 from trading.config import VENUES, load_venue_config
 from trading.data.cache import OhlcvCache
 from trading.journal import Journal, JournalError
@@ -90,6 +99,36 @@ def build_parser() -> argparse.ArgumentParser:
     breaker.add_argument("--state-dir", default="state", help="portfolio state root")
     breaker.add_argument("--journal-dir", default="journal", help="journal root")
 
+    backtest = sub.add_parser("backtest", help="historical replay of the live simulator")
+    backtest.add_argument("--venue", choices=VENUES, required=True)
+    backtest.add_argument(
+        "--from",
+        dest="from_date",
+        type=datetime.date.fromisoformat,
+        default=None,
+        help="start date (default: [backtest].start)",
+    )
+    backtest.add_argument(
+        "--to",
+        dest="to_date",
+        type=datetime.date.fromisoformat,
+        default=None,
+        help="end date (default and cap: yesterday UTC)",
+    )
+    backtest.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help="tune the two hyperparameters per rolling window; report stitched OOS only",
+    )
+    backtest.add_argument(
+        "--holdout",
+        action="store_true",
+        help="evaluate the final holdout ONCE with current TOML params (confirms on rerun)",
+    )
+    backtest.add_argument("--json", action="store_true", help="machine-readable output")
+    backtest.add_argument("--config-dir", default="config", help="directory with <venue>.toml")
+    backtest.add_argument("--journal-dir", default="journal", help="journal root")
+
     sched = sub.add_parser("schedule", help="manage launchd jobs")
     sched.add_argument("action", choices=["install", "status", "remove"])
     sched.add_argument(
@@ -109,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": _cmd_status,
         "reset-breaker": _cmd_reset_breaker,
         "schedule": _cmd_schedule,
+        "backtest": _cmd_backtest,
     }
     return handlers[args.command](args)
 
@@ -432,3 +472,267 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         for line in output:
             print(line)
     return 0
+
+
+def _cmd_backtest(args: argparse.Namespace) -> int:
+    if args.walk_forward and args.holdout:
+        print(
+            "ERROR: --walk-forward tunes; --holdout is a single evaluation of the "
+            "tuned TOML params. They cannot be combined.",
+            file=sys.stderr,
+        )
+        return 1
+    config = load_venue_config(args.venue, Path(args.config_dir))
+    bt = config.backtest
+    now = _utcnow()
+    yesterday = now.date() - datetime.timedelta(days=1)
+    journal = experiments_journal(Path(args.journal_dir), args.venue)
+
+    end = min(args.to_date or yesterday, yesterday)
+    if args.holdout:
+        prior = prior_holdout(journal)
+        if prior is not None:
+            print(
+                f"Holdout already evaluated at {prior['ts']} (config {prior['config_hash']}, "
+                f"result journaled). The holdout is spent the first time it is read;"
+            )
+            print("rerunning it invalidates the go-live evidence (spec).")
+            try:
+                answer = input("Type RERUN HOLDOUT to run it anyway: ").strip()
+            except EOFError:
+                answer = ""
+            if answer != "RERUN HOLDOUT":
+                print("aborted")
+                return 1
+        start = bt.holdout_start
+    else:
+        start = args.from_date or bt.start
+        boundary = bt.holdout_start - datetime.timedelta(days=1)
+        if start > boundary:
+            print(
+                f"ERROR: --from {start} is inside the final holdout "
+                f"(from {bt.holdout_start}); use --holdout for its one evaluation",
+                file=sys.stderr,
+            )
+            return 1
+        if end > boundary:
+            print(f"note: --to clamped to {boundary} (holdout stays untouched)", file=sys.stderr)
+            end = boundary
+    if start >= end:
+        print(f"ERROR: empty date range {start}..{end}", file=sys.stderr)
+        return 1
+
+    adapter = make_adapter(config)
+    cache = OhlcvCache(Path(config.data.cache_dir), config.data.refetch_days)
+    try:
+        prepared = prepare(config, adapter, cache, start, end)
+    except BacktestError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if args.walk_forward:
+        return _run_walk_forward_command(prepared, config, journal, args, start, end, now)
+    return _run_plain_backtest_command(prepared, config, journal, args, start, end, now)
+
+
+def _run_plain_backtest_command(prepared, config, journal, args, start, end, now) -> int:
+    try:
+        result = replay(prepared, config)
+    except BacktestError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    metrics = compute_metrics(result, config.backtest.periods_per_year)
+    kind = "holdout" if args.holdout else "backtest"
+    log_experiment(
+        journal,
+        config=config,
+        kind=kind,
+        start=start,
+        end=end,
+        metrics=metrics,
+        ts=now.isoformat(),
+        grid_point={
+            "entry_score_threshold": config.portfolio.entry_score_threshold,
+            "stop_atr_multiple": config.portfolio.stop_atr_multiple,
+        },
+        survivorship_ratio=result.survivorship_ratio,
+        extra={"missing_symbols": len(prepared.missing_symbols)},
+    )
+    count = experiment_count(journal, config.name)
+    if args.json:
+        print(json.dumps(_backtest_json(result, metrics, count, start, end, kind)))
+    else:
+        _render_backtest(result, metrics, count, kind)
+    return 0
+
+
+def _run_walk_forward_command(prepared, config, journal, args, start, end, now) -> int:
+    try:
+        wf = run_walk_forward(prepared, config, start=start, end=end)
+    except (WalkForwardError, BacktestError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    for wr in wf.windows:
+        log_experiment(
+            journal,
+            config=config,
+            kind="walk_forward_window",
+            start=wr.window.test_start,
+            end=wr.window.test_end - datetime.timedelta(days=1),
+            metrics=wr.test_metrics,
+            ts=now.isoformat(),
+            grid_point={
+                "entry_score_threshold": wr.best.entry_score_threshold,
+                "stop_atr_multiple": wr.best.stop_atr_multiple,
+            },
+            survivorship_ratio=wr.test_result.survivorship_ratio,
+        )
+    log_experiment(
+        journal,
+        config=config,
+        kind="walk_forward",
+        start=start,
+        end=end,
+        metrics=wf.stitched_metrics,
+        ts=now.isoformat(),
+        extra={
+            "windows": len(wf.windows),
+            "stress_segments_covered": list(wf.stress_segments_covered),
+            "missing_symbols": len(prepared.missing_symbols),
+        },
+    )
+    count = experiment_count(journal, config.name)
+    if args.json:
+        payload = {
+            "venue": config.name,
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+            "kind": "walk_forward",
+            "windows": [
+                {
+                    "test_from": wr.window.test_start.isoformat(),
+                    "test_to": (wr.window.test_end - datetime.timedelta(days=1)).isoformat(),
+                    "grid_point": {
+                        "entry_score_threshold": wr.best.entry_score_threshold,
+                        "stop_atr_multiple": wr.best.stop_atr_multiple,
+                    },
+                    "metrics": _metrics_json(wr.test_metrics),
+                }
+                for wr in wf.windows
+            ],
+            "stitched_metrics": _metrics_json(wf.stitched_metrics),
+            "gate_passed": wf.stitched_metrics.gate_passed,
+            "stress_segments_covered": list(wf.stress_segments_covered),
+            "experiment_count": count,
+        }
+        print(json.dumps(payload))
+    else:
+        _render_walk_forward(wf, config.name, count)
+    return 0
+
+
+def _metrics_json(metrics: BacktestMetrics) -> dict:
+    import math
+    from dataclasses import asdict
+
+    return {
+        k: (None if isinstance(v, float) and math.isnan(v) else v)
+        for k, v in asdict(metrics).items()
+    }
+
+
+def _backtest_json(
+    result: BacktestResult, metrics: BacktestMetrics, count: int, start, end, kind: str
+) -> dict:
+    return {
+        "venue": result.venue,
+        "kind": kind,
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "metrics": _metrics_json(metrics),
+        "gate_passed": metrics.gate_passed,
+        "trades": len(result.trades),
+        "open_positions": list(result.open_positions),
+        "sessions_run": result.sessions_run,
+        "sessions_skipped": len(result.sessions_skipped),
+        "survivorship_ratio": round(result.survivorship_ratio, 4),
+        "warnings": list(result.warnings),
+        "experiment_count": count,
+    }
+
+
+def _fmt_pct(value: float) -> str:
+    import math
+
+    return "-" if math.isnan(value) else f"{value:+.2%}"
+
+
+def _fmt_num(value: float) -> str:
+    import math
+
+    return "-" if math.isnan(value) else f"{value:.2f}"
+
+
+def _render_backtest(
+    result: BacktestResult, metrics: BacktestMetrics, count: int, kind: str
+) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    table = Table(title=f"{result.venue} {kind} {result.start} .. {result.end}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for name, value in [
+        ("total return", _fmt_pct(metrics.total_return)),
+        ("annualized return", _fmt_pct(metrics.annualized_return)),
+        ("max drawdown", _fmt_pct(metrics.max_drawdown)),
+        ("sharpe (daily, 0% cash)", _fmt_num(metrics.sharpe)),
+        ("win rate", _fmt_pct(metrics.win_rate)),
+        ("avg win / avg loss", f"${metrics.avg_win:,.2f} / ${metrics.avg_loss:,.2f}"),
+        ("trades", str(metrics.trade_count)),
+        ("turnover (annualized)", _fmt_num(metrics.turnover) + "x"),
+        ("fee drag", f"${metrics.fees_paid:,.2f} ({metrics.fee_drag:.2%} of start)"),
+        ("benchmark total return", _fmt_pct(metrics.benchmark_total_return)),
+        ("benchmark sharpe", _fmt_num(metrics.benchmark_sharpe)),
+        ("GATE (sharpe > benchmark AND total > 0)", "PASS" if metrics.gate_passed else "FAIL"),
+    ]:
+        table.add_row(name, value)
+    console.print(table)
+    console.print(
+        f"survivorship coverage: {result.survivorship_ratio:.1%} of point-in-time "
+        f"members had data; {len(result.sessions_skipped)} session(s) skipped"
+    )
+    for warning in result.warnings:
+        console.print(f"[yellow]{warning}[/yellow]")
+    console.print(f"experiments journaled for {result.venue}: {count} (this run included)")
+
+
+def _render_walk_forward(wf: WalkForwardResult, venue: str, count: int) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    table = Table(title=f"{venue} walk-forward — stitched OOS segments only")
+    for col in ["test window", "threshold", "stop x", "sharpe", "total", "max DD", "trades"]:
+        table.add_column(col, justify="right")
+    for wr in wf.windows:
+        m = wr.test_metrics
+        table.add_row(
+            f"{wr.window.test_start} .. {wr.window.test_end - datetime.timedelta(days=1)}",
+            f"{wr.best.entry_score_threshold:.2f}",
+            f"{wr.best.stop_atr_multiple:.1f}",
+            _fmt_num(m.sharpe),
+            _fmt_pct(m.total_return),
+            _fmt_pct(m.max_drawdown),
+            str(m.trade_count),
+        )
+    console.print(table)
+    s = wf.stitched_metrics
+    console.print(
+        f"stitched OOS: sharpe {_fmt_num(s.sharpe)} vs benchmark {_fmt_num(s.benchmark_sharpe)}, "
+        f"total {_fmt_pct(s.total_return)}, fee drag ${s.fees_paid:,.2f} — "
+        f"GATE {'PASS' if s.gate_passed else 'FAIL'}"
+    )
+    console.print(f"stress segments covered: {', '.join(wf.stress_segments_covered)}")
+    console.print(f"experiments journaled for {venue}: {count} (all windows + summary included)")
