@@ -27,7 +27,8 @@ SYMBOLS = ["UPUP", "FLAT", "MEH1", "MEH2"]
 
 @pytest.fixture(autouse=True)
 def _no_earnings_network(monkeypatch):
-    # config/equities.toml enables the earnings filter; keep tests offline.
+    # Belt-and-suspenders: the filter is disabled in config/equities.toml,
+    # but keep tests offline in case a test flips it back on.
     monkeypatch.setattr("trading.runner.fetch_earnings_dates", lambda symbols: ({}, False))
 
 

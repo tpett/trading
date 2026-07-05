@@ -2,72 +2,86 @@
 
 Momentum swing trading system. It ranks liquid assets (S&P 500 + Nasdaq-100
 equities; Robinhood-listed crypto) by likelihood of near-term upward moves
-using price/volume momentum behind a market-regime gate. This milestone
-ships rankings only; paper trading, digests and backtesting arrive next.
+using price/volume momentum behind a market-regime gate, and paper-trades
+that ranking daily with $1,000 per venue under strict risk rules. Backtesting
+and walk-forward validation arrive in the next milestone.
 
 ## Setup
 
-Requires Python 3.12 and [uv](https://docs.astral.sh/uv/):
+Requires Python 3.12, [uv](https://docs.astral.sh/uv/), and macOS (for
+notifications and launchd scheduling):
 
     uv sync
 
 ## Commands
 
-    uv run trading rankings --venue equities   # ranked table + regime (SPY benchmark)
-    uv run trading rankings --venue crypto     # ranked table + regime (BTC benchmark)
+    uv run trading run --venue equities|crypto   # one live-paper cycle now
+    uv run trading status                        # portfolios, P&L vs benchmark, last-run health
+    uv run trading rankings --venue equities|crypto  # current ranked table w/ sub-scores
+    uv run trading digest [--date YYYY-MM-DD]    # print digest (default: latest)
+    uv run trading schedule install|status|remove    # manage launchd jobs
+    uv run trading reset-breaker --venue VENUE   # manual circuit-breaker reset (confirms)
 
-Options: `--as-of YYYY-MM-DD` (default: today UTC), `--top N` (default 25,
-0 = all rows), `--json` for machine-readable output, `--config-dir DIR`
-(default `config/`). Run from the repo root.
+Every command prints human-readable tables; add `--json` for machine
+consumption. Run from the repo root. `run` exits nonzero (and fires a macOS
+notification) when a cycle fails or is skipped — a silent dead pipeline is
+the failure mode this system is designed to avoid.
 
-Exits 1 with a `WARNING` on stderr when fresh data cannot be assembled
-(under 90% universe coverage, or the benchmark fetch fails).
+## How a run works
+
+Each `trading run` fetches fresh bars, then: (1) fills the previous run's
+pending orders at the first bar after their decision bar (open + 5 bps
+slippage + venue fees), (2) checks exits — frozen 1.5x ATR-20 stops, regime
+flush, trend break, time stop, forced exits, (3) checks entries — regime-
+gated top of ranking, score threshold, cooldowns, settled cash (T+1 for
+equities), max 25%/day deployment (35% crypto — fits one 30% position), and
+(4) writes new pending orders for the next run. A decision bar is never
+traded twice (journal-enforced); a late run (e.g. after sleep/wake) still
+processes exits but skips entries beyond the staleness bound. Drawdown >20%
+from the high-water mark halts entries venue-wide until `reset-breaker`.
+
+## Scheduling
+
+`trading schedule install` creates two LaunchAgents in ~/Library/LaunchAgents:
+equities weekdays 18:30 and crypto daily 01:00. **launchd uses machine-local
+time; the schedule assumes this Mac runs in America/New_York.** Crypto at
+01:00 ET lands after the 00:00 UTC daily bar close. Runs missed while asleep
+coalesce into one late run on wake, bounded by the staleness rule above.
 
 ## Where things live
 
-- `config/<venue>.toml` — every tunable number (fees, windows, thresholds).
-- `data/<venue>/*.parquet` — gitignored OHLCV cache. The trailing 30 days
-  are re-fetched every run, so deleting `data/` is always safe.
-- `src/trading/venues/universes/*.csv` — committed universe snapshots.
+- `config/<venue>.toml` — every tunable number (fees, windows, risk rules).
+- `state/<venue>/portfolio.json` — paper portfolio (gitignored; atomic
+  writes). If it corrupts, the run refuses to act and notifies; recover with
+  `trading run --venue V --restore-from-journal`.
+- `journal/<venue>.jsonl` — append-only record of every run: regime, full
+  ranking with sub-scores, decisions made AND skipped (with reasons), fills,
+  snapshot, config hash. State is reconstructible from it.
+- `digest/YYYY-MM-DD.md` — daily digest (UTC date), regenerated after each
+  venue run.
+- `data/<venue>/*.parquet` — OHLCV cache (gitignored; safe to delete).
 
-All timestamps are UTC. First equities run fetches 517 symbols from
-yfinance and takes several minutes; later runs hit the Parquet cache.
+## Reading the digest (60 seconds)
 
-## Reading the output
+Per venue: portfolio value and P&L vs buying-and-holding the benchmark
+(SPY/BTC) since bootstrap; open positions with entry rationale (rank +
+composite at entry) and distance-to-stop; today's fills; pending orders;
+top-5 ranking; regime; warnings (quarantined symbols, stale-run entry skips,
+circuit-breaker state, earnings-data degradation).
 
-Each row's sub-scores are cross-sectional percentiles (0-1, higher = more
-favorable) computed within that run's ranked universe:
+## Earnings blackout
 
-- `mom_short` / `mom_med` / `mom_long` — volatility-adjusted momentum
-  percentile over the venue's short/med/long lookback windows.
-- `volume_surge` — current week's dollar volume vs its trailing 3-month
-  average, percentile.
-- `breakout` — closeness to the 20/60-day highs, percentile.
-- `overextension` — RSI-stretch guard; **lower is better**, and it enters
-  the composite inverted (`1 - percentile`).
-- `composite` — equal-weight average of the six scores above; this is what
-  the table is ranked on.
-- `raw_return_30d` — un-normalized 30-day return (not a percentile); used
-  downstream by the crypto fee gate in M2, not by the ranking itself.
+Dropped: yfinance earnings dates proved unreliable at implementation time
+(2026-07), so the filter is disabled in BOTH live and backtest modes — a
+filter that exists live but not in backtest is worse than no filter. The
+code path remains behind `earnings_blackout_enabled` in
+`config/equities.toml` should a reliable source appear.
 
-`status` (from the venue's listing) is one of:
+## Rankings output
 
-- `tradable` — normal entries and exits allowed.
-- `sell_only` — still ranked and shown, but M2 will not open new positions.
-- `untradable` — excluded from the venue universe entirely.
-
-The `regime` line shows the benchmark-driven gate: `risk_on` / `neutral` /
-`risk_off`, mapping to exposure multipliers `1.0` / `0.5` / `0.0`. This
-governs how aggressively M2 deploys new entries; it does not affect the
-rankings themselves.
-
-Warning lines below the table:
-
-- `fetch failures` — symbols whose fetch errored; they count against the
-  90% coverage gate (the run aborts if coverage drops below it).
-- `quarantined` — symbols that failed the recent-window data-sanity check
-  (an implausible price move within the trailing quarantine window) and are
-  excluded from ranking.
-- `insufficient history` — fetched fine, but too few bars to compute all
-  required features yet (e.g. a recent listing); excluded from ranking
-  until enough history accumulates.
+Sub-scores are cross-sectional percentiles (0-1, higher = better):
+`mom_short/med/long` (vol-adjusted momentum), `volume_surge`, `breakout`,
+`overextension` (lower is better; inverted in the composite), `composite`
+(equal-weight blend; the ranking key), `raw_return_30d` (raw return feeding
+the crypto fee gate). `status` is `tradable` / `sell_only` / `untradable`;
+regime is `risk_on` / `neutral` / `risk_off` (full / half / no new entries).

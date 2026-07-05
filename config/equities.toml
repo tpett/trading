@@ -46,7 +46,7 @@ drawdown_halt_pct = 0.20
 entry_score_threshold = 0.70        # tunable hyperparameter #1 (spec)
 min_raw_return_cost_multiple = 0.0  # fee gate off for equities
 earnings_blackout_sessions = 5
-earnings_blackout_enabled = true    # kill switch: set false (and document in README) if yfinance dates prove unreliable
+earnings_blackout_enabled = false   # yfinance earnings dates proved unreliable in practice (2026-07); see README
 staleness_hours = 2
 atr_window = 20                     # ATR-20 (spec); frozen at entry
 

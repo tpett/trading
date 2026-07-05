@@ -23,7 +23,9 @@ def test_load_equities_config():
     assert config.data.min_coverage == 0.90
     assert config.data.max_daily_move == 0.40
     assert config.portfolio.atr_window == 20
-    assert config.portfolio.earnings_blackout_enabled is True
+    # Kill switch flipped off: yfinance earnings dates proved unreliable
+    # in practice (see README's "Earnings blackout" section).
+    assert config.portfolio.earnings_blackout_enabled is False
 
 
 def test_load_crypto_config():
