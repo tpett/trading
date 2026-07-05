@@ -66,9 +66,13 @@ trading backtest --venue equities --holdout          # final 6 months, evaluated
   `[backtest].min_session_coverage` are skipped, not faked.
 - **Crypto universe is today's Robinhood listing**: coins delisted before
   today are absent (survivorship bias — annotated on every crypto result).
-  Listing dates come from data availability. Deep history (pre-Kraken-window)
-  is spliced from a second exchange; Kraken wins overlaps
-  (see `[data]` in `config/crypto.toml`).
+  Listing dates come from data availability. Kraken retains only the ~720
+  most recent daily candles (anchored to today), so each fetch judges
+  coverage from the rows Kraken actually returned and splices any head it
+  could not serve from a second exchange; Kraken wins overlaps (see `[data]`
+  in `config/crypto.toml`). Live runs skip the backfill exchange because
+  Kraken serves recent windows fully — a data-driven outcome, not an
+  unconditional code path.
 - NYSE half-days are handled conservatively by the live session guard (waits
   for 16:00 ET + buffer); the backtest calendar is SPY's actual bar dates, so
   half-days are traded normally there.

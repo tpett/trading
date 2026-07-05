@@ -169,6 +169,8 @@ def test_compute_metrics_delegates_from_result():
         sessions_run=4,
         sessions_skipped=(),
         survivorship_ratio=1.0,
+        eligible_min=4,
+        eligible_mean=4.0,
         warnings=(),
     )
     m = compute_metrics(result, 365)

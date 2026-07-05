@@ -11,6 +11,8 @@ trades_24_7 = true
 
 [universe]
 min_dollar_volume = 0.0  # no dollar-volume floor for crypto in v1
+point_in_time = false    # today's Robinhood snapshot; backtests infer listing
+                         # dates from data availability (see engine prepare)
 
 [signals]
 momentum_windows = [7, 30, 90]  # calendar days (spec)

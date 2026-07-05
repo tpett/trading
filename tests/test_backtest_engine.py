@@ -181,6 +181,44 @@ def test_mid_window_listing_shrinks_coverage_denominator(tmp_path):
     assert all(s.survivorship_ratio == pytest.approx(3 / 5) for s in early)
     assert all(s.skip_reason is None for s in late)
     assert all(s.survivorship_ratio == pytest.approx(5 / 5) for s in late)
+    # The shrinking gate denominator is surfaced per session and on the result.
+    assert all(s.eligible_members == 3 for s in early)
+    assert all(s.eligible_members == 5 for s in late)
+    result = replay(prepared, config)
+    assert result.eligible_min == 3
+    assert 3 < result.eligible_mean < 5
+
+
+def test_point_in_time_member_with_late_data_degrades_coverage(tmp_path):
+    """Equities-style contrast: with a PIT universe, membership is the
+    listing signal. A member whose bars start after the session is a DATA
+    outage -- it stays in the eligible denominator and counts as a miss, so
+    coverage drops (and skips below the floor) instead of the denominator
+    silently shrinking."""
+    from dataclasses import replace
+
+    listing_ts = pd.Timestamp("2025-03-15", tz="UTC")
+    frames = {
+        "AAA": noisy_frame(seed=1, drift=0.01),
+        "BBB": noisy_frame(seed=2, drift=0.002),
+        "CCC": noisy_frame(seed=3, drift=0.0),
+        "EEE": noisy_frame(seed=5, start="2025-03-15", periods=60),
+        "FFF": noisy_frame(seed=6, start="2025-03-15", periods=60),
+        "BENCH": noisy_frame(seed=9, drift=0.003),
+    }
+    config = _with_benchmark(small_config(min_session_coverage=0.9))
+    config = replace(config, universe=replace(config.universe, point_in_time=True))
+    adapter = FakeBacktestAdapter(frames, "BENCH")
+    cache = OhlcvCache(tmp_path / "cache", config.data.refetch_days)
+    prepared = prepare(config, adapter, cache, START, END)
+
+    early = [s for s in prepared.sessions if s.ts < listing_ts]
+    late = [s for s in prepared.sessions if s.ts >= listing_ts]
+    assert early and late
+    # Same fixture as the crypto test above, opposite verdict: 3/5 = 60% < 90%.
+    assert all(s.skip_reason is not None and "coverage 60%" in s.skip_reason for s in early)
+    assert all(s.eligible_members == 5 for s in early)  # PIT members always count
+    assert all(s.skip_reason is None for s in late)
 
 
 def test_crypto_results_carry_survivorship_caveat(tmp_path):

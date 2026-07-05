@@ -46,6 +46,7 @@ class SessionPlan:
     # members-with-a-bar-this-session / ALL point-in-time members (reported;
     # the skip gate uses the listing-aware eligible denominator instead)
     survivorship_ratio: float
+    eligible_members: int  # the gate denominator; surfaced so shrinkage is visible
     skip_reason: str | None
 
 
@@ -88,6 +89,11 @@ class BacktestResult:
     sessions_run: int
     sessions_skipped: tuple[str, ...]
     survivorship_ratio: float  # mean per-session coverage of point-in-time members
+    # Coverage-gate denominator across sessions: on a today-snapshot universe
+    # (crypto) the eligible set shrinks going back in time, so its size is
+    # surfaced rather than blended into one ratio.
+    eligible_min: int
+    eligible_mean: float
     warnings: tuple[str, ...]
 
 
@@ -124,14 +130,23 @@ def prepare(
     sessions: list[SessionPlan] = []
     for ts in session_index:
         infos = members_by_session[ts]
-        # Listing-aware coverage gate (plan: listing dates inferred from data
-        # availability). The crypto universe is TODAY'S snapshot, so members
-        # not yet listed at this session -- first available bar after ts, or
-        # no data anywhere in the fetched window -- cannot count against
-        # coverage. Members that HAVE listed but lack a bar covering this
-        # session (delisted mid-window, exchange hole) still drag it down.
-        eligible = [i for i in infos if i.symbol in bars and bars[i.symbol].index[0] <= ts]
-        available = [i for i in eligible if ts in bars[i.symbol].index]
+        if config.universe.point_in_time:
+            # The venue knows listings independently (equities PIT membership
+            # intervals): universe(as_of) already excludes not-yet-listed
+            # symbols, so every member counts. A member whose bars start
+            # after this session -- or never arrive -- is a DATA outage, not
+            # a listing, and must degrade coverage visibly.
+            eligible = list(infos)
+        else:
+            # No independent listing source (crypto universe is TODAY'S
+            # snapshot): listing dates are inferred from data availability
+            # (plan-sanctioned). Members whose first available bar postdates
+            # this session -- or with no data in the fetched window at all --
+            # cannot count against coverage.
+            eligible = [i for i in infos if i.symbol in bars and bars[i.symbol].index[0] <= ts]
+        # A member that HAS listed but lacks a bar covering this session
+        # (delisted mid-window, exchange hole) still drags coverage down.
+        available = [i for i in eligible if i.symbol in bars and ts in bars[i.symbol].index]
         coverage = len(available) / len(eligible) if eligible else 0.0
         # The reported survivorship ratio keeps ALL point-in-time members in
         # the denominator so the shrinking historical universe stays visible
@@ -144,6 +159,7 @@ def prepare(
                     rankings=None,
                     clean_symbols=(),
                     survivorship_ratio=ratio,
+                    eligible_members=len(eligible),
                     skip_reason=(
                         f"coverage {coverage:.0%} below {config.backtest.min_session_coverage:.0%}"
                     ),
@@ -154,10 +170,10 @@ def prepare(
         try:
             rankings = assemble_rankings(config, available, sliced, benchmark.loc[:ts], ts.date())
         except PipelineDataError as exc:
-            sessions.append(SessionPlan(ts, None, (), ratio, str(exc)))
+            sessions.append(SessionPlan(ts, None, (), ratio, len(eligible), str(exc)))
             continue
         slim = replace(rankings, bars={}, benchmark_bars=benchmark.iloc[0:0])
-        sessions.append(SessionPlan(ts, slim, tuple(rankings.bars), ratio, None))
+        sessions.append(SessionPlan(ts, slim, tuple(rankings.bars), ratio, len(eligible), None))
 
     return PreparedBacktest(
         venue=config.name,
@@ -290,6 +306,7 @@ def replay(
         # arithmetic must never see NaNs from mismatched session indexes.
         raise BacktestError("equity and benchmark curves diverged in index; engine bug")
     ratios = [s.survivorship_ratio for s in sessions]
+    eligible_counts = [s.eligible_members for s in sessions]
     return BacktestResult(
         venue=prepared.venue,
         start=start,
@@ -303,5 +320,7 @@ def replay(
         sessions_run=sessions_run,
         sessions_skipped=tuple(skipped),
         survivorship_ratio=sum(ratios) / len(ratios),
+        eligible_min=min(eligible_counts),
+        eligible_mean=sum(eligible_counts) / len(eligible_counts),
         warnings=tuple(sorted(warnings)),
     )

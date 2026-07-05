@@ -11,6 +11,8 @@ trades_24_7 = false
 
 [universe]
 min_dollar_volume = 20000000.0  # entry-filter floor (M2 applies it; spec: config)
+point_in_time = true            # PIT membership intervals: a member missing data
+                                # is a data outage and degrades backtest coverage
 
 [signals]
 momentum_windows = [5, 20, 60]  # trading days (spec)

@@ -664,6 +664,7 @@ def _backtest_json(
         "sessions_run": result.sessions_run,
         "sessions_skipped": len(result.sessions_skipped),
         "survivorship_ratio": round(result.survivorship_ratio, 4),
+        "eligible_members": {"min": result.eligible_min, "mean": round(result.eligible_mean, 2)},
         "warnings": list(result.warnings),
         "experiment_count": count,
     }
@@ -709,7 +710,9 @@ def _render_backtest(
     console.print(table)
     console.print(
         f"survivorship coverage: {result.survivorship_ratio:.1%} of point-in-time "
-        f"members had data; {len(result.sessions_skipped)} session(s) skipped"
+        f"members had data; coverage gated on {result.eligible_min}-"
+        f"{result.eligible_mean:.1f} (min-mean) listed members per session; "
+        f"{len(result.sessions_skipped)} session(s) skipped"
     )
     for warning in result.warnings:
         console.print(f"[yellow]{warning}[/yellow]")

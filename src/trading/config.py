@@ -26,6 +26,11 @@ class CostsConfig:
 @dataclass(frozen=True)
 class UniverseConfig:
     min_dollar_volume: float
+    # True when universe(as_of) returns real point-in-time membership
+    # (equities PIT intervals): a member without data is a DATA problem and
+    # degrades backtest coverage. False when the universe is a today-snapshot
+    # (crypto): listing is inferred from data availability instead.
+    point_in_time: bool
 
 
 @dataclass(frozen=True)
@@ -84,7 +89,7 @@ class DataConfig:
     history_days: int
     quarantine_window_days: int
     drop_incomplete_last_bar: bool
-    backfill_exchange: str  # ccxt exchange id for pre-Kraken-window rows; "" disables
+    backfill_exchange: str  # ccxt exchange id for rows Kraken cannot serve; "" disables
     backfill_page_limit: int
     # Max calendar-day hole tolerated at the backfill/Kraken seam; doubles as
     # the head tolerance when judging whether Kraken alone covers a request.

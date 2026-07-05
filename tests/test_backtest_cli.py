@@ -99,6 +99,10 @@ def test_backtest_json_reports_metrics_gate_and_experiment_count(backtest_env, c
     assert payload["gate_passed"] in (True, False)
     assert payload["experiment_count"] == 1
     assert 0.0 < payload["survivorship_ratio"] <= 1.0
+    # The coverage-gate denominator is surfaced so a shrinking historical
+    # universe (today-snapshot venues) is visible in machine output.
+    assert payload["eligible_members"]["min"] >= 1
+    assert payload["eligible_members"]["mean"] >= payload["eligible_members"]["min"]
     journal = experiments_journal(backtest_env / "journal", "crypto")
     event = next(journal.events())
     assert event["kind"] == "backtest"

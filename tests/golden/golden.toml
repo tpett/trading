@@ -11,6 +11,9 @@ trades_24_7 = true
 
 [universe]
 min_dollar_volume = 0.0
+# Crypto-style: LAT's membership predates its bars, so listing must be
+# inferred from data availability (first-bar heuristic), not membership.
+point_in_time = false
 
 [signals]
 momentum_windows = [3, 5, 8]

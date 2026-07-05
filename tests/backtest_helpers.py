@@ -131,6 +131,7 @@ def prepared_from_sessions(
                 rankings=slim,
                 clean_symbols=tuple(bars),
                 survivorship_ratio=1.0,
+                eligible_members=len(bars),
                 skip_reason=None,
             )
         )
