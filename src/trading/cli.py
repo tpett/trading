@@ -18,7 +18,7 @@ import pandas as pd
 
 from trading.config import VENUES, load_venue_config
 from trading.data.cache import OhlcvCache
-from trading.journal import Journal
+from trading.journal import Journal, JournalError
 from trading.notify import notify
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
 from trading.runner import (
@@ -273,7 +273,11 @@ def _venue_status(venue: str, state_dir: Path, journal_dir: Path, now: datetime.
     info["positions"] = len(state.positions)
 
     journal = Journal(journal_dir / f"{venue}.jsonl")
-    last_run = journal.last_event(types=frozenset({"run"}))
+    try:
+        last_run = journal.last_event(types=frozenset({"run"}))
+        last_ok = journal.last_event(types=frozenset({"run", "bootstrap"}))
+    except JournalError:
+        return {"venue": venue, "state": "journal corrupt"}
     if last_run is not None:
         snapshot = last_run["snapshot"]
         start = float(last_run["starting_balance"])
@@ -281,7 +285,6 @@ def _venue_status(venue: str, state_dir: Path, journal_dir: Path, now: datetime.
         info["value"] = float(snapshot["value"])
         info["pnl_pct"] = float(snapshot["value"]) / start - 1.0
         info["benchmark_pnl_pct"] = float(bench["close"]) / float(bench["start_price"]) - 1.0
-    last_ok = journal.last_event(types=frozenset({"run", "bootstrap"}))
     if last_ok is not None:
         last_ts = datetime.datetime.fromisoformat(last_ok["ts"])
         info["hours_since_last_success"] = (now - last_ts).total_seconds() / 3600

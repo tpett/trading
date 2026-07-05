@@ -47,6 +47,8 @@ equities weekdays 18:30 and crypto daily 01:00. **launchd uses machine-local
 time; the schedule assumes this Mac runs in America/New_York.** Crypto at
 01:00 ET lands after the 00:00 UTC daily bar close. Runs missed while asleep
 coalesce into one late run on wake, bounded by the staleness rule above.
+The machine must be awake by ~02:00 ET or that day's crypto entries are
+skipped (exits are unaffected).
 
 ## Where things live
 
@@ -67,7 +69,10 @@ Per venue: portfolio value and P&L vs buying-and-holding the benchmark
 (SPY/BTC) since bootstrap; open positions with entry rationale (rank +
 composite at entry) and distance-to-stop; today's fills; pending orders;
 top-5 ranking; regime; warnings (quarantined symbols, stale-run entry skips,
-circuit-breaker state, earnings-data degradation).
+circuit-breaker state, earnings-data degradation). Per-trade P&L excludes
+the entry fee (cash totals are exact; see Open Items in the spec). A
+permanently-delisted holding warns every run until manually handled — M3
+adds a close command.
 
 ## Earnings blackout
 

@@ -86,7 +86,6 @@ def test_fetch_ohlcv_returns_utc_ohlcv_frame_sliced_to_range(venue, monkeypatch,
 
 @pytest.mark.parametrize("venue", VENUES)
 def test_fetch_ohlcv_empty_raises_data_fetch_error(venue, monkeypatch, tmp_path):
-    adapter, _, symbol = make_adapter(venue, monkeypatch, tmp_path)
     adapter_empty, _, symbol = make_adapter(venue, monkeypatch, tmp_path, empty=True)
     with pytest.raises(DataFetchError):
         adapter_empty.fetch_ohlcv(symbol, START, END)

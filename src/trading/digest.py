@@ -34,6 +34,10 @@ def _pct(x: float) -> str:
     return f"{x:+.2%}"
 
 
+def _plain_pct(x: float) -> str:
+    return f"{x:.2%}"
+
+
 def _venue_section(event: dict) -> list[str]:
     snapshot = event["snapshot"]
     start = float(event["starting_balance"])
@@ -63,7 +67,7 @@ def _venue_section(event: dict) -> list[str]:
             lines.append(
                 f"| {m['symbol']} | {m['qty']:.4f} | {m['entry_price']:.2f} "
                 f"| {m['last_close']:.2f} | {_pct(m['unrealized_pnl_pct'])} "
-                f"| {m['stop_price']:.2f} | {_pct(m['stop_distance_pct'])} "
+                f"| {m['stop_price']:.2f} | {_plain_pct(m['stop_distance_pct'])} "
                 f"| rank #{m['entry_rank']}, composite {m['entry_composite']:.2f} |"
             )
     else:

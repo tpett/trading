@@ -115,7 +115,7 @@ def test_trend_break_denominator_ignores_nan_composite_rows():
         "CCC": _row(composite=0.8),
         "AAA": _row(composite=0.2),  # rank 3 of 4 valid: bottom half
         "DDD": _row(composite=0.1),
-        "EEE": _row(composite=float("nan")),  # insufficient history
+        "EEE": _row(composite=float("nan")),  # degenerate signal inputs, not insufficient_history
         "FFF": _row(composite=float("nan")),
     }
     state = make_state(EQ, positions={"AAA": _position("AAA", stop=1.0)})  # stop can't fire

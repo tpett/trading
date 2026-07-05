@@ -80,6 +80,7 @@ def test_build_digest_renders_all_sections():
     assert "quarantined: BADCO" in text
     assert "late run: entries skipped" in text
     assert "TRIPPED" in text
+    assert "12.10%" in text and "+12.10%" not in text  # stop_distance_pct: plain percent
 
 
 def test_build_digest_without_events():

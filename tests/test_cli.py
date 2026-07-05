@@ -369,6 +369,22 @@ def test_status_flags_corrupt_state(tmp_path, monkeypatch, capsys):
     assert by_venue["equities"]["state"] == "corrupt"
 
 
+def test_status_flags_corrupt_journal_without_traceback(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    journal_file = tmp_path / "journal" / "equities.jsonl"
+    journal_file.write_text("{ corrupt\n" + journal_file.read_text())
+    capsys.readouterr()
+
+    assert main(["status", "--json", *_store_args(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    by_venue = {v["venue"]: v for v in payload["venues"]}
+    assert by_venue["equities"]["state"] == "journal corrupt"
+    assert "Traceback" not in out
+
+
 def test_status_human_output_renders(tmp_path, monkeypatch, capsys):
     _freeze_now(monkeypatch, "2026-07-02T01:30:00+00:00")
     assert main(["status", *_store_args(tmp_path)]) == 0

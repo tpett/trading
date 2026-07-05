@@ -5,7 +5,7 @@ import pytest
 
 from sim_helpers import EQ, frame, make_rankings, make_state, make_table
 from trading.simulator.core import decision_bar, make_run_key, step
-from trading.simulator.state import Position
+from trading.simulator.state import PendingOrder, Position
 
 JUL1 = pd.Timestamp("2026-07-01", tz="UTC")
 JUL2 = pd.Timestamp("2026-07-02", tz="UTC")
@@ -153,3 +153,89 @@ def test_step_decisions_track_the_decision_bar():
     assert base_buy.notional == pytest.approx(pct * (state.cash + 2.0 * 100.0), abs=1e-9)
     assert crash_buy.notional == pytest.approx(pct * (state.cash + 2.0 * 50.0), abs=1e-9)
     assert crashed.snapshot.value == pytest.approx(state.cash + 2.0 * 50.0)
+
+
+def test_breaker_does_not_trip_at_exactly_drawdown_halt_pct():
+    # drawdown_halt_pct is 0.20; cash=800 against hwm=1000 is EXACTLY 20% --
+    # the check is strict '>', so this must NOT trip.
+    state = make_state(EQ, cash=800.0, high_water_mark=1000.0)
+    result = step(state, _rankings(), EQ)
+    assert result.breaker_tripped_now is False
+    assert result.state.breaker_tripped is False
+
+
+def test_fills_and_exits_proceed_while_breaker_is_tripped():
+    pending_buy = PendingOrder(
+        symbol="AAA",
+        side="buy",
+        notional=180.0,
+        decision_ts="2026-06-30T00:00:00+00:00",
+        reason="entry",
+        atr_at_decision=2.0,
+        composite=0.9,
+        rank=1,
+    )
+    held = Position(
+        symbol="ZZZ",
+        qty=5.0,
+        entry_price=100.0,
+        entry_ts="2026-06-01T00:00:00+00:00",
+        entry_atr=1.0,
+        stop_price=99.0,  # breached by ZZZ's 90.0 decision-bar close below
+        flushed=False,
+        entry_composite=0.9,
+        entry_rank=1,
+    )
+    state = make_state(
+        EQ,
+        breaker_tripped=True,
+        pending_orders=[pending_buy],
+        positions={"ZZZ": held},
+    )
+    bars = {
+        "AAA": frame(),
+        "BBB": frame(start_price=50.0),
+        "ZZZ": frame(start_price=90.0),
+    }
+    rows = {"AAA": _row(0.95), "BBB": _row(0.60), "ZZZ": _row(composite=float("nan"))}
+    rankings = make_rankings(EQ, bars, make_table(rows))
+
+    result = step(state, rankings, EQ)
+
+    assert any(f.symbol == "AAA" and f.side == "buy" for f in result.fills)  # fill proceeds
+    assert any(  # exit proceeds
+        o.symbol == "ZZZ" and o.reason == "stop_loss" for o in result.new_orders
+    )
+    assert result.state.breaker_tripped is True  # still tripped
+    assert all(o.side != "buy" for o in result.new_orders)  # but no new entries
+
+
+def test_step_purity_through_the_regime_flush_ratchet_path():
+    """Purity must hold even through the mutation exits.py makes to a held
+    position's stop_price when the regime-flush ratchet fires — that write
+    happens on step()'s deep-copied state, so the caller's original object
+    must remain bit-identical."""
+    held = Position(
+        symbol="XXX",
+        qty=2.0,
+        entry_price=100.0,
+        entry_ts="2026-06-01T00:00:00+00:00",
+        entry_atr=4.0,
+        stop_price=90.0,
+        flushed=False,
+        entry_composite=0.9,
+        entry_rank=1,
+    )
+    state = make_state(EQ, positions={"XXX": held})
+    before = copy.deepcopy(state)
+    rankings = make_rankings(
+        EQ, {"XXX": frame()}, make_table({"XXX": _row(0.5)}), regime_state="risk_off"
+    )
+    step(state, rankings, EQ)
+    assert state == before  # caller's input untouched, including through the ratchet
+
+
+def test_high_water_mark_unchanged_on_a_value_decline():
+    state = make_state(EQ, cash=900.0, high_water_mark=1000.0)
+    result = step(state, _rankings(), EQ)
+    assert result.state.high_water_mark == pytest.approx(1000.0)
