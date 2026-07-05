@@ -28,7 +28,13 @@ class BacktestMetrics:
     trade_count: int
     turnover: float  # annualized: total buy notional / mean equity / years
     fees_paid: float
-    fee_drag: float  # fees as a fraction of starting equity (spec: own line)
+    fee_drag: float  # fees / starting equity (spec: fee drag as its own line)
+    gross_profit: float  # P&L before fees: end value - start value + fees_paid
+    # fees / gross_profit -- serves the spec's crypto go-live criterion
+    # "fee drag < 30% of gross returns". NaN when gross_profit <= 0: fee drag
+    # as a share of gross is meaningless with no gross gains, and an
+    # unevaluable criterion is itself a failing state for go-live.
+    fee_drag_vs_gross: float
     benchmark_total_return: float
     benchmark_sharpe: float
     gate_passed: bool  # sharpe > benchmark_sharpe AND total_return > 0 (spec)
@@ -59,6 +65,11 @@ def metrics_from_curves(
     fees_paid: float,
     periods_per_year: int,
 ) -> BacktestMetrics:
+    if not equity.index.equals(benchmark.index):
+        # The engine guarantees identical session indexes; this is a public
+        # pure function, so misuse fails loud instead of comparing curves
+        # over different periods.
+        raise ValueError("equity and benchmark curves must share an identical index")
     total = float(equity.iloc[-1] / equity.iloc[0]) - 1.0
     years = len(equity) / periods_per_year
     annualized = (1.0 + total) ** (1.0 / years) - 1.0 if years > 0 and total > -1.0 else math.nan
@@ -72,6 +83,7 @@ def metrics_from_curves(
         and sharpe > benchmark_sharpe
         and total > 0.0
     )
+    gross_profit = float(equity.iloc[-1] - equity.iloc[0]) + fees_paid
     return BacktestMetrics(
         total_return=total,
         annualized_return=annualized,
@@ -84,6 +96,8 @@ def metrics_from_curves(
         turnover=buy_notional / float(equity.mean()) / years if years > 0 else math.nan,
         fees_paid=fees_paid,
         fee_drag=fees_paid / float(equity.iloc[0]),
+        gross_profit=gross_profit,
+        fee_drag_vs_gross=fees_paid / gross_profit if gross_profit > 0.0 else math.nan,
         benchmark_total_return=float(benchmark.iloc[-1] / benchmark.iloc[0]) - 1.0,
         benchmark_sharpe=benchmark_sharpe,
         gate_passed=gate,
