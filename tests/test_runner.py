@@ -427,6 +427,50 @@ def test_run_writes_daily_digest(tmp_path):
     assert "Top 5 ranking" in text
 
 
+# --- earnings input journaled behind the blackout flag ---
+
+
+def test_run_event_omits_earnings_when_blackout_disabled(tmp_path):
+    # config/equities.toml ships earnings_blackout_enabled = false.
+    _run(tmp_path)
+    run_event = Journal(tmp_path / "journal" / "equities.jsonl").last_event(
+        types=frozenset({"run"})
+    )
+    assert "earnings" not in run_event
+
+
+def test_run_event_carries_earnings_map_when_enabled_and_fetched(tmp_path, monkeypatch):
+    import dataclasses
+
+    enabled = dataclasses.replace(
+        EQ, portfolio=dataclasses.replace(EQ.portfolio, earnings_blackout_enabled=True)
+    )
+    fetched = {"UPUP": ("2026-07-02",), "FLAT": ()}
+    monkeypatch.setattr(
+        "trading.runner.fetch_earnings_dates", lambda symbols: (dict(fetched), False)
+    )
+    adapter = FakeAdapter()
+    cache = OhlcvCache(tmp_path / "cache", enabled.data.refetch_days)
+    run_venue(
+        enabled,
+        adapter,
+        cache,
+        now=NOW,
+        state_root=tmp_path / "state",
+        journal_root=tmp_path / "journal",
+        notify=lambda title, message: None,
+        digest_root=tmp_path / "digest",
+    )
+    run_event = Journal(tmp_path / "journal" / "equities.jsonl").last_event(
+        types=frozenset({"run"})
+    )
+    # JSON round-trips tuples as lists.
+    assert run_event["earnings"] == {
+        "dates": {k: list(v) for k, v in fetched.items()},
+        "degraded": False,
+    }
+
+
 # --- intraday partial-bar guard (session venues only) ---
 
 

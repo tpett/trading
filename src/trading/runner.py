@@ -185,9 +185,11 @@ def _run_event(
     config: VenueConfig,
     now: datetime.datetime,
     extra_warnings: list[str],
+    earnings: dict[str, tuple[str, ...]] | None = None,
+    earnings_degraded: bool = False,
 ) -> dict:
     benchmark_close = float(rankings.benchmark_bars.loc[: result.decision_ts, "close"].iloc[-1])
-    return {
+    event = {
         "event": "run",
         "venue": config.name,
         "run_key": result.run_key,
@@ -222,6 +224,13 @@ def _run_event(
         "snapshot": asdict(result.snapshot),
         "state_after": to_state_dict(result.state),
     }
+    if earnings is not None:
+        # Only present when the earnings blackout is on and the map was
+        # fetched this run -- so M3 replay can reproduce step()'s inputs
+        # exactly (a symbol->dates map is otherwise unrecoverable from the
+        # journal alone; the ranking table doesn't carry it).
+        event["earnings"] = {"dates": earnings, "degraded": earnings_degraded}
+    return event
 
 
 def run_venue(
@@ -327,11 +336,12 @@ def run_venue(
         allow_entries = pd.Timestamp(now) <= deadline
 
         earnings = None
+        earnings_degraded = False
         extra_warnings: list[str] = []
         if config.portfolio.earnings_blackout_enabled:
             candidates = list(rankings.table.index[:EARNINGS_CANDIDATE_DEPTH])
-            earnings, degraded = fetch_earnings_dates(candidates)
-            if degraded:
+            earnings, earnings_degraded = fetch_earnings_dates(candidates)
+            if earnings_degraded:
                 extra_warnings.append(
                     "earnings fetch degraded: blackout filter partially disabled this run"
                 )
@@ -352,7 +362,11 @@ def run_venue(
         # with no run_key in the journal, and a restart would re-execute
         # step() on refetched (possibly different) data: double-processing.
         try:
-            journal.append(_run_event(result, rankings, config, now, extra_warnings))
+            journal.append(
+                _run_event(
+                    result, rankings, config, now, extra_warnings, earnings, earnings_degraded
+                )
+            )
         except Exception as exc:
             notify("trading: journal write failed", f"{venue}: {exc}")
             return RunOutcome(
