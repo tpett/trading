@@ -55,6 +55,11 @@ trading backtest --venue equities --holdout          # final 6 months, evaluated
   result. Quote results WITH their experiment count.
 - Gate: annualized Sharpe of daily returns (0% cash) above buy-and-hold
   SPY/BTC over the identical period AND positive total return.
+- A plain multi-year `--from`/`--to` backtest is one continuous `replay()`:
+  a circuit-breaker trip halts entries for the rest of that run, exactly
+  like live (only `reset-breaker` clears it there). `--walk-forward` windows
+  are insulated from this — each window replays against fresh state, so a
+  trip in one window never bleeds into the next.
 
 ### Data caveats (read before trusting a number)
 
@@ -72,7 +77,9 @@ trading backtest --venue equities --holdout          # final 6 months, evaluated
   could not serve from a second exchange; Kraken wins overlaps (see `[data]`
   in `config/crypto.toml`). Live runs skip the backfill exchange because
   Kraken serves recent windows fully — a data-driven outcome, not an
-  unconditional code path.
+  unconditional code path. The crypto adapter's `universe()` also ignores
+  `as_of` for status: today's `sell_only`/`untradable` snapshot is projected
+  onto every historical session, not just the current one.
 - NYSE half-days are handled conservatively by the live session guard (waits
   for 16:00 ET + buffer); the backtest calendar is SPY's actual bar dates, so
   half-days are traded normally there.
@@ -119,10 +126,12 @@ Per venue: portfolio value and P&L vs buying-and-holding the benchmark
 (SPY/BTC) since bootstrap; open positions with entry rationale (rank +
 composite at entry) and distance-to-stop; today's fills; pending orders;
 top-5 ranking; regime; warnings (quarantined symbols, stale-run entry skips,
-circuit-breaker state, earnings-data degradation). Per-trade P&L excludes
-the entry fee (cash totals are exact; see Open Items in the spec). A
-permanently-delisted holding warns every run until manually handled — M3
-adds a close command.
+circuit-breaker state, earnings-data degradation). Per-trade P&L includes
+the entry fee (folded into `realized_pnl`; cash totals are exact). A
+permanently-unfillable holding (e.g. a delisted symbol that never prints
+another bar) warns every run until an operator manually intervenes on
+`state/<venue>/portfolio.json`; a dedicated `close` command remains future
+work.
 
 ## Earnings blackout
 
