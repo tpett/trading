@@ -185,8 +185,6 @@ def test_holdout_runs_once_then_requires_typed_confirmation(backtest_env, capsys
         "crypto",
         "--holdout",
         "--json",
-        "--to",
-        "2026-01-14",
         "--config-dir",
         str(backtest_env / "config"),
         "--journal-dir",
@@ -238,3 +236,47 @@ def test_walk_forward_and_holdout_together_is_an_error(backtest_env, capsys):
     )
     assert rc == 1
     assert "holdout" in capsys.readouterr().err.lower()
+
+
+def test_holdout_with_to_is_rejected_not_a_partial_evaluation(backtest_env, capsys):
+    # A partial --to window would still journal kind="holdout" and arm the
+    # once-only gate on less than the real evaluation -- reject it outright.
+    rc = main(
+        [
+            "backtest",
+            "--venue",
+            "crypto",
+            "--holdout",
+            "--to",
+            "2026-01-05",
+            "--config-dir",
+            str(backtest_env / "config"),
+            "--journal-dir",
+            str(backtest_env / "journal"),
+        ]
+    )
+    assert rc == 1
+    assert "holdout" in capsys.readouterr().err.lower()
+    journal = experiments_journal(backtest_env / "journal", "crypto")
+    assert list(journal.events()) == []
+
+
+def test_holdout_with_from_is_rejected(backtest_env, capsys):
+    rc = main(
+        [
+            "backtest",
+            "--venue",
+            "crypto",
+            "--holdout",
+            "--from",
+            "2025-12-15",
+            "--config-dir",
+            str(backtest_env / "config"),
+            "--journal-dir",
+            str(backtest_env / "journal"),
+        ]
+    )
+    assert rc == 1
+    assert "holdout" in capsys.readouterr().err.lower()
+    journal = experiments_journal(backtest_env / "journal", "crypto")
+    assert list(journal.events()) == []

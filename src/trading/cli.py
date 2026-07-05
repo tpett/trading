@@ -482,6 +482,14 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.holdout and (args.from_date is not None or args.to_date is not None):
+        print(
+            "ERROR: --holdout is a fixed final window ([backtest].holdout_start "
+            "through yesterday); it cannot be combined with --from or --to (a "
+            "partial evaluation would still spend the once-only holdout).",
+            file=sys.stderr,
+        )
+        return 1
     config = load_venue_config(args.venue, Path(args.config_dir))
     bt = config.backtest
     now = _utcnow()
