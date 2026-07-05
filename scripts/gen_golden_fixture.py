@@ -13,7 +13,11 @@ The fixture is shaped so the frozen expectation exercises every exit path:
   TSF spikes then drifts flat/down   -> time_stop
   FEX ramps, flips untradable Apr 1  -> forced_exit
   background walkers churn           -> trend_break
-  LAT lists Feb 18 (after start)     -> skipped sessions (coverage floor)
+  DDD bars deleted Apr 15-17         -> skipped sessions (coverage floor: a
+                                        LISTED symbol missing that session)
+  LAT lists Feb 18 (after start)     -> pre-listing sessions RUN with LAT
+                                        outside the eligible denominator
+                                        (listing-aware coverage regression)
 Regeneration fails loudly if any of those paths goes missing.
 
 Usage:
@@ -73,8 +77,15 @@ SHAPED = {
     "FEX": (13, [(150, 0.010, 0.008)]),
 }
 # Late lister: symbol -> (seed, first bar's day offset from START, drift).
-# 8 of 9 members before this date -> coverage 89% < 90% -> skipped sessions.
+# Listing-aware coverage keeps LAT out of the eligible denominator until its
+# first bar, so its pre-listing sessions RUN (asserted by the golden test);
+# it used to be the skip trigger before coverage became listing-aware.
 LATE = {"LAT": (14, 48, 0.001)}
+# Bar hole: symbol -> (first missing UTC day, contiguous days deleted).
+# A LISTED symbol missing a session's bar drags eligible coverage to
+# 8/9 = 89% < the 90% floor -> the skipped-session path is exercised by a
+# data-quality failure, the semantic that survives listing-aware coverage.
+HOLE = {"DDD": ("2025-04-15", 3)}
 BENCH_SEED = 99
 BENCH_DRIFT = 0.002
 # Status flips written to universe.csv: symbol -> first untradable date.
@@ -146,7 +157,11 @@ def main() -> None:
     bars_dir = GOLDEN / "bars"
     bars_dir.mkdir(parents=True, exist_ok=True)
     for symbol, (seed, drift) in sorted(BACKGROUND.items()):
-        build_frame(seed, drift).to_csv(bars_dir / f"{symbol}.csv")
+        frame = build_frame(seed, drift)
+        if symbol in HOLE:
+            first, days = HOLE[symbol]
+            frame = frame.drop(pd.date_range(first, periods=days, freq="D", tz="UTC"))
+        frame.to_csv(bars_dir / f"{symbol}.csv")
     for symbol, (seed, segments) in sorted(SHAPED.items()):
         build_shaped_frame(seed, segments).to_csv(bars_dir / f"{symbol}.csv")
     for symbol, (seed, start_day, drift) in sorted(LATE.items()):
@@ -176,7 +191,7 @@ def main() -> None:
         if missing:
             sys.exit(f"FATAL: golden fixture lost exit path(s) {sorted(missing)} -- reshape SHAPED")
         if not expected["sessions_skipped"]:
-            sys.exit("FATAL: golden fixture has no skipped session -- delay LAT's listing")
+            sys.exit("FATAL: golden fixture has no skipped session -- widen the DDD bar hole")
 
 
 if __name__ == "__main__":

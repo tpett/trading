@@ -111,33 +111,76 @@ def test_member_leaving_universe_is_force_exited(tmp_path):
 
 
 def test_thin_session_is_skipped_and_state_carries_over(tmp_path):
+    """A session where most LISTED members lack a bar covering it (exchange
+    hole, mid-window delisting) is skipped; state carries over flat."""
     thin_day = datetime.date(2025, 3, 10)
+    thin_ts = pd.Timestamp(thin_day, tz="UTC")
+    frames = _fixture_frames()
+    for symbol in ("BBB", "CCC", "DDD"):  # listed (first bar long before), hole on thin_day
+        frames[symbol] = frames[symbol].drop(thin_ts)
 
-    ghosts = ["GHOST1", "GHOST2", "GHOST3", "GHOST4", "GHOST5"]
-
-    def members_on(as_of: datetime.date) -> list[str]:
-        if as_of == thin_day:
-            return ["AAA", "BBB", "CCC", "DDD", *ghosts]  # 4 of 9 have data -> 0.44 < 0.5 floor
-        return ["AAA", "BBB", "CCC", "DDD"]
-
-    config, prepared = _prepare(tmp_path, members_on=members_on)
+    config, prepared = _prepare(tmp_path, frames)
     skipped = [s for s in prepared.sessions if s.skip_reason is not None]
-    assert [s.ts.date() for s in skipped] == [thin_day]
-    assert skipped[0].survivorship_ratio == pytest.approx(4 / 9)
+    assert [s.ts.date() for s in skipped] == [thin_day]  # 1 of 4 eligible -> 0.25 < 0.5 floor
+    assert skipped[0].survivorship_ratio == pytest.approx(1 / 4)
     result = replay(prepared, config)
     assert any(str(thin_day) in entry for entry in result.sessions_skipped)
-    # GHOST symbols never had data: counted as survivorship gaps.
-    assert set(prepared.missing_symbols) == set(ghosts)
     # Both curves are defined on the SAME session index: a skipped session's
     # value is carried forward (flat -- nothing traded), never omitted, so
     # downstream index-aligned arithmetic never sees silent NaNs.
     assert result.equity_curve.index.equals(result.benchmark_curve.index)
-    thin_ts = pd.Timestamp(thin_day, tz="UTC")
     position = result.equity_curve.index.get_loc(thin_ts)
     assert position > 0
     assert result.equity_curve.iloc[position] == result.equity_curve.iloc[position - 1]
     # sessions_run counts only sessions the simulator actually stepped.
     assert result.sessions_run == len(result.equity_curve) - 1
+
+
+def test_never_listed_members_do_not_gate_coverage_but_stay_visible(tmp_path):
+    """Members with NO data in the fetched window (post-window listings in
+    crypto's today-snapshot universe) are excluded from the skip gate's
+    denominator, but stay in the reported survivorship ratio and the missing
+    list -- the shrinking historical universe is visible, never a skip."""
+    ghosts = ["GHOST1", "GHOST2", "GHOST3", "GHOST4", "GHOST5"]
+
+    def members_on(as_of: datetime.date) -> list[str]:
+        return ["AAA", "BBB", "CCC", "DDD", *ghosts]  # 4/9 = 0.44 < 0.5: old gate skipped ALL
+
+    config, prepared = _prepare(tmp_path, members_on=members_on)
+    assert all(s.skip_reason is None for s in prepared.sessions)
+    assert all(s.survivorship_ratio == pytest.approx(4 / 9) for s in prepared.sessions)
+    assert set(prepared.missing_symbols) == set(ghosts)
+    result = replay(prepared, config)
+    assert result.sessions_run == len(prepared.sessions)
+    assert result.survivorship_ratio == pytest.approx(4 / 9)
+
+
+def test_mid_window_listing_shrinks_coverage_denominator(tmp_path):
+    """Regression for the 2023 crypto smoke: members whose first available
+    bar postdates a session (listed mid-window) must not count against that
+    session's coverage; they join the denominator once their data begins."""
+    listing_ts = pd.Timestamp("2025-03-15", tz="UTC")
+    frames = {
+        "AAA": noisy_frame(seed=1, drift=0.01),
+        "BBB": noisy_frame(seed=2, drift=0.002),
+        "CCC": noisy_frame(seed=3, drift=0.0),
+        "EEE": noisy_frame(seed=5, start="2025-03-15", periods=60),
+        "FFF": noisy_frame(seed=6, start="2025-03-15", periods=60),
+        "BENCH": noisy_frame(seed=9, drift=0.003),
+    }
+    config = _with_benchmark(small_config(min_session_coverage=0.9))
+    adapter = FakeBacktestAdapter(frames, "BENCH")
+    cache = OhlcvCache(tmp_path / "cache", config.data.refetch_days)
+    prepared = prepare(config, adapter, cache, START, END)
+
+    early = [s for s in prepared.sessions if s.ts < listing_ts]
+    late = [s for s in prepared.sessions if s.ts >= listing_ts]
+    assert early and late
+    # Old gate: 3/5 = 60% < 90% floor -> every early session skipped.
+    assert all(s.skip_reason is None for s in early)
+    assert all(s.survivorship_ratio == pytest.approx(3 / 5) for s in early)
+    assert all(s.skip_reason is None for s in late)
+    assert all(s.survivorship_ratio == pytest.approx(5 / 5) for s in late)
 
 
 def test_crypto_results_carry_survivorship_caveat(tmp_path):

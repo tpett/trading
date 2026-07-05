@@ -43,7 +43,9 @@ class SessionPlan:
     ts: pd.Timestamp
     rankings: RankingsResult | None  # bars/benchmark_bars stripped (memory); None = skipped
     clean_symbols: tuple[str, ...]  # quarantine-passed members this session
-    survivorship_ratio: float  # members-with-data / point-in-time members
+    # members-with-a-bar-this-session / ALL point-in-time members (reported;
+    # the skip gate uses the listing-aware eligible denominator instead)
+    survivorship_ratio: float
     skip_reason: str | None
 
 
@@ -122,9 +124,20 @@ def prepare(
     sessions: list[SessionPlan] = []
     for ts in session_index:
         infos = members_by_session[ts]
-        available = [i for i in infos if i.symbol in bars and not bars[i.symbol].loc[:ts].empty]
+        # Listing-aware coverage gate (plan: listing dates inferred from data
+        # availability). The crypto universe is TODAY'S snapshot, so members
+        # not yet listed at this session -- first available bar after ts, or
+        # no data anywhere in the fetched window -- cannot count against
+        # coverage. Members that HAVE listed but lack a bar covering this
+        # session (delisted mid-window, exchange hole) still drag it down.
+        eligible = [i for i in infos if i.symbol in bars and bars[i.symbol].index[0] <= ts]
+        available = [i for i in eligible if ts in bars[i.symbol].index]
+        coverage = len(available) / len(eligible) if eligible else 0.0
+        # The reported survivorship ratio keeps ALL point-in-time members in
+        # the denominator so the shrinking historical universe stays visible
+        # on every result (spec caveat), even though it no longer gates skips.
         ratio = len(available) / len(infos) if infos else 0.0
-        if ratio < config.backtest.min_session_coverage:
+        if coverage < config.backtest.min_session_coverage:
             sessions.append(
                 SessionPlan(
                     ts=ts,
@@ -132,7 +145,7 @@ def prepare(
                     clean_symbols=(),
                     survivorship_ratio=ratio,
                     skip_reason=(
-                        f"coverage {ratio:.0%} below {config.backtest.min_session_coverage:.0%}"
+                        f"coverage {coverage:.0%} below {config.backtest.min_session_coverage:.0%}"
                     ),
                 )
             )
