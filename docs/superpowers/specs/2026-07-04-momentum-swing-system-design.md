@@ -74,9 +74,12 @@ Each venue adapter implements: `universe(as_of)`, `constraints()`,
   Robinhood `get_equity_historicals` — the actual execution venue's data.
 - **Earnings dates:** sourced programmatically (yfinance earnings calendar)
   in both live and backtest modes, using point-in-time dates for backtests.
-  If that source proves unreliable in practice, the filter is dropped
-  entirely (both modes) and the divergence documented — a filter that exists
-  live but not in backtest is worse than no filter.
+  **Status (2026-07-05 live check): DROPPED in both modes** — yfinance's
+  earnings-calendar data proved stale in practice, so the filter is
+  disabled — a filter that exists live but not in backtest is worse than no
+  filter. The code path remains behind the `earnings_blackout_enabled`
+  kill-switch (`config/equities.toml`) as the re-enable path if a reliable
+  source appears.
 - **Costs:** 5 bps slippage assumption; zero commission.
 - **Rules modeled:** market hours per NYSE calendar; T+1 cash-account
   settlement (sale proceeds unspendable until next session).
@@ -157,8 +160,11 @@ so filter mechanics can never manufacture a spurious exit):
 3. Time stop: flat-to-down at limit → exit (dead money blocks a slot).
 4. Regime flush: risk-off recomputes each stop once at 1.0× the frozen
    entry ATR (one-way ratchet; never loosened until position closes).
-5. Forced states: symbol goes `sell_only`/delisted → exit next bar, logged
-   as a forced exit distinct from signal exits.
+5. Forced states: a **held position** whose symbol goes `sell_only` OR
+   `untradable`, or that is delisted (dropped from the venue universe
+   entirely) → force-exited next bar, logged as a forced exit distinct from
+   signal exits. `sell_only` is force-exited on the same footing as
+   `untradable`/delisted — it is not merely blocked from new entries.
 
 **Fill model:** decisions use data through the last completed bar; fills at
 next session open (equities) / next UTC daily bar (crypto) + venue costs.
@@ -166,11 +172,17 @@ v1 is market-orders-only; the limit/maker fill model is v2 alongside any
 maker-order strategy. No same-bar round trips, no lookahead.
 
 **Hard rails (paper and live):** never average down; never exceed position
-count; no margin; max 25% of portfolio into new entries per day.
+count; no margin; max daily deployment into new entries: 25% of portfolio
+(equities) / **35%** (crypto — a single ~30% crypto position could never
+clear a 25% cap, so the crypto rail is set just above its own position
+size, still capping entries at one new crypto position per day).
 
 **Circuit breakers & sanity checks:**
 - Portfolio drawdown > 20% from high-water mark (config) → halt all entries,
   venue-wide, until manual reset via CLI. Applies in paper and live.
+  `reset-breaker` rebases the high-water mark to the last journaled
+  snapshot value (not the pre-drawdown peak) — otherwise the stale HWM
+  re-trips the breaker on the very next run.
 - Per-symbol data sanity: a day-over-day move beyond a config bound (default
   40%) without a known corporate action quarantines the symbol (no trades,
   warn in digest) until it passes or is manually cleared.
@@ -191,10 +203,15 @@ Every number above is config, not constant.
    backtest models. The agent executes the pipeline's decisions verbatim and
    reports discrepancies; it never originates trades.
 4. **Missed/late runs:** launchd coalesces missed jobs on wake. A late run
-   still processes **exits**; it skips **entries** if more than a config
-   staleness bound past the decision bar (default: 2 hours after open for
-   equities, 6 hours past UTC midnight for crypto). Skipped-late entries are
-   journaled as such. No catch-up trading of older bars, ever.
+   still processes **exits**; it skips **entries** once past the uniform
+   staleness deadline **decision bar + 1 day + `staleness_hours`** (config;
+   equities 2h, crypto 7h — widened from a nominal 6h so the winter-UTC
+   boundary doesn't land exactly on it). Skipped-late entries are journaled
+   as such. No catch-up trading of older bars, ever. A **separate** guard at
+   the runner level (session venues only) refuses to run at all — before any
+   journal write — if a coalesced wake lands mid-session and the decision
+   bar the data provider serves is still today's in-progress bar (see Open
+   Items).
 
 ## Backtesting & Validation
 
@@ -315,6 +332,18 @@ feature weights.
 - Agentic crypto GA date and its constraints: watch Robinhood announcements.
 - Point-in-time constituent dataset selection (several free options; pick at
   implementation time and record provenance in the repo).
-- yfinance earnings-date reliability: evaluate during implementation; drop
-  the earnings filter (both modes) if unreliable.
+- yfinance earnings-date reliability: **resolved 2026-07-05** — unreliable
+  (stale data); filter dropped in both modes (see Venue Model, Equities /
+  Earnings dates).
 - Digest delivery beyond repo file: decide after 2 weeks of use.
+- **Intraday session guard (added during M2 final review):** the runner
+  refuses to run a session venue (`costs.trades_24_7 = false`) whose decision
+  bar shares today's exchange-local date until local time passes session
+  close + `session_close_buffer_minutes` (config; equities default 90) — a
+  launchd-coalesced wake landing mid-session must never trade on an
+  in-progress daily bar. See Execution Split #4.
+- **Per-trade realized P&L excludes the entry fee** (the buy-side fee is
+  deducted from cash at fill time, not folded into `entry_price`): cash
+  accounting is exact, but a per-trade `realized_pnl` figure understates
+  round-trip cost by the entry fee. Fix when M3 aggregates trade-level
+  stats; not a cash-correctness bug today.
