@@ -98,3 +98,17 @@ def test_config_hash_is_stable_and_sensitive(tmp_path):
         config, portfolio=dataclasses.replace(config.portfolio, max_positions=4)
     )
     assert config_hash(changed) != config_hash(config)
+
+
+def test_append_to_fully_torn_single_line_file(tmp_path):
+    path = tmp_path / "torn.jsonl"
+    path.write_bytes(b'{"event": "run", "torn')  # no newline anywhere in the file
+    journal = Journal(path)
+    assert list(journal.events()) == []
+
+    journal.append({"event": "after_repair"})
+    events = list(journal.events())
+    assert [e["event"] for e in events] == ["after_repair"]
+    # The torn fragment is gone entirely, not merged into the new line.
+    assert path.read_text().count("\n") == 1
+    assert "torn" not in path.read_text()

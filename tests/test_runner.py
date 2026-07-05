@@ -1,12 +1,14 @@
 import datetime
 import json
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from sim_helpers import CR, EQ
+from trading.config import load_venue_config
 from trading.data.cache import OhlcvCache
 from trading.journal import Journal
 from trading.runner import (
@@ -529,3 +531,15 @@ def test_digest_write_failure_never_blocks_state_save(tmp_path, monkeypatch):
     assert not (tmp_path / "digest" / "2026-07-01.md").exists()
     digest_notes = [n for n in notes if "digest" in n[0]]
     assert len(digest_notes) == 1  # notified exactly once, then carried on
+
+
+def test_session_guard_is_dst_aware():
+    eq = load_venue_config("equities", Path("config"))
+    # July (EDT, UTC-4): 21:45 UTC = 17:45 local -> past the 17:30 deadline: run allowed.
+    summer_bar = pd.Timestamp("2026-07-06", tz="UTC")
+    summer_now = datetime.datetime(2026, 7, 6, 21, 45, tzinfo=datetime.UTC)
+    assert intraday_partial_bar_reason(eq, summer_bar, summer_now) is None
+    # November (EST, UTC-5): 21:45 UTC = 16:45 local -> BEFORE the deadline: refuse.
+    winter_bar = pd.Timestamp("2026-11-02", tz="UTC")
+    winter_now = datetime.datetime(2026, 11, 2, 21, 45, tzinfo=datetime.UTC)
+    assert intraday_partial_bar_reason(eq, winter_bar, winter_now) is not None

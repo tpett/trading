@@ -54,6 +54,11 @@ atr_window = 20                     # ATR-20 (spec); frozen at entry
 # ET close, the runner aborts rather than treat a partial bar as final
 # (spec: Missed/late runs). 90min is comfortably past yfinance's post-close
 # settle time for the daily bar.
+# NYSE half-days (e.g. day after Thanksgiving, 13:00 ET close) are NOT special-
+# cased: the guard still waits for 16:00 ET + buffer. That is conservative --
+# it can only delay a half-day run by ~3h, never trade a partial bar. If that
+# delay ever matters, the fix is a session-calendar lookup feeding this guard,
+# not a smaller buffer.
 session_close_buffer_minutes = 90
 
 [data]

@@ -1,9 +1,10 @@
 import math
+from dataclasses import replace
 
 import pandas as pd
 import pytest
 
-from sim_helpers import CR, EQ, frame, make_rankings, make_state, make_table
+from sim_helpers import AS_OF, CR, EQ, frame, make_rankings, make_state, make_table
 from trading.simulator.entries import evaluate_entries
 from trading.simulator.state import PendingOrder, Position, Skip
 
@@ -197,3 +198,40 @@ def test_earnings_day_of_decision_blocks():
     orders, skips = evaluate_entries(state, rankings, EQ, DECISION, VALUE, earnings=earnings)
     assert orders == []
     assert Skip("AAA", "entry", "earnings_blackout") in skips
+
+
+def test_fee_gate_boundary_equality_passes():
+    # Crypto round-trip cost = 2 * (95 + 5) bps = 2.0%; gate = 3.0x = 6.0%.
+    # A raw 30d return of EXACTLY 6.0% passes (strict <).
+    round_trip = 2 * (CR.costs.taker_fee_bps + CR.costs.slippage_bps) / 1e4
+    exactly_at_gate = CR.portfolio.min_raw_return_cost_multiple * round_trip
+    bars = {"BTC": frame(end="2026-07-01")}
+    table = make_table(
+        {"BTC": {"status": "tradable", "composite": 0.9, "raw_return_30d": exactly_at_gate}}
+    )
+    rankings = make_rankings(CR, bars, table)
+    state = make_state(CR)
+    orders, skips = evaluate_entries(state, rankings, CR, AS_OF, 1000.0)
+    assert [o.symbol for o in orders] == ["BTC"]
+    assert ("BTC", "fee_gate") not in [(s.symbol, s.reason) for s in skips]
+
+
+def test_deployment_cap_boundary_equality_passes():
+    # With max_daily_deployment_pct == position_size_pct the first entry's
+    # notional EQUALS the budget: it must pass (strict >); the second
+    # candidate then faces a zero budget and is capped.
+    config = replace(
+        EQ, portfolio=replace(EQ.portfolio, max_daily_deployment_pct=EQ.portfolio.position_size_pct)
+    )
+    bars = {"AAA": frame(end="2026-07-01"), "BBB": frame(end="2026-07-01")}
+    table = make_table(
+        {
+            "AAA": {"status": "tradable", "composite": 0.9, "raw_return_30d": 0.5},
+            "BBB": {"status": "tradable", "composite": 0.8, "raw_return_30d": 0.5},
+        }
+    )
+    rankings = make_rankings(config, bars, table)
+    state = make_state(config)
+    orders, skips = evaluate_entries(state, rankings, config, AS_OF, 1000.0)
+    assert [o.symbol for o in orders] == ["AAA"]
+    assert ("BBB", "daily_deployment_cap") in [(s.symbol, s.reason) for s in skips]

@@ -1,3 +1,4 @@
+import datetime
 import math
 
 import pandas as pd
@@ -195,3 +196,30 @@ def test_fill_price_within_next_bar_range_plus_slippage():
     fill_bar = bars["AAA"].loc[pd.Timestamp("2026-07-01", tz="UTC")]
     slip = 5.0 / 1e4
     assert fill_bar["low"] * (1 - slip) <= fills[0].price <= fill_bar["high"] * (1 + slip)
+
+
+def test_settlement_crosses_weekend_t_plus_1():
+    # Sell decided Thu 2026-06-04 fills Fri 2026-06-05 -> available_on Sat
+    # 2026-06-06. Cash must stay unspendable through Friday's session and be
+    # released by Monday's (2026-06-08) decision date.
+    bars = {"AAA": frame(end="2026-06-05", periods=5)}  # Mon..Fri, freq="B"
+    state = make_state(EQ, positions={"AAA": _position()}, cash=0.0)
+    state.pending_orders = [
+        PendingOrder(
+            symbol="AAA",
+            side="sell",
+            notional=0.0,
+            decision_ts="2026-06-04T00:00:00+00:00",
+            reason="trend_break",
+        )
+    ]
+    fills, _ = apply_fills(state, bars, EQ)
+    proceeds = fills[0].qty * fills[0].price  # zero commission on equities
+    assert fills[0].bar_ts == "2026-06-05T00:00:00+00:00"
+    assert state.settlements[0].available_on == "2026-06-06"  # Saturday
+
+    release_settlements(state, datetime.date(2026, 6, 5))  # still Friday
+    assert state.cash == 0.0
+    release_settlements(state, datetime.date(2026, 6, 8))  # Monday's decision date
+    assert state.cash == pytest.approx(proceeds)
+    assert state.settlements == []
