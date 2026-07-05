@@ -399,3 +399,94 @@ def test_reset_breaker_when_not_tripped_is_a_noop(tmp_path, monkeypatch, capsys)
 
 def test_reset_breaker_without_state_errors(tmp_path, capsys):
     assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
+
+
+def _trip_breaker(tmp_path, hwm=5000.0):
+    from trading.runner import load_state, save_state, state_path
+
+    path = state_path(tmp_path / "state", "equities")
+    state = load_state(path)
+    state.breaker_tripped = True
+    state.breaker_tripped_at = "2026-07-01T00:00:00+00:00"
+    state.high_water_mark = hwm
+    save_state(path, state)
+    return path
+
+
+def test_reset_breaker_journals_first_and_restore_replays_reset(tmp_path, monkeypatch, capsys):
+    """Crash between the two writes must leave state BEHIND the journal (the
+    recoverable direction), and restore must re-apply the journaled reset."""
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+
+    from trading.journal import Journal
+    from trading.runner import load_state, save_state
+
+    path = _trip_breaker(tmp_path)
+    before = path.read_text()
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESET")
+
+    def torn_write(path, state):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("trading.cli.save_state", torn_write)
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
+    assert path.read_text() == before  # state untouched by the failed reset
+
+    events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
+    reset_event = events[-1]
+    assert reset_event["event"] == "breaker_reset"
+    assert reset_event["high_water_mark"] == pytest.approx(1000.0)
+    assert reset_event["last_run_key"] == "equities:2026-07-01T00:00:00+00:00"
+
+    # restore_from_journal re-applies the journaled reset on top of the run
+    # snapshot: it can never silently undo an operator's reset.
+    monkeypatch.setattr("trading.cli.save_state", save_state)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESTORE")
+    assert main(_run_args(tmp_path, cfg_dir, extra=["--restore-from-journal"])) == 0
+    restored = load_state(path)
+    assert restored.breaker_tripped is False
+    assert restored.breaker_tripped_at is None
+    assert restored.high_water_mark == pytest.approx(1000.0)
+
+
+def test_reset_breaker_refuses_when_state_behind_journal(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+
+    from trading.runner import load_state, save_state, state_path
+
+    path = state_path(tmp_path / "state", "equities")
+    state = load_state(path)
+    state.breaker_tripped = True
+    state.last_run_key = "equities:1999-01-01T00:00:00+00:00"  # stale state file
+    save_state(path, state)
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESET")
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
+    assert "behind journal" in capsys.readouterr().err
+    assert load_state(path).breaker_tripped is True  # untouched
+
+
+def test_reset_breaker_eof_at_prompt_aborts_cleanly(tmp_path, monkeypatch, capsys):
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+
+    from trading.runner import load_state
+
+    path = _trip_breaker(tmp_path)
+
+    def eof(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
+    assert "aborted" in capsys.readouterr().out
+    assert load_state(path).breaker_tripped is True

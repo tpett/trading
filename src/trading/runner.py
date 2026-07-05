@@ -364,12 +364,27 @@ def restore_from_journal(venue: str, state_root: Path, journal_root: Path) -> st
     """Recovery for a corrupt state file: replay the last journaled snapshot.
     The CLI gates this behind typed operator confirmation."""
     journal = Journal(journal_root / f"{venue}.jsonl")
+    last: dict | None = None
+    reset_after: dict | None = None  # breaker_reset journaled AFTER the last run
     try:
-        last = journal.last_event(types=frozenset({"run"}))
+        for event in journal.events():
+            kind = event.get("event")
+            if kind == "run":
+                last, reset_after = event, None
+            elif kind == "breaker_reset":
+                reset_after = event
     except JournalError as exc:
         raise RunnerError(f"journal corrupt: {exc}") from exc
     if last is None or "state_after" not in last:
         raise RunnerError(f"no run event with state_after in {venue} journal")
     state = state_from_dict(last["state_after"])
+    if reset_after is not None:
+        # A manual reset journaled after the last run must survive restore;
+        # replaying only the run snapshot would silently re-trip a breaker
+        # the operator explicitly reset (journal-first ordering means the
+        # event can exist before the reset's state write landed).
+        state.breaker_tripped = False
+        state.breaker_tripped_at = None
+        state.high_water_mark = float(reset_after["high_water_mark"])
     save_state(state_path(state_root, venue), state)
     return f"restored {venue} state from journaled run {last['run_key']}"

@@ -318,22 +318,60 @@ def _cmd_reset_breaker(args: argparse.Namespace) -> int:
     if state is None:
         print(f"no state for {args.venue}; nothing to reset", file=sys.stderr)
         return 1
+    journal = Journal(Path(args.journal_dir) / f"{args.venue}.jsonl")
+    last_run = journal.last_event(types=frozenset({"run"}))
+    # Same fail-safe as run_venue: mutating a state file that is behind the
+    # journal would bake the divergence in. Refuse until reconciled.
+    if last_run is not None and state.last_run_key != last_run["run_key"]:
+        print(
+            f"state file behind journal; run "
+            f"'trading run --venue {args.venue} --restore-from-journal' first",
+            file=sys.stderr,
+        )
+        return 1
     if not state.breaker_tripped:
         print(f"{args.venue}: breaker is not tripped")
         return 0
     print(f"Circuit breaker for {args.venue} tripped at {state.breaker_tripped_at}.")
-    if input("Type RESET to re-enable entries: ").strip() != "RESET":
+    try:
+        answer = input("Type RESET to re-enable entries: ").strip()
+    except EOFError:  # non-interactive stdin: treat as a refusal, not a crash
+        answer = ""
+    if answer != "RESET":
         print("aborted")
         return 1
-    journal = Journal(Path(args.journal_dir) / f"{args.venue}.jsonl")
-    last_run = journal.last_event(types=frozenset({"run"}))
     if last_run is not None:
         # Rebase the high-water mark to the last marked value; otherwise the
         # unchanged HWM re-trips the breaker on the very next run.
         state.high_water_mark = float(last_run["snapshot"]["value"])
     state.breaker_tripped = False
     state.breaker_tripped_at = None
-    save_state(path, state)
-    journal.append({"event": "breaker_reset", "venue": args.venue, "ts": _utcnow().isoformat()})
+    # Journal-FIRST (same crash-safe ordering as run_venue): a crash between
+    # the two writes leaves state behind the journal — the recoverable
+    # direction, and restore_from_journal re-applies this event. The reverse
+    # order would clear the breaker with no journal record, and a later
+    # restore would silently re-trip a breaker the operator explicitly reset.
+    try:
+        journal.append(
+            {
+                "event": "breaker_reset",
+                "venue": args.venue,
+                "ts": _utcnow().isoformat(),
+                "high_water_mark": state.high_water_mark,
+                "last_run_key": state.last_run_key,
+            }
+        )
+    except Exception as exc:
+        print(f"ERROR: journal append failed ({exc}); state untouched", file=sys.stderr)
+        return 1
+    try:
+        save_state(path, state)
+    except Exception as exc:
+        print(
+            f"ERROR: state write failed after journal append ({exc}); recover with "
+            f"'trading run --venue {args.venue} --restore-from-journal'",
+            file=sys.stderr,
+        )
+        return 1
     print(f"{args.venue}: breaker reset; entries re-enabled")
     return 0
