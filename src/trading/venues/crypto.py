@@ -130,10 +130,10 @@ class CryptoAdapter:
         frames: list[pd.DataFrame] = []
         kraken_start = start
 
+        backfill_last: pd.Timestamp | None = None
         if cfg.backfill_exchange and start < boundary:
             # Deep request: rows before the boundary come from the backfill
-            # exchange; Kraken owns [boundary, end]. A pair missing there is
-            # not an error -- it simply has Kraken-depth history only.
+            # exchange; Kraken owns [boundary, end].
             try:
                 deep_rows = _paginate(
                     lambda since_ms: _backfill_fetch(
@@ -143,9 +143,16 @@ class CryptoAdapter:
                     boundary,
                 )
                 if deep_rows:
-                    frames.append(_rows_to_frame(deep_rows))
-            except DataFetchError:
-                pass
+                    deep_frame = _rows_to_frame(deep_rows)
+                    frames.append(deep_frame)
+                    backfill_last = deep_frame.index[-1]
+            except DataFetchError as e:
+                # A pair the backfill exchange does not list is not an error --
+                # it simply has Kraken-depth history only. Anything else
+                # (network, rate limit) must propagate: silently downgrading a
+                # 2018 request to ~700 days would corrupt the backtest.
+                if not isinstance(e.__cause__, ccxt.BadSymbol):
+                    raise
             kraken_start = boundary
 
         try:
@@ -155,7 +162,25 @@ class CryptoAdapter:
         except ccxt.BaseError as e:
             raise DataFetchError(f"kraken fetch failed for {pair}: {e}") from e
         if kraken_rows:
-            frames.append(_rows_to_frame(kraken_rows))
+            kraken_frame = _rows_to_frame(kraken_rows)
+            frames.append(kraken_frame)
+
+        if backfill_last is not None:
+            # Seam guard: if Kraken's real retention window ever shrinks below
+            # backfill_before_days (or the config drifts), the date hole
+            # between the two sources must fail loudly here rather than reach
+            # signal computation silently.
+            seam_ok = (
+                bool(kraken_rows)
+                and (kraken_frame.index[0] - backfill_last).days <= cfg.seam_max_gap_days
+            )
+            if not seam_ok:
+                kraken_first = kraken_frame.index[0].date() if kraken_rows else None
+                raise DataFetchError(
+                    f"deep history seam gap for {pair}: backfill ends "
+                    f"{backfill_last.date()}, kraken starts {kraken_first} "
+                    f"(seam_max_gap_days={cfg.seam_max_gap_days})"
+                )
 
         if not frames:
             raise DataFetchError(f"no crypto data for {pair}")

@@ -82,3 +82,4 @@ drop_incomplete_last_bar = false
 backfill_exchange = ""
 backfill_page_limit = 0
 backfill_before_days = 0
+seam_max_gap_days = 0

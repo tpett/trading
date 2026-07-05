@@ -86,6 +86,7 @@ class DataConfig:
     backfill_exchange: str  # ccxt exchange id for pre-Kraken-window rows; "" disables
     backfill_page_limit: int
     backfill_before_days: int
+    seam_max_gap_days: int  # max calendar-day hole tolerated at the backfill/Kraken seam
 
 
 @dataclass(frozen=True)
