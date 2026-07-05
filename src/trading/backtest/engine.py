@@ -77,7 +77,7 @@ class BacktestResult:
     venue: str
     start: datetime.date
     end: datetime.date
-    equity_curve: pd.Series  # marked portfolio value per session run
+    equity_curve: pd.Series  # marked value per session (skipped: carried forward, flat)
     benchmark_curve: pd.Series  # buy-and-hold, scaled to the same starting balance
     trades: tuple[TradeRecord, ...]
     open_positions: tuple[str, ...]
@@ -190,11 +190,17 @@ def replay(
     warnings: set[str] = set()
     fees_paid = 0.0
     buy_notional = 0.0
+    sessions_run = 0
+    last_value = config.portfolio.starting_balance
 
     for plan in sessions:
         if plan.rankings is None:
-            # Live parity: a run below the coverage floor touches nothing.
+            # Live parity: a run below the coverage floor touches nothing --
+            # but the equity curve still gets a point (the last marked value
+            # carried forward: flat, nothing traded) so both curves stay
+            # defined on the SAME session index.
             skipped.append(f"{plan.ts.date().isoformat()}: {plan.skip_reason}")
+            values[plan.ts] = last_value
             continue
         held = set(state.positions) | {o.symbol for o in state.pending_orders}
         bars: dict[str, pd.DataFrame] = {}
@@ -208,10 +214,13 @@ def replay(
         table = plan.rankings.table
         extras = sorted((held - set(table.index)) & set(bars))
         if extras:
-            # Held names that left the point-in-time universe but still trade:
-            # inject as untradable -> the simulator's own forced-exit path sells
-            # them next bar (spec: dropped from the venue universe). Appended
-            # LAST with NaN composite so entry iteration is unaffected.
+            # Held names absent from this session's table -- they left the
+            # point-in-time universe, or same-session quarantine excluded them
+            # -- but still trade: inject as untradable -> the simulator's own
+            # forced-exit path sells them next bar (spec: dropped from the
+            # venue universe; consistent with live's warn-and-hold -> forced-
+            # exit semantics for quarantined holds). Appended LAST with NaN
+            # composite so entry iteration is unaffected.
             table = table.copy()
             for symbol in extras:
                 row = {column: math.nan for column in table.columns}
@@ -222,7 +231,8 @@ def replay(
         )
         result = step(state, rankings, config)
         state = result.state
-        values[plan.ts] = result.snapshot.value
+        values[plan.ts] = last_value = result.snapshot.value
+        sessions_run += 1
         warnings.update(result.warnings)
         for fill in result.fills:
             fees_paid += fill.fee
@@ -246,7 +256,7 @@ def replay(
                     )
                 )
 
-    if not values:
+    if sessions_run == 0:
         raise BacktestError("every session in the window was skipped; nothing to report")
 
     last_ts = sessions[-1].ts
@@ -262,6 +272,10 @@ def replay(
 
     equity_curve = pd.Series(values).sort_index()
     benchmark_curve = bench_window["close"] / bench_start_close * config.portfolio.starting_balance
+    if not equity_curve.index.equals(benchmark_curve.index):
+        # Cheap invariant, loud beats silent: downstream index-aligned
+        # arithmetic must never see NaNs from mismatched session indexes.
+        raise BacktestError("equity and benchmark curves diverged in index; engine bug")
     ratios = [s.survivorship_ratio for s in sessions]
     return BacktestResult(
         venue=prepared.venue,
@@ -273,7 +287,7 @@ def replay(
         open_positions=tuple(sorted(state.positions)),
         fees_paid=fees_paid,
         buy_notional=buy_notional,
-        sessions_run=len(values),
+        sessions_run=sessions_run,
         sessions_skipped=tuple(skipped),
         survivorship_ratio=sum(ratios) / len(ratios),
         warnings=tuple(sorted(warnings)),

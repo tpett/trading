@@ -128,6 +128,16 @@ def test_thin_session_is_skipped_and_state_carries_over(tmp_path):
     assert any(str(thin_day) in entry for entry in result.sessions_skipped)
     # GHOST symbols never had data: counted as survivorship gaps.
     assert set(prepared.missing_symbols) == set(ghosts)
+    # Both curves are defined on the SAME session index: a skipped session's
+    # value is carried forward (flat -- nothing traded), never omitted, so
+    # downstream index-aligned arithmetic never sees silent NaNs.
+    assert result.equity_curve.index.equals(result.benchmark_curve.index)
+    thin_ts = pd.Timestamp(thin_day, tz="UTC")
+    position = result.equity_curve.index.get_loc(thin_ts)
+    assert position > 0
+    assert result.equity_curve.iloc[position] == result.equity_curve.iloc[position - 1]
+    # sessions_run counts only sessions the simulator actually stepped.
+    assert result.sessions_run == len(result.equity_curve) - 1
 
 
 def test_crypto_results_carry_survivorship_caveat(tmp_path):
@@ -135,6 +145,26 @@ def test_crypto_results_carry_survivorship_caveat(tmp_path):
     result = replay(prepared, config)
     assert CRYPTO_SURVIVORSHIP_CAVEAT in result.warnings
     assert 0.0 < result.survivorship_ratio <= 1.0
+
+
+def test_one_prepare_serves_the_grid_without_bleed_between_replays(tmp_path):
+    # Grid-reuse proof: the same PreparedBacktest replayed under two different
+    # entry_score_threshold configs must diverge where expected, and rerunning
+    # the first config must reproduce its original result exactly (no state
+    # bleeding through the shared prepared object).
+    from dataclasses import replace
+
+    config, prepared = _prepare(tmp_path)
+    strict = replace(config, portfolio=replace(config.portfolio, entry_score_threshold=1.01))
+    baseline = replay(prepared, config)
+    blocked = replay(prepared, strict)
+    assert baseline.trades or baseline.open_positions
+    assert blocked.trades == () and blocked.open_positions == ()
+    assert not baseline.equity_curve.equals(blocked.equity_curve)
+    again = replay(prepared, config)
+    assert again.trades == baseline.trades
+    assert again.open_positions == baseline.open_positions
+    assert again.equity_curve.equals(baseline.equity_curve)
 
 
 def test_replay_window_slicing_runs_fresh_state_per_window(tmp_path):
