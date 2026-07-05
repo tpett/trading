@@ -327,11 +327,16 @@ feature weights.
   pagination (live-verified 2026-07-04). Fine for live rankings (500-day
   window); M3's 2018+ crypto backtests need a deeper-history source
   (Coinbase or Bitstamp via ccxt) behind the same adapter interface.
+  **Resolved (M3):** deep history via the ccxt exchange verified in Task 4
+  (named in config/crypto.toml [data].backfill_exchange), behind the same
+  adapter; Kraken wins overlaps.
 - Robinhood Crypto API `is_api_tradable` subset + per-pair min order sizes:
   confirm when/if API keys are created.
 - Agentic crypto GA date and its constraints: watch Robinhood announcements.
 - Point-in-time constituent dataset selection (several free options; pick at
   implementation time and record provenance in the repo).
+  **Resolved (M3):** fja05680/sp500 snapshot + Wikipedia NDX changes;
+  provenance + licences in src/trading/venues/universes/sources/PROVENANCE.md.
 - yfinance earnings-date reliability: **resolved 2026-07-05** — unreliable
   (stale data); filter dropped in both modes (see Venue Model, Equities /
   Earnings dates).
@@ -347,3 +352,5 @@ feature weights.
   accounting is exact, but a per-trade `realized_pnl` figure understates
   round-trip cost by the entry fee. Fix when M3 aggregates trade-level
   stats; not a cash-correctness bug today.
+  **Resolved (M3):** entry fee frozen on Position at fill and folded into
+  realized_pnl; cash accounting unchanged.

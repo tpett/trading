@@ -4,7 +4,8 @@ Momentum swing trading system. It ranks liquid assets (S&P 500 + Nasdaq-100
 equities; Robinhood-listed crypto) by likelihood of near-term upward moves
 using price/volume momentum behind a market-regime gate, and paper-trades
 that ranking daily with $1,000 per venue under strict risk rules. Backtesting
-and walk-forward validation arrive in the next milestone.
+and walk-forward validation replay the same simulator against 2018-present
+history to validate go-live evidence before it trades real money.
 
 ## Setup
 
@@ -15,6 +16,9 @@ notifications and launchd scheduling):
 
 ## Commands
 
+    uv run trading backtest --venue equities|crypto [--from DATE] [--to DATE] [--json]
+                                                  # replay history through the live simulator;
+                                                  # see Backtesting below for --walk-forward/--holdout
     uv run trading run --venue equities|crypto   # one live-paper cycle now
     uv run trading status                        # portfolios, P&L vs benchmark, last-run health
     uv run trading rankings --venue equities|crypto  # current ranked table w/ sub-scores
@@ -26,6 +30,48 @@ Every command prints human-readable tables; add `--json` for machine
 consumption. Run from the repo root. `run` exits nonzero (and fires a macOS
 notification) when a cycle fails or is skipped — a silent dead pipeline is
 the failure mode this system is designed to avoid.
+
+## Backtesting
+
+```
+trading backtest --venue equities|crypto [--from DATE] [--to DATE] [--json]
+trading backtest --venue equities --walk-forward     # stitched OOS, tuned per window
+trading backtest --venue equities --holdout          # final 6 months, evaluated ONCE
+```
+
+- One engine, replayed: the backtest drives the same simulator `step()` as
+  `trading run`, session by session, filling at next-bar opens. Decisions at
+  session T never see data after T.
+- `--to` defaults to yesterday (UTC) — today's daily bar may still be forming.
+- Non-holdout runs stop before `[backtest].holdout_start`. `--holdout` spends
+  the holdout: a second invocation demands a typed `RERUN HOLDOUT` and both
+  evaluations stay journaled forever.
+- `--walk-forward` tunes exactly two hyperparameters (`entry_score_threshold`,
+  `stop_atr_multiple`) on rolling train windows and reports stitched
+  out-of-sample segments only; it refuses to report a stitch that skips every
+  configured stress segment (2022 bear).
+- Every run appends config hash + grid point + metrics to
+  `journal/experiments-<venue>.jsonl`; the experiment count prints with every
+  result. Quote results WITH their experiment count.
+- Gate: annualized Sharpe of daily returns (0% cash) above buy-and-hold
+  SPY/BTC over the identical period AND positive total return.
+
+### Data caveats (read before trusting a number)
+
+- **Equities universe is point-in-time** (S&P 500 + NDX membership as-of each
+  session; sources + licences in
+  `src/trading/venues/universes/sources/PROVENANCE.md`). Residual survivorship
+  (delisted tickers missing from yfinance) is measured per session and printed
+  as the coverage ratio on every equities result; sessions below
+  `[backtest].min_session_coverage` are skipped, not faked.
+- **Crypto universe is today's Robinhood listing**: coins delisted before
+  today are absent (survivorship bias — annotated on every crypto result).
+  Listing dates come from data availability. Deep history (pre-Kraken-window)
+  is spliced from a second exchange; Kraken wins overlaps
+  (see `[data]` in `config/crypto.toml`).
+- NYSE half-days are handled conservatively by the live session guard (waits
+  for 16:00 ET + buffer); the backtest calendar is SPY's actual bar dates, so
+  half-days are traded normally there.
 
 ## How a run works
 
