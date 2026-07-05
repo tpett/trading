@@ -1,4 +1,5 @@
 import dataclasses
+import datetime
 from pathlib import Path
 
 import pytest
@@ -62,3 +63,18 @@ def test_backfill_config_loaded():
     assert crypto.data.seam_max_gap_days > 0
     equities = load_venue_config("equities", Path("config"))
     assert equities.data.backfill_exchange == ""
+
+
+def test_backtest_config_loaded():
+    for venue in ("equities", "crypto"):
+        config = load_venue_config(venue, Path("config"))
+        bt = config.backtest
+        assert bt.start == datetime.date(2018, 1, 1)
+        assert bt.holdout_start == datetime.date(2026, 1, 5)
+        assert 24 <= bt.train_months <= 36 and bt.test_months == 3  # spec bounds
+        assert len(bt.entry_score_threshold_grid) >= 3
+        assert len(bt.stop_atr_multiple_grid) >= 3
+        assert 0 < bt.min_session_coverage <= 1
+        assert bt.stress_segments[0] == (datetime.date(2022, 1, 1), datetime.date(2022, 12, 31))
+    assert load_venue_config("equities", Path("config")).backtest.periods_per_year == 252
+    assert load_venue_config("crypto", Path("config")).backtest.periods_per_year == 365

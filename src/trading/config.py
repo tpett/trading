@@ -6,6 +6,7 @@ Unknown or missing TOML keys raise TypeError via dataclass construction.
 
 from __future__ import annotations
 
+import datetime
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,23 @@ class DataConfig:
 
 
 @dataclass(frozen=True)
+class BacktestConfig:
+    """Spec: Backtesting & Validation. The tunable surface is exactly two
+    hyperparameters (entry_score_threshold, stop_atr_multiple); their grids
+    live here. Everything else is set by design, not fitted."""
+
+    start: datetime.date
+    holdout_start: datetime.date  # final 6 months; touched exactly once via --holdout
+    train_months: int
+    test_months: int
+    entry_score_threshold_grid: tuple[float, ...]
+    stop_atr_multiple_grid: tuple[float, ...]
+    min_session_coverage: float  # skip a session when fewer members have data
+    periods_per_year: int  # Sharpe annualization: 252 sessions / 365 UTC days
+    stress_segments: tuple[tuple[datetime.date, datetime.date], ...]
+
+
+@dataclass(frozen=True)
 class VenueConfig:
     name: str
     benchmark: str
@@ -99,6 +117,7 @@ class VenueConfig:
     regime: RegimeConfig
     portfolio: PortfolioConfig
     data: DataConfig
+    backtest: BacktestConfig
 
 
 def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
@@ -109,6 +128,13 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
     signals = dict(raw["signals"])
     signals["momentum_windows"] = tuple(signals["momentum_windows"])
     signals["breakout_windows"] = tuple(signals["breakout_windows"])
+    backtest = dict(raw["backtest"])
+    backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
+    backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])
+    backtest["stress_segments"] = tuple(
+        (datetime.date.fromisoformat(a), datetime.date.fromisoformat(b))
+        for a, b in backtest["stress_segments"]
+    )
     return VenueConfig(
         name=raw["venue"]["name"],
         benchmark=raw["venue"]["benchmark"],
@@ -118,4 +144,5 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         regime=RegimeConfig(**raw["regime"]),
         portfolio=PortfolioConfig(**raw["portfolio"]),
         data=DataConfig(**raw["data"]),
+        backtest=BacktestConfig(**backtest),
     )

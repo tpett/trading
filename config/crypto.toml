@@ -86,3 +86,14 @@ backfill_before_days = 700        # inside Kraken's ~720-candle window, with mar
 # silently. Crypto trades 24/7 so daily bars are contiguous; a small tolerance
 # absorbs isolated exchange-outage days.
 seam_max_gap_days = 3
+
+[backtest]  # spec: Backtesting & Validation
+start = 2018-01-01
+holdout_start = 2026-01-05   # fixed boundary; see equities.toml note
+train_months = 30
+test_months = 3
+entry_score_threshold_grid = [0.60, 0.65, 0.70, 0.75, 0.80]
+stop_atr_multiple_grid = [1.0, 1.5, 2.0, 2.5]
+min_session_coverage = 0.90  # deep history exists for listed coins; gaps mean data trouble
+periods_per_year = 365       # 24/7 venue: UTC daily bars
+stress_segments = [["2022-01-01", "2022-12-31"]]

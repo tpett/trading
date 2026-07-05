@@ -90,5 +90,5 @@ class Journal:
 
 
 def config_hash(config: VenueConfig) -> str:
-    payload = json.dumps(asdict(config), sort_keys=True)
+    payload = json.dumps(asdict(config), sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
