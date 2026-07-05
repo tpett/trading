@@ -489,20 +489,23 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     journal = experiments_journal(Path(args.journal_dir), args.venue)
 
     end = min(args.to_date or yesterday, yesterday)
+    prior = None
     if args.holdout:
         prior = prior_holdout(journal)
         if prior is not None:
+            # stderr, like the clamp note: stdout stays a pure --json channel.
             print(
                 f"Holdout already evaluated at {prior['ts']} (config {prior['config_hash']}, "
-                f"result journaled). The holdout is spent the first time it is read;"
+                f"result journaled). The holdout is spent the first time it is read;",
+                file=sys.stderr,
             )
-            print("rerunning it invalidates the go-live evidence (spec).")
+            print("rerunning it invalidates the go-live evidence (spec).", file=sys.stderr)
             try:
                 answer = input("Type RERUN HOLDOUT to run it anyway: ").strip()
             except EOFError:
                 answer = ""
             if answer != "RERUN HOLDOUT":
-                print("aborted")
+                print("aborted", file=sys.stderr)
                 return 1
         start = bt.holdout_start
     else:
@@ -532,10 +535,10 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
 
     if args.walk_forward:
         return _run_walk_forward_command(prepared, config, journal, args, start, end, now)
-    return _run_plain_backtest_command(prepared, config, journal, args, start, end, now)
+    return _run_plain_backtest_command(prepared, config, journal, args, start, end, now, prior)
 
 
-def _run_plain_backtest_command(prepared, config, journal, args, start, end, now) -> int:
+def _run_plain_backtest_command(prepared, config, journal, args, start, end, now, prior) -> int:
     try:
         result = replay(prepared, config)
     except BacktestError as exc:
@@ -543,6 +546,11 @@ def _run_plain_backtest_command(prepared, config, journal, args, start, end, now
         return 1
     metrics = compute_metrics(result, config.backtest.periods_per_year)
     kind = "holdout" if args.holdout else "backtest"
+    extra: dict = {"missing_symbols": len(prepared.missing_symbols)}
+    if prior is not None:
+        # A confirmed rerun of a spent holdout: mark it explicitly so the
+        # journal shows more than a duplicate ts, and point at what it spent.
+        extra.update(rerun=True, prior_ts=prior["ts"])
     log_experiment(
         journal,
         config=config,
@@ -556,7 +564,7 @@ def _run_plain_backtest_command(prepared, config, journal, args, start, end, now
             "stop_atr_multiple": config.portfolio.stop_atr_multiple,
         },
         survivorship_ratio=result.survivorship_ratio,
-        extra={"missing_symbols": len(prepared.missing_symbols)},
+        extra=extra,
     )
     count = experiment_count(journal, config.name)
     if args.json:

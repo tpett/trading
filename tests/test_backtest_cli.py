@@ -194,16 +194,28 @@ def test_holdout_runs_once_then_requires_typed_confirmation(backtest_env, capsys
     journal = experiments_journal(backtest_env / "journal", "crypto")
     assert [e["kind"] for e in journal.events()] == ["holdout"]
 
-    # Second invocation refuses without the typed phrase.
+    # Second invocation refuses without the typed phrase. Even under --json the
+    # refusal must keep stdout empty: stdout is the machine payload channel.
     monkeypatch.setattr("builtins.input", lambda prompt="": "no")
     assert main(args) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "holdout already evaluated" in captured.err.lower()
     assert [e["kind"] for e in journal.events()] == ["holdout"]
 
-    # And proceeds with it.
+    # And proceeds with it: the JSON payload alone on stdout, notices on stderr.
     monkeypatch.setattr("builtins.input", lambda prompt="": "RERUN HOLDOUT")
     assert main(args) == 0
-    capsys.readouterr()
-    assert [e["kind"] for e in journal.events()] == ["holdout", "holdout"]
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["kind"] == "holdout"
+    assert "holdout already evaluated" in captured.err.lower()
+    events = list(journal.events())
+    assert [e["kind"] for e in events] == ["holdout", "holdout"]
+    # The override is journaled as an explicit rerun pointing at what it spent.
+    assert "rerun" not in events[0]
+    assert events[1]["rerun"] is True
+    assert events[1]["prior_ts"] == events[0]["ts"]
 
 
 def test_walk_forward_and_holdout_together_is_an_error(backtest_env, capsys):
