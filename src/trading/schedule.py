@@ -77,6 +77,10 @@ def install(repo_root: Path, agents_dir: Path) -> list[str]:
     agents_dir.mkdir(parents=True, exist_ok=True)
     messages: list[str] = []
     for venue in VENUES:
+        # launchd cannot open StandardOut/ErrorPath if the parent directory is
+        # missing — on a fresh machine every scheduled run would silently fail
+        # to spawn until the venue is run manually. Pre-create the log dir.
+        (repo_root / "state" / venue).mkdir(parents=True, exist_ok=True)
         path = plist_path(agents_dir, venue)
         path.write_bytes(build_plist(venue, repo_root, uv_path))
         _launchctl("bootout", f"{_domain()}/{label(venue)}")  # idempotent reinstall

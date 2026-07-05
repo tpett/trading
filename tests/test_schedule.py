@@ -57,13 +57,26 @@ def test_install_writes_plists_and_bootstraps(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(schedule, "_launchctl", lambda *a: calls.append(a) or _ok())
     monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/local/bin/uv")
-    messages = install(Path("/repo"), tmp_path)
+    messages = install(tmp_path / "repo", tmp_path)
     for venue in ("equities", "crypto"):
         assert plist_path(tmp_path, venue).exists()
     actions = [c[0] for c in calls]
     assert actions.count("bootout") == 2  # idempotent reinstall
     assert actions.count("bootstrap") == 2
     assert len(messages) == 2
+
+
+def test_install_creates_log_dirs_for_fresh_repo(tmp_path, monkeypatch):
+    # launchd cannot open StandardOutPath if its parent is missing, so
+    # install() must create state/<venue>/ even before any manual run.
+    monkeypatch.setattr(schedule, "_launchctl", lambda *a: _ok())
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/local/bin/uv")
+    repo_root = tmp_path / "repo"
+    assert not (repo_root / "state").exists()
+    install(repo_root, tmp_path / "agents")
+    for venue in ("equities", "crypto"):
+        assert plist_path(tmp_path / "agents", venue).exists()
+        assert (repo_root / "state" / venue).is_dir()
 
 
 def test_install_requires_uv_on_path(tmp_path, monkeypatch):
@@ -75,7 +88,7 @@ def test_install_requires_uv_on_path(tmp_path, monkeypatch):
 def test_status_reports_installed_and_loaded(tmp_path, monkeypatch):
     monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/local/bin/uv")
     monkeypatch.setattr(schedule, "_launchctl", lambda *a: _ok())
-    install(Path("/repo"), tmp_path)
+    install(tmp_path / "repo", tmp_path)
 
     def print_only_equities(*args):
         loaded = args[0] == "print" and args[1].endswith("equities")
@@ -93,7 +106,7 @@ def test_remove_boots_out_and_deletes(tmp_path, monkeypatch):
     monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/local/bin/uv")
     calls = []
     monkeypatch.setattr(schedule, "_launchctl", lambda *a: calls.append(a) or _ok())
-    install(Path("/repo"), tmp_path)
+    install(tmp_path / "repo", tmp_path)
     remove(tmp_path)
     assert [c[0] for c in calls].count("bootout") == 4  # 2 install + 2 remove
     assert not plist_path(tmp_path, "equities").exists()
