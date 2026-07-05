@@ -39,10 +39,15 @@ def make_adapter(venue: str, monkeypatch, tmp_path, empty: bool = False):
     config = load_venue_config(venue, Path("config"))
     universe = tmp_path / f"{venue}_universe.csv"
     if venue == "equities":
-        universe.write_text("# provenance comment line\nsymbol\nAAA\nBBB\n")
+        universe.write_text(
+            "# provenance comment line\n"
+            "symbol,index,start,end\n"
+            "AAA,sp500,2018-01-01,\n"
+            "BBB,sp500,2018-01-01,\n"
+        )
         fetch = (lambda s, a, b: pd.DataFrame()) if empty else _fake_yf
         monkeypatch.setattr("trading.venues.equities._yf_download", fetch)
-        return EquitiesAdapter(config, universe_csv=universe), config, "AAA"
+        return EquitiesAdapter(config, membership_csv=universe), config, "AAA"
     universe.write_text("symbol,status\nBTC,tradable\nETH,sell_only\n")
     fetch = (lambda p, s: []) if empty else _fake_kraken
     monkeypatch.setattr("trading.venues.crypto._kraken_fetch", fetch)

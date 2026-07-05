@@ -101,8 +101,14 @@ def _fake_kraken(pair: str, since_ms: int) -> list[list[float]]:
 def _setup_equities(tmp_path, monkeypatch) -> Path:
     cfg_dir = _write_config(tmp_path, "equities")
     universe = tmp_path / "equities_universe.csv"
-    universe.write_text("symbol\nAAA\nBBB\nCCC\nDDD\n")
-    monkeypatch.setattr("trading.venues.equities.DEFAULT_UNIVERSE_CSV", universe)
+    universe.write_text(
+        "symbol,index,start,end\n"
+        "AAA,sp500,2018-01-01,\n"
+        "BBB,sp500,2018-01-01,\n"
+        "CCC,sp500,2018-01-01,\n"
+        "DDD,sp500,2018-01-01,\n"
+    )
+    monkeypatch.setattr("trading.venues.equities.DEFAULT_MEMBERSHIP_CSV", universe)
     monkeypatch.setattr("trading.venues.equities._yf_download", _fake_history)
     monkeypatch.setattr("trading.runner.fetch_earnings_dates", lambda symbols: ({}, False))
     return cfg_dir

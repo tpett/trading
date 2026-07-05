@@ -1,8 +1,10 @@
-"""Equities venue: yfinance daily bars, static S&P500+NDX100 universe CSV.
+"""Equities venue: yfinance daily bars, point-in-time S&P500+NDX100 universe.
 
-M1 uses a committed static membership snapshot (see universes/equities.csv,
-built by scripts/build_equities_universe.py). Point-in-time membership
-history is Milestone 3. Prices are corporate-action adjusted
+universe(as_of) reads a committed membership-intervals CSV (see
+universes/equities_membership.csv, built by scripts/build_pit_membership.py
+from the snapshotted fja05680/sp500 dataset plus Wikipedia's NDX change
+history; see universes/sources/PROVENANCE.md). Backtesting today's members
+over the past is prohibited (spec). Prices are corporate-action adjusted
 (auto_adjust=True) so signals, stops and fills share one price basis.
 """
 
@@ -22,7 +24,7 @@ from trading.venues.base import (
     validate_ohlcv,
 )
 
-DEFAULT_UNIVERSE_CSV = Path(__file__).parent / "universes" / "equities.csv"
+DEFAULT_MEMBERSHIP_CSV = Path(__file__).parent / "universes" / "equities_membership.csv"
 
 
 def _yf_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
@@ -40,14 +42,26 @@ def _yf_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.Da
 
 
 class EquitiesAdapter:
-    def __init__(self, config: VenueConfig, universe_csv: Path | None = None):
+    def __init__(self, config: VenueConfig, membership_csv: Path | None = None):
         self._config = config
-        self._universe_csv = universe_csv or DEFAULT_UNIVERSE_CSV
+        self._membership_csv = membership_csv or DEFAULT_MEMBERSHIP_CSV
+        self._membership: pd.DataFrame | None = None
+
+    def _load_membership(self) -> pd.DataFrame:
+        # Cached in memory: the backtester calls universe() once per session
+        # (~2100 times per prepared span); re-reading the CSV each call is waste.
+        if self._membership is None:
+            df = pd.read_csv(self._membership_csv, comment="#", dtype=str).fillna("")
+            self._membership = df
+        return self._membership
 
     def universe(self, as_of: datetime.date) -> list[SymbolInfo]:
-        # as_of is part of the locked protocol; the static M1 snapshot ignores it.
-        df = pd.read_csv(self._universe_csv, comment="#")
-        return [SymbolInfo(symbol=s, status="tradable") for s in df["symbol"]]
+        """Point-in-time S&P 500 + NDX membership as-of the given date (spec:
+        backtesting today's members over the past is prohibited)."""
+        df = self._load_membership()
+        iso = as_of.isoformat()
+        active = df[(df["start"] <= iso) & ((df["end"] == "") | (iso < df["end"]))]
+        return [SymbolInfo(symbol=s, status="tradable") for s in sorted(set(active["symbol"]))]
 
     def constraints(self) -> VenueConstraints:
         c = self._config.costs

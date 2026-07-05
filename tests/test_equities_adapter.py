@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from trading.config import load_venue_config
-from trading.venues.base import OHLCV_COLUMNS, DataFetchError, SymbolInfo, VenueConstraints
+from trading.venues.base import OHLCV_COLUMNS, DataFetchError, VenueConstraints
 from trading.venues.equities import EquitiesAdapter
 
 CONFIG = load_venue_config("equities", Path("config"))
@@ -24,16 +24,52 @@ def _yf_style_frame(symbol: str) -> pd.DataFrame:
     return pd.DataFrame(data, index=idx)
 
 
-def test_universe_reads_symbols_from_csv(tmp_path):
-    csv = tmp_path / "universe.csv"
-    csv.write_text("symbol\nAAPL\nMSFT\nNVDA\n")
-    adapter = EquitiesAdapter(CONFIG, universe_csv=csv)
-    infos = adapter.universe(datetime.date(2026, 7, 1))
-    assert infos == [
-        SymbolInfo("AAPL", "tradable"),
-        SymbolInfo("MSFT", "tradable"),
-        SymbolInfo("NVDA", "tradable"),
-    ]
+MEMBERSHIP_CSV = """# test fixture
+symbol,index,start,end
+AAA,sp500,2018-01-01,
+BBB,sp500,2018-01-01,2020-06-01
+CCC,ndx,2020-06-01,
+"""
+
+
+def _adapter_with(tmp_path, text: str) -> EquitiesAdapter:
+    path = tmp_path / "membership.csv"
+    path.write_text(text)
+    config = load_venue_config("equities", Path("config"))
+    return EquitiesAdapter(config, membership_csv=path)
+
+
+def test_universe_is_point_in_time(tmp_path):
+    adapter = _adapter_with(tmp_path, MEMBERSHIP_CSV)
+    in_2019 = {i.symbol for i in adapter.universe(datetime.date(2019, 1, 2))}
+    in_2021 = {i.symbol for i in adapter.universe(datetime.date(2021, 1, 4))}
+    assert in_2019 == {"AAA", "BBB"}
+    assert in_2021 == {"AAA", "CCC"}
+    assert all(i.status == "tradable" for i in adapter.universe(datetime.date(2021, 1, 4)))
+
+
+def test_membership_interval_boundaries_start_inclusive_end_exclusive(tmp_path):
+    adapter = _adapter_with(tmp_path, MEMBERSHIP_CSV)
+    on_start = {i.symbol for i in adapter.universe(datetime.date(2020, 6, 1))}
+    day_before = {i.symbol for i in adapter.universe(datetime.date(2020, 5, 31))}
+    assert "CCC" in on_start and "BBB" not in on_start  # start inclusive, end exclusive
+    assert "BBB" in day_before and "CCC" not in day_before
+
+
+def test_committed_membership_file_sanity():
+    # The real committed file: plausible sizes, and known index churn visible.
+    adapter = EquitiesAdapter(load_venue_config("equities", Path("config")))
+    for day, low, high in [
+        (datetime.date(2018, 6, 1), 450, 650),
+        (datetime.date(2022, 6, 1), 450, 650),
+        (datetime.date(2026, 7, 1), 450, 650),
+    ]:
+        count = len(adapter.universe(day))
+        assert low <= count <= high, f"{day}: {count} members"
+    early = {i.symbol for i in adapter.universe(datetime.date(2018, 6, 1))}
+    today = {i.symbol for i in adapter.universe(datetime.date(2026, 7, 1))}
+    assert early != today
+    assert len(early - today) > 20  # real churn: many 2018 members are gone
 
 
 def test_constraints_come_from_config():
@@ -77,13 +113,3 @@ def test_fetch_ohlcv_empty_raises(monkeypatch):
     adapter = EquitiesAdapter(CONFIG)
     with pytest.raises(DataFetchError):
         adapter.fetch_ohlcv("AAPL", datetime.date(2026, 1, 5), datetime.date(2026, 1, 9))
-
-
-def test_committed_equities_csv_has_provenance_comment_and_loads():
-    from trading.venues.equities import DEFAULT_UNIVERSE_CSV
-
-    first_line = DEFAULT_UNIVERSE_CSV.read_text().splitlines()[0]
-    assert first_line.startswith("#")  # build-date provenance comment
-    config = load_venue_config("equities", Path("config"))
-    infos = EquitiesAdapter(config).universe(datetime.date(2026, 7, 4))
-    assert len(infos) >= 500
