@@ -236,3 +236,55 @@ def test_assemble_rankings_is_pure_and_matches_build_rankings_semantics():
     assert result.coverage.ratio == 1.0
     assert result.bars.keys() == bars.keys()  # nothing quarantined
     assert result.venue == "equities"
+
+
+def test_build_rankings_delegates_to_assemble_rankings_with_identical_results(tmp_path):
+    # Pins the extraction seam: build_rankings must be fetch + delegate, so any
+    # post-processing later added after the assemble_rankings call breaks loudly.
+    from trading.pipeline import assemble_rankings
+
+    # A fetch failure (S3) and a quarantined symbol (S5) make fetch_failures and
+    # quarantined nontrivial, so their propagation through the seam is pinned too.
+    adapter, cache, frames = _make(tmp_path, fail=frozenset({"S3"}))
+    spike_at = frames["S5"].index[-5]
+    prior_at = frames["S5"].index[-6]
+    frames["S5"].loc[spike_at, "close"] = frames["S5"]["close"].loc[prior_at] * 1.7
+
+    via_build = build_rankings(CONFIG, adapter, cache, AS_OF)
+
+    # Reconstruct assemble_rankings' inputs through the same fake fetch path
+    # build_rankings uses: universe -> cached fetch -> drop-incomplete-last-bar.
+    infos = adapter.universe(AS_OF)
+    start = AS_OF - datetime.timedelta(days=CONFIG.data.history_days)
+    cutoff = pd.Timestamp(AS_OF, tz="UTC")
+    mirror_cache = OhlcvCache(tmp_path / "mirror_cache", CONFIG.data.refetch_days)
+
+    def _fetch(symbol: str) -> pd.DataFrame:
+        df = mirror_cache.fetch(symbol, start, AS_OF, adapter.fetch_ohlcv)
+        return df[df.index < cutoff] if CONFIG.data.drop_incomplete_last_bar else df
+
+    bars: dict[str, pd.DataFrame] = {}
+    failures: list[str] = []
+    for info in infos:
+        try:
+            bars[info.symbol] = _fetch(info.symbol)
+        except DataFetchError:
+            failures.append(info.symbol)
+    benchmark = _fetch(CONFIG.benchmark)
+
+    direct = assemble_rankings(
+        CONFIG, infos, bars, benchmark, AS_OF, fetch_failures=tuple(sorted(failures))
+    )
+
+    assert direct.venue == via_build.venue == "equities"
+    assert direct.as_of == via_build.as_of
+    assert direct.regime == via_build.regime
+    assert direct.coverage == via_build.coverage
+    assert direct.quarantined == via_build.quarantined == ("S5",)
+    assert direct.fetch_failures == via_build.fetch_failures == ("S3",)
+    assert direct.insufficient_history == via_build.insufficient_history
+    pd.testing.assert_frame_equal(direct.table, via_build.table)
+    assert direct.bars.keys() == via_build.bars.keys()
+    for symbol in direct.bars:
+        pd.testing.assert_frame_equal(direct.bars[symbol], via_build.bars[symbol])
+    pd.testing.assert_frame_equal(direct.benchmark_bars, via_build.benchmark_bars)
