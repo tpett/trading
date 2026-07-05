@@ -232,8 +232,14 @@ def replay(
             values[plan.ts] = last_value
             continue
         held = set(state.positions) | {o.symbol for o in state.pending_orders}
+        # Live's RankingsResult.bars is the quarantine-passed universe only --
+        # a held symbol quarantined THIS session gets no bar there, so fills
+        # defer and marking falls back to entry price. Excluding quarantined
+        # symbols here (even when held) keeps replay on that same seam;
+        # evaluate_exits' quarantine check (keyed off rankings.quarantined,
+        # untouched by this dict) still warns-and-holds them regardless.
         bars: dict[str, pd.DataFrame] = {}
-        for symbol in set(plan.clean_symbols) | held:
+        for symbol in (set(plan.clean_symbols) | held) - set(plan.rankings.quarantined):
             frame = prepared.bars.get(symbol)
             if frame is None:
                 continue
@@ -243,13 +249,15 @@ def replay(
         table = plan.rankings.table
         extras = sorted((held - set(table.index)) & set(bars))
         if extras:
-            # Held names absent from this session's table -- they left the
-            # point-in-time universe, or same-session quarantine excluded them
-            # -- but still trade: inject as untradable -> the simulator's own
-            # forced-exit path sells them next bar (spec: dropped from the
-            # venue universe; consistent with live's warn-and-hold -> forced-
-            # exit semantics for quarantined holds). Appended LAST with NaN
-            # composite so entry iteration is unaffected.
+            # Held names with a bar this session but absent from the ranking
+            # table: they left the point-in-time universe (delisted/dropped)
+            # or lack sufficient signal history. Same-session-quarantined
+            # holds never reach here -- they're excluded from `bars` above,
+            # so evaluate_exits' quarantine check preempts and holds them
+            # (live parity). Inject extras as untradable -> the simulator's
+            # own forced-exit path sells them next bar (spec: dropped from
+            # the venue universe). Appended LAST with NaN composite so entry
+            # iteration is unaffected.
             table = table.copy()
             for symbol in extras:
                 row = {column: math.nan for column in table.columns}

@@ -10,10 +10,12 @@ from backtest_helpers import (
     prepared_from_sessions,
     small_config,
 )
-from sim_helpers import make_table
+from sim_helpers import make_rankings, make_table
 from trading.backtest.engine import (
     CRYPTO_SURVIVORSHIP_CAVEAT,
     BacktestError,
+    PreparedBacktest,
+    SessionPlan,
     prepare,
     replay,
 )
@@ -315,3 +317,75 @@ def test_entry_exit_round_trip_pairs_into_trade_records():
         rel_tol=1e-9,
     )
     assert result.fees_paid > 0.0 and result.buy_notional > 0.0
+
+
+def test_quarantine_of_held_symbol_defers_fill_and_marks_at_entry_price():
+    """Live parity (replay/live seam): live's RankingsResult.bars excludes
+    quarantined symbols even when held, so a pending sell can't find a fill
+    bar (deferred) and marking falls back to entry price. Replay must match
+    -- not fill at the (possibly outlier) print that triggered quarantine."""
+    from dataclasses import replace
+
+    config = _with_benchmark(small_config())
+    bars = {s: noisy_frame(seed=i, drift=0.001) for i, s in enumerate(["AAA", "BBB"], start=1)}
+    bench = noisy_frame(seed=9, drift=0.001)
+    enter = make_table(
+        {
+            "AAA": {"status": "tradable", "composite": 0.9, "raw_return_30d": 0.5},
+            "BBB": {"status": "tradable", "composite": 0.2, "raw_return_30d": 0.1},
+        }
+    )
+    forced_sell = make_table(
+        {
+            "AAA": {"status": "sell_only", "composite": 0.9, "raw_return_30d": 0.5},
+            "BBB": {"status": "tradable", "composite": 0.2, "raw_return_30d": 0.1},
+        }
+    )
+    quarantined_session = make_table(
+        {"BBB": {"status": "tradable", "composite": 0.2, "raw_return_30d": 0.1}}
+    )
+    session_specs = [
+        # entry: AAA's composite clears threshold -> pending buy written.
+        ("2025-03-01", enter, ("AAA", "BBB"), ()),
+        # AAA's buy fills here (bar after the decision bar above).
+        ("2025-03-02", enter, ("AAA", "BBB"), ()),
+        # forced exit: AAA turns sell_only -> pending sell written.
+        ("2025-03-03", forced_sell, ("AAA", "BBB"), ()),
+        # AAA is quarantined THIS session: its pending sell has no bar to
+        # fill against (live parity), so it must defer, and the still-open
+        # position must mark at entry price, not a bar that isn't there.
+        ("2025-03-04", quarantined_session, ("BBB",), ("AAA",)),
+    ]
+    sessions = []
+    for iso, table, clean_symbols, quarantined in session_specs:
+        ts = pd.Timestamp(iso, tz="UTC")
+        rankings = make_rankings(
+            config, {s: bars[s].loc[:ts] for s in bars}, table, quarantined=quarantined
+        )
+        slim = replace(rankings, bars={}, benchmark_bars=bench.iloc[0:0])
+        sessions.append(
+            SessionPlan(
+                ts=ts,
+                rankings=slim,
+                clean_symbols=clean_symbols,
+                survivorship_ratio=1.0,
+                eligible_members=len(clean_symbols),
+                skip_reason=None,
+            )
+        )
+    prepared = PreparedBacktest(
+        venue=config.name,
+        start=sessions[0].ts.date(),
+        end=sessions[-1].ts.date(),
+        sessions=tuple(sessions),
+        bars=bars,
+        benchmark_bars=bench,
+        missing_symbols=(),
+    )
+
+    result = replay(prepared, config)
+    # Deferred, not filled: AAA is still open, no exit trade recorded for it.
+    assert "AAA" in result.open_positions
+    assert not any(t.symbol == "AAA" for t in result.trades)
+    # Marked at entry price the quarantined session -- the live fallback.
+    assert any("AAA" in w and "using entry price" in w for w in result.warnings)
