@@ -490,3 +490,19 @@ def test_reset_breaker_eof_at_prompt_aborts_cleanly(tmp_path, monkeypatch, capsy
     assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
     assert "aborted" in capsys.readouterr().out
     assert load_state(path).breaker_tripped is True
+
+
+def test_schedule_status_cli_json(tmp_path, monkeypatch, capsys):
+    import subprocess as sp
+
+    monkeypatch.setattr(
+        "trading.schedule._launchctl",
+        lambda *a: sp.CompletedProcess(args=a, returncode=113, stdout="", stderr=""),
+    )
+    rc = main(["schedule", "status", "--agents-dir", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "equities": {"installed": False, "loaded": False},
+        "crypto": {"installed": False, "loaded": False},
+    }

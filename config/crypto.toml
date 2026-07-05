@@ -48,7 +48,9 @@ entry_score_threshold = 0.70
 min_raw_return_cost_multiple = 3.0  # raw 30d return must exceed 3x round-trip cost (spec)
 earnings_blackout_sessions = 0      # no earnings in crypto
 earnings_blackout_enabled = false   # no earnings in crypto
-staleness_hours = 6
+staleness_hours = 7    # bar completes 00:00 UTC; the 01:00 America/New_York run
+                       # lands 05:00 (EDT) / 06:00 (EST) UTC — 6h would sit exactly
+                       # on the winter boundary, so widen to 7
 atr_window = 20                     # ATR-20 (spec); frozen at entry
 
 [data]

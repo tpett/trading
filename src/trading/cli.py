@@ -88,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     breaker.add_argument("--state-dir", default="state", help="portfolio state root")
     breaker.add_argument("--journal-dir", default="journal", help="journal root")
 
+    sched = sub.add_parser("schedule", help="manage launchd jobs")
+    sched.add_argument("action", choices=["install", "status", "remove"])
+    sched.add_argument(
+        "--agents-dir", default=None, help="LaunchAgents dir (default ~/Library/LaunchAgents)"
+    )
+    sched.add_argument("--json", action="store_true", help="machine-readable output")
+
     return parser
 
 
@@ -99,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "digest": _cmd_digest,
         "status": _cmd_status,
         "reset-breaker": _cmd_reset_breaker,
+        "schedule": _cmd_schedule,
     }
     return handlers[args.command](args)
 
@@ -374,4 +382,36 @@ def _cmd_reset_breaker(args: argparse.Namespace) -> int:
         )
         return 1
     print(f"{args.venue}: breaker reset; entries re-enabled")
+    return 0
+
+
+def _cmd_schedule(args: argparse.Namespace) -> int:
+    from trading import schedule
+
+    agents_dir = (
+        Path(args.agents_dir) if args.agents_dir else (Path.home() / "Library" / "LaunchAgents")
+    )
+    try:
+        if args.action == "install":
+            output: object = schedule.install(Path.cwd(), agents_dir)
+        elif args.action == "remove":
+            output = schedule.remove(agents_dir)
+        else:
+            output = schedule.status(agents_dir)
+    except schedule.ScheduleError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(output))
+    elif isinstance(output, dict):
+        for venue, info in output.items():
+            state = (
+                "loaded"
+                if info["loaded"]
+                else ("installed, not loaded" if info["installed"] else "not installed")
+            )
+            print(f"{venue}: {state}")
+    else:
+        for line in output:
+            print(line)
     return 0
