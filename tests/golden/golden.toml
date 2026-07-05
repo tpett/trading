@@ -1,0 +1,78 @@
+[venue]
+name = "golden"
+benchmark = "BENCH"
+
+[costs]
+taker_fee_bps = 25.0
+maker_fee_bps = 0.0
+slippage_bps = 5.0
+settlement_days = 0
+trades_24_7 = true
+
+[universe]
+min_dollar_volume = 0.0
+
+[signals]
+momentum_windows = [3, 5, 8]
+calendar_days = true
+vol_window = 5
+volume_week = 3
+volume_baseline = 10
+breakout_windows = [5, 8]
+rsi_window = 5
+mean_window = 5
+raw_return_days = 5
+
+[regime]
+sma_fast = 5
+sma_slow = 15
+vol_window = 5
+vol_lookback = 30
+vol_high_percentile = 0.9
+exposure_risk_on = 1.0
+exposure_neutral = 0.5
+exposure_risk_off = 0.0
+
+[portfolio]
+max_positions = 3
+position_size_pct = 0.30
+starting_balance = 1000.0
+time_stop_bars = 8
+stop_atr_multiple = 1.5
+regime_flush_atr_multiple = 1.0
+cooldown_days = 3
+max_daily_deployment_pct = 0.35
+drawdown_halt_pct = 0.50
+entry_score_threshold = 0.55
+min_raw_return_cost_multiple = 0.0
+earnings_blackout_sessions = 0
+earnings_blackout_enabled = false
+staleness_hours = 24
+atr_window = 5
+session_close_buffer_minutes = 0
+
+[data]
+cache_dir = "unused-tests-pass-their-own-cache"
+refetch_days = 5
+min_coverage = 0.9
+max_daily_move = 0.5
+history_days = 40
+quarantine_window_days = 10
+drop_incomplete_last_bar = false
+backfill_exchange = ""
+backfill_page_limit = 0
+backfill_before_days = 0
+# backfill_exchange = "" disables backfill entirely, so the seam guard never
+# fires; the value below is inert but required by DataConfig's schema.
+seam_max_gap_days = 3
+
+[backtest]
+start = 2025-02-15
+holdout_start = 2027-01-01
+train_months = 1
+test_months = 1
+entry_score_threshold_grid = [0.5, 0.6]
+stop_atr_multiple_grid = [1.0, 2.0]
+min_session_coverage = 0.9
+periods_per_year = 365
+stress_segments = [["2025-03-01", "2025-03-31"]]
