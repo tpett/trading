@@ -76,3 +76,9 @@ quarantine_window_days = 40
 # Equities runs happen in the evening after market close, so the last daily
 # bar is already fully formed by the time as_of rolls around -- no cut needed.
 drop_incomplete_last_bar = false
+
+# Deep-history backfill is a crypto concern (Kraken's 720-candle cap);
+# yfinance serves full adjusted history directly. Disabled here.
+backfill_exchange = ""
+backfill_page_limit = 0
+backfill_before_days = 0

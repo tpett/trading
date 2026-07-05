@@ -132,3 +132,84 @@ def test_fetch_ohlcv_wraps_ccxt_errors_as_data_fetch_error(monkeypatch):
     adapter = CryptoAdapter(CONFIG)
     with pytest.raises(DataFetchError, match="NOPE/USD"):
         adapter.fetch_ohlcv("NOPE", datetime.date(2026, 6, 22), datetime.date(2026, 7, 1))
+
+
+def _daily_rows(start: str, periods: int, price: float) -> list[list[float]]:
+    base = pd.Timestamp(start, tz="UTC")
+    return [
+        [
+            int((base + pd.Timedelta(i, unit="D")).timestamp() * 1000),
+            price,
+            price,
+            price,
+            price,
+            1e6,
+        ]
+        for i in range(periods)
+    ]
+
+
+def test_deep_request_splices_backfill_and_kraken_with_kraken_precedence(monkeypatch):
+    config = load_venue_config("crypto", Path("config"))
+    # Kraken serves only from the boundary; backfill serves 2018 up to and
+    # INCLUDING the boundary day at a different price -- Kraken must win it.
+    boundary = datetime.date(2026, 7, 1) - datetime.timedelta(days=config.data.backfill_before_days)
+    kraken_rows = _daily_rows(boundary.isoformat(), 30, price=200.0)
+    deep_rows = _daily_rows(
+        "2018-01-01", (boundary - datetime.date(2018, 1, 1)).days + 1, price=100.0
+    )
+
+    def fake_kraken(pair, since_ms):
+        return [r for r in kraken_rows if r[0] >= since_ms][:720]
+
+    def fake_backfill(exchange_id, pair, since_ms, limit):
+        assert exchange_id == config.data.backfill_exchange
+        return [r for r in deep_rows if r[0] >= since_ms][:limit]
+
+    monkeypatch.setattr("trading.venues.crypto._kraken_fetch", fake_kraken)
+    monkeypatch.setattr("trading.venues.crypto._backfill_fetch", fake_backfill)
+    adapter = CryptoAdapter(config)
+    # end = 2026-07-01 so the adapter's internal boundary (end - backfill_before_days)
+    # equals the `boundary` computed above.
+    df = adapter.fetch_ohlcv("BTC", datetime.date(2018, 1, 1), datetime.date(2026, 7, 1))
+
+    assert df.index[0] == pd.Timestamp("2018-01-01", tz="UTC")
+    boundary_ts = pd.Timestamp(boundary, tz="UTC")
+    assert float(df.loc[boundary_ts, "close"]) == 200.0  # Kraken wins the overlap
+    assert float(df.loc[boundary_ts - pd.Timedelta(1, unit="D"), "close"]) == 100.0
+    assert df.index.is_monotonic_increasing and not df.index.duplicated().any()
+
+
+def test_recent_request_never_touches_backfill(monkeypatch):
+    config = load_venue_config("crypto", Path("config"))
+    kraken_rows = _daily_rows("2026-05-01", 62, price=200.0)
+
+    def fake_kraken(pair, since_ms):
+        return [r for r in kraken_rows if r[0] >= since_ms][:720]
+
+    def forbidden(exchange_id, pair, since_ms, limit):
+        raise AssertionError("backfill must not be called for a recent window")
+
+    monkeypatch.setattr("trading.venues.crypto._kraken_fetch", fake_kraken)
+    monkeypatch.setattr("trading.venues.crypto._backfill_fetch", forbidden)
+    adapter = CryptoAdapter(config)
+    df = adapter.fetch_ohlcv("BTC", datetime.date(2026, 5, 1), datetime.date(2026, 7, 1))
+    assert len(df) == 62
+
+
+def test_backfill_pair_missing_falls_back_to_kraken_only(monkeypatch):
+    config = load_venue_config("crypto", Path("config"))
+    kraken_rows = _daily_rows("2026-05-01", 62, price=200.0)
+
+    def fake_kraken(pair, since_ms):
+        return [r for r in kraken_rows if r[0] >= since_ms][:720]
+
+    def missing_pair(exchange_id, pair, since_ms, limit):
+        raise DataFetchError(f"{pair} not listed on {exchange_id}")
+
+    monkeypatch.setattr("trading.venues.crypto._kraken_fetch", fake_kraken)
+    monkeypatch.setattr("trading.venues.crypto._backfill_fetch", missing_pair)
+    adapter = CryptoAdapter(config)
+    # Deep request, but the pair only exists on Kraken: short history, no error.
+    df = adapter.fetch_ohlcv("BTC", datetime.date(2018, 1, 1), datetime.date(2026, 7, 1))
+    assert df.index[0] == pd.Timestamp("2026-05-01", tz="UTC")

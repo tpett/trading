@@ -83,6 +83,9 @@ class DataConfig:
     history_days: int
     quarantine_window_days: int
     drop_incomplete_last_bar: bool
+    backfill_exchange: str  # ccxt exchange id for pre-Kraken-window rows; "" disables
+    backfill_page_limit: int
+    backfill_before_days: int
 
 
 @dataclass(frozen=True)

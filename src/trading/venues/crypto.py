@@ -9,6 +9,7 @@ sit behind ccxt's fetch_ohlcv.
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from pathlib import Path
 from typing import get_args
 
@@ -47,6 +48,54 @@ def _kraken_fetch(pair: str, since_ms: int) -> list[list[float]]:
     return exchange.fetch_ohlcv(pair, timeframe="1d", since=since_ms, limit=_KRAKEN_DAILY_LIMIT)
 
 
+def _backfill_fetch(exchange_id: str, pair: str, since_ms: int, limit: int) -> list[list[float]]:
+    """One page of daily candles from the deep-history exchange (spec Open
+    Item: Kraken caps daily history at ~720 candles). Network touchpoint,
+    isolated for monkeypatching.
+
+    Winner verified live 2026-07-04 per candidate order coinbase ->
+    coinbaseexchange -> bitstamp: coinbase served BTC/USD daily candles back
+    to 2018-01-01 without API keys, honored `since`, and paginated forward
+    deterministically (300-candle pages regardless of requested limit).
+    """
+    import ccxt
+
+    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
+    try:
+        return exchange.fetch_ohlcv(pair, timeframe="1d", since=since_ms, limit=limit)
+    except ccxt.BaseError as e:
+        raise DataFetchError(f"{exchange_id} fetch failed for {pair}: {e}") from e
+
+
+def _paginate(
+    fetch_page: Callable[[int], list[list[float]]],
+    start: datetime.date,
+    end: datetime.date,
+) -> list[list[float]]:
+    """Stitch forward-paged OHLCV rows over [start, end]. Progress is
+    guaranteed: a page adding nothing new ends the loop."""
+    since_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
+    end_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000)
+    rows: list[list[float]] = []
+    while True:
+        page = fetch_page(since_ms)
+        new = [r for r in page if not rows or r[0] > rows[-1][0]]
+        if not new:
+            break
+        rows.extend(new)
+        if new[-1][0] >= end_ms:
+            break
+        since_ms = int(new[-1][0]) + 1
+    return rows
+
+
+def _rows_to_frame(rows: list[list[float]]) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=["timestamp", *OHLCV_COLUMNS])
+    df.index = pd.to_datetime(df.pop("timestamp"), unit="ms", utc=True)
+    df.index.name = None
+    return df.astype("float64").sort_index()
+
+
 class CryptoAdapter:
     def __init__(self, config: VenueConfig, universe_csv: Path | None = None):
         self._config = config
@@ -76,28 +125,43 @@ class CryptoAdapter:
         import ccxt
 
         pair = f"{symbol}/USD"
-        since_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
-        end_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000)
-        rows: list[list[float]] = []
-        while True:
+        cfg = self._config.data
+        boundary = end - datetime.timedelta(days=cfg.backfill_before_days)
+        frames: list[pd.DataFrame] = []
+        kraken_start = start
+
+        if cfg.backfill_exchange and start < boundary:
+            # Deep request: rows before the boundary come from the backfill
+            # exchange; Kraken owns [boundary, end]. A pair missing there is
+            # not an error -- it simply has Kraken-depth history only.
             try:
-                page = _kraken_fetch(pair, since_ms)
-            except ccxt.BaseError as e:
-                raise DataFetchError(f"kraken fetch failed for {pair}: {e}") from e
-            # Keep only rows past what we already have: dedupes page overlap and
-            # guarantees progress (a page that adds nothing new ends the loop).
-            new = [r for r in page if not rows or r[0] > rows[-1][0]]
-            if not new:
-                break
-            rows.extend(new)
-            if new[-1][0] >= end_ms:
-                break
-            since_ms = int(new[-1][0]) + 1
-        if not rows:
+                deep_rows = _paginate(
+                    lambda since_ms: _backfill_fetch(
+                        cfg.backfill_exchange, pair, since_ms, cfg.backfill_page_limit
+                    ),
+                    start,
+                    boundary,
+                )
+                if deep_rows:
+                    frames.append(_rows_to_frame(deep_rows))
+            except DataFetchError:
+                pass
+            kraken_start = boundary
+
+        try:
+            kraken_rows = _paginate(
+                lambda since_ms: _kraken_fetch(pair, since_ms), kraken_start, end
+            )
+        except ccxt.BaseError as e:
+            raise DataFetchError(f"kraken fetch failed for {pair}: {e}") from e
+        if kraken_rows:
+            frames.append(_rows_to_frame(kraken_rows))
+
+        if not frames:
             raise DataFetchError(f"no crypto data for {pair}")
-        df = pd.DataFrame(rows, columns=["timestamp", *OHLCV_COLUMNS])
-        df.index = pd.to_datetime(df.pop("timestamp"), unit="ms", utc=True)
-        df.index.name = None
-        df = df.astype("float64").sort_index()
+        df = pd.concat(frames)
+        # Kraken appended last: keep="last" makes Kraken win any overlap (the
+        # documented splice precedence; both sources are spot USD prices).
+        df = df[~df.index.duplicated(keep="last")].sort_index()
         df = df.loc[pd.Timestamp(start, tz="UTC") : pd.Timestamp(end, tz="UTC")]
         return validate_ohlcv(df)

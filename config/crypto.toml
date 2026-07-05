@@ -70,3 +70,13 @@ quarantine_window_days = 40
 # later before computing signals -- decisions use data through the last
 # completed bar only (spec).
 drop_incomplete_last_bar = true
+
+# --- M3 deep-history backfill (spec Open Item: Kraken caps daily history) ---
+# Kraken's public OHLC endpoint serves only the ~720 most-recent daily candles.
+# Requests starting earlier than (end - backfill_before_days) fetch the older
+# rows from backfill_exchange via ccxt. Precedence: Kraken owns
+# [end - backfill_before_days, end]; the backfill exchange owns older rows;
+# Kraken wins any overlap. Live rankings (history_days = 500) never hit this.
+backfill_exchange = "coinbase"    # ccxt exchange id verified at implementation; "" disables
+backfill_page_limit = 300         # candles per page on the backfill exchange
+backfill_before_days = 700        # inside Kraken's ~720-candle window, with margin
