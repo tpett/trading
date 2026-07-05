@@ -350,6 +350,35 @@ def test_restore_from_journal_corrupt_journal_raises_runner_error(tmp_path):
     assert state_file.read_text() == before  # refused before touching state
 
 
+def test_restore_from_journal_refuses_when_lock_held(tmp_path):
+    import os
+
+    from trading.runner import RunnerError
+
+    _run(tmp_path)
+    state_file = state_path(tmp_path / "state", "equities")
+    before = state_file.read_text()
+    lock = lock_path(tmp_path / "state", "equities")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()))  # a live process holds the run lock
+
+    with pytest.raises(RunnerError, match="another run is in progress"):
+        restore_from_journal("equities", tmp_path / "state", tmp_path / "journal")
+    assert state_file.read_text() == before  # refused before touching state
+    assert lock.exists()  # never steal a live lock
+
+
+def test_restore_from_journal_proceeds_once_lock_is_free(tmp_path):
+    _run(tmp_path)
+    state_file = state_path(tmp_path / "state", "equities")
+    good = state_file.read_text()
+    state_file.write_text("garbage")
+    message = restore_from_journal("equities", tmp_path / "state", tmp_path / "journal")
+    assert "equities:2026-07-01" in message
+    assert json.loads(state_file.read_text()) == json.loads(good)
+    assert not lock_path(tmp_path / "state", "equities").exists()  # released
+
+
 def test_stale_lock_reclaim_race_loser_retries_via_atomic_create(tmp_path, monkeypatch):
     import os
 

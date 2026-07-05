@@ -293,6 +293,27 @@ def test_run_restore_with_corrupt_journal_fails_cleanly(tmp_path, monkeypatch, c
     assert state_file.read_text() == "garbage"  # state untouched
 
 
+def test_run_restore_from_journal_refuses_when_lock_held(tmp_path, monkeypatch, capsys):
+    import os
+
+    from trading.runner import lock_path
+
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    state_file = tmp_path / "state" / "equities" / "portfolio.json"
+    state_file.write_text("garbage")
+    lock = lock_path(tmp_path / "state", "equities")
+    lock.write_text(str(os.getpid()))  # a live process holds the run lock
+    capsys.readouterr()
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESTORE")
+    assert main(_run_args(tmp_path, cfg_dir, extra=["--restore-from-journal"])) == 1
+    assert "another run is in progress" in capsys.readouterr().err
+    assert state_file.read_text() == "garbage"  # untouched
+    assert lock.exists()  # never steal a live lock
+
+
 def test_digest_command_prints_latest_and_specific(tmp_path, monkeypatch, capsys):
     cfg_dir = _setup_equities(tmp_path, monkeypatch)
     _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
@@ -471,6 +492,29 @@ def test_reset_breaker_refuses_when_state_behind_journal(tmp_path, monkeypatch, 
     assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
     assert "behind journal" in capsys.readouterr().err
     assert load_state(path).breaker_tripped is True  # untouched
+
+
+def test_reset_breaker_refuses_when_lock_held(tmp_path, monkeypatch, capsys):
+    import os
+
+    from trading.runner import lock_path
+
+    cfg_dir = _setup_equities(tmp_path, monkeypatch)
+    _freeze_now(monkeypatch, "2026-07-01T22:30:00+00:00")
+    main(_run_args(tmp_path, cfg_dir))
+    capsys.readouterr()
+
+    from trading.runner import load_state, state_path
+
+    _trip_breaker(tmp_path)
+    lock = lock_path(tmp_path / "state", "equities")
+    lock.write_text(str(os.getpid()))  # a live process holds the run lock
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "RESET")
+    assert main(["reset-breaker", "--venue", "equities", *_store_args(tmp_path)]) == 1
+    assert "another run is in progress" in capsys.readouterr().err
+    assert load_state(state_path(tmp_path / "state", "equities")).breaker_tripped is True
+    assert lock.exists()  # never steal a live lock
 
 
 def test_reset_breaker_eof_at_prompt_aborts_cleanly(tmp_path, monkeypatch, capsys):
