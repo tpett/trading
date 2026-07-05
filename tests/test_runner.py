@@ -6,11 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sim_helpers import EQ
+from sim_helpers import CR, EQ
 from trading.data.cache import OhlcvCache
 from trading.journal import Journal
 from trading.runner import (
     RunLock,
+    intraday_partial_bar_reason,
     load_state,
     lock_path,
     restore_from_journal,
@@ -395,6 +396,47 @@ def test_run_writes_daily_digest(tmp_path):
     text = digest_file.read_text()
     assert "## equities" in text
     assert "Top 5 ranking" in text
+
+
+# --- intraday partial-bar guard (session venues only) ---
+
+
+def test_intraday_run_during_market_session_aborts_before_any_journal_write(tmp_path):
+    # A launchd-coalesced run lands 14:00 ET on the decision bar's own date --
+    # yfinance is still serving that day's bar IN PROGRESS. Must abort clean:
+    # no journal event (bootstrap or otherwise), no state file, one notify.
+    now = datetime.datetime(2026, 7, 6, 18, 0, tzinfo=datetime.UTC)  # 14:00 ET Monday
+    outcome, notes = _run(tmp_path, now=now)
+    assert outcome.status == "failed"
+    assert "market session" in outcome.message
+    assert len(notes) == 1
+    assert not (tmp_path / "journal" / "equities.jsonl").exists()
+    assert not state_path(tmp_path / "state", "equities").exists()
+
+
+def test_run_after_session_close_buffer_proceeds_normally(tmp_path):
+    # Same calendar date, but past 16:00 ET close + the 90min buffer: the
+    # bar is final at yfinance by now, so the run must proceed as usual.
+    now = datetime.datetime(2026, 7, 6, 22, 30, tzinfo=datetime.UTC)  # 18:30 ET Monday
+    outcome, notes = _run(tmp_path, now=now)
+    assert outcome.status == "ok"
+    assert notes == []
+
+
+def test_guard_only_applies_when_decision_bar_is_todays_date():
+    # A stale run processing an OLD (already-final) bar during market hours
+    # must not be blocked -- only a same-day partial bar is unsafe.
+    friday_bar = pd.Timestamp("2026-07-03", tz="UTC")
+    monday_market_hours = datetime.datetime(2026, 7, 6, 14, 0, tzinfo=datetime.UTC)  # 10:00 ET
+    assert intraday_partial_bar_reason(EQ, friday_bar, monday_market_hours) is None
+
+
+def test_crypto_never_gated_by_session_guard():
+    # trades_24_7 venues have no session to be mid-way through.
+    decision_ts = pd.Timestamp("2026-07-06", tz="UTC")
+    for hour in (0, 9, 14, 16, 20, 23):
+        now = datetime.datetime(2026, 7, 6, hour, 0, tzinfo=datetime.UTC)
+        assert intraday_partial_bar_reason(CR, decision_ts, now) is None
 
 
 def test_digest_write_failure_never_blocks_state_save(tmp_path, monkeypatch):

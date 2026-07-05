@@ -15,6 +15,7 @@ import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -38,9 +39,36 @@ Notifier = Callable[[str, str], None]
 
 EARNINGS_CANDIDATE_DEPTH = 15  # top-of-ranking symbols worth an earnings lookup
 
+_EQUITIES_TZ = ZoneInfo("America/New_York")
+_EQUITIES_SESSION_CLOSE_HOUR = 16  # NYSE close, local time
+
 
 class RunnerError(RuntimeError):
     pass
+
+
+def intraday_partial_bar_reason(
+    config: VenueConfig, decision_ts: pd.Timestamp, now: datetime.datetime
+) -> str | None:
+    """Session venues (costs.trades_24_7 = false) can have their daily bar
+    served IN PROGRESS by the data provider while the market is still open --
+    a launchd-coalesced run landing mid-session must never trade on it. If
+    the decision bar's date is today (exchange-local) and local time hasn't
+    reached session close + config.portfolio.session_close_buffer_minutes,
+    the bar isn't final yet: refuse before any journal write. 24/7 venues
+    (crypto) are unaffected -- there is no session to be mid-way through.
+    """
+    if config.costs.trades_24_7:
+        return None
+    now_utc = now if now.tzinfo is not None else now.replace(tzinfo=datetime.UTC)
+    local_now = now_utc.astimezone(_EQUITIES_TZ)
+    if decision_ts.date() != local_now.date():
+        return None
+    close = local_now.replace(hour=_EQUITIES_SESSION_CLOSE_HOUR, minute=0, second=0, microsecond=0)
+    deadline = close + datetime.timedelta(minutes=config.portfolio.session_close_buffer_minutes)
+    if local_now < deadline:
+        return "run during market session; decision bar incomplete — rerun after close"
+    return None
 
 
 @dataclass(frozen=True)
@@ -253,6 +281,15 @@ def run_venue(
             return RunOutcome(
                 venue, "noop", f"decision bar {decision_ts.date()} already processed", run_key
             )
+
+        # Guard BEFORE any journal write: a coalesced run landing mid-session
+        # must never let an in-progress daily bar become the decision bar.
+        # No journal event, no state mutation -- run_key stays virgin so the
+        # legitimate after-close run processes the (by-then-final) bar.
+        guard_reason = intraday_partial_bar_reason(config, decision_ts, now)
+        if guard_reason is not None:
+            notify("trading: run aborted", f"{venue}: {guard_reason}")
+            return RunOutcome(venue, "failed", guard_reason, run_key)
 
         if state is None:  # explicit bootstrap path, journaled (spec)
             # Reuse an already-journaled bootstrap (crash between the bootstrap

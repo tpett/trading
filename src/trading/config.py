@@ -71,6 +71,7 @@ class PortfolioConfig:
     earnings_blackout_enabled: bool
     staleness_hours: int
     atr_window: int
+    session_close_buffer_minutes: int  # session venues only; see costs.trades_24_7
 
 
 @dataclass(frozen=True)

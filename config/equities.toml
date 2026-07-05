@@ -49,6 +49,12 @@ earnings_blackout_sessions = 5
 earnings_blackout_enabled = false   # yfinance earnings dates proved unreliable in practice (2026-07); see README
 staleness_hours = 2
 atr_window = 20                     # ATR-20 (spec); frozen at entry
+# A launchd-coalesced run can land while NYSE is still open; yfinance then
+# serves today's daily bar IN PROGRESS. Below this many minutes past 16:00
+# ET close, the runner aborts rather than treat a partial bar as final
+# (spec: Missed/late runs). 90min is comfortably past yfinance's post-close
+# settle time for the daily bar.
+session_close_buffer_minutes = 90
 
 [data]
 cache_dir = "data/equities"

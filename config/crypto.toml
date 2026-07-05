@@ -52,6 +52,7 @@ staleness_hours = 7    # bar completes 00:00 UTC; the 01:00 America/New_York run
                        # lands 05:00 (EDT) / 06:00 (EST) UTC — 6h would sit exactly
                        # on the winter boundary, so widen to 7
 atr_window = 20                     # ATR-20 (spec); frozen at entry
+session_close_buffer_minutes = 0    # unused: 24/7 venue, no intraday partial-bar guard
 
 [data]
 cache_dir = "data/crypto"
