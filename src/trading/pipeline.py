@@ -17,7 +17,7 @@ from trading.data.cache import OhlcvCache
 from trading.data.quality import CoverageReport, check_coverage, quarantine_outliers
 from trading.signals.engine import compute_features, rank
 from trading.signals.regime import Regime, compute_regime
-from trading.venues.base import VenueAdapter
+from trading.venues.base import SymbolInfo, VenueAdapter
 
 
 class PipelineDataError(RuntimeError):
@@ -71,17 +71,6 @@ def build_rankings(
             frame = _drop_incomplete_last_bar(frame, as_of)
         bars[info.symbol] = frame
 
-    coverage = check_coverage([i.symbol for i in infos], bars, config.data.min_coverage)
-    if not coverage.ok:
-        raise PipelineDataError(
-            f"universe coverage {coverage.ratio:.0%} below "
-            f"{config.data.min_coverage:.0%}; missing: {', '.join(coverage.missing)}"
-        )
-
-    clean, quarantined = quarantine_outliers(
-        bars, config.data.max_daily_move, config.data.quarantine_window_days
-    )
-
     # The benchmark symbol is often also a universe member (e.g. crypto's BTC
     # benchmark is also ranked); reuse the bars already fetched above instead
     # of issuing a second fetch for the same symbol.
@@ -95,11 +84,40 @@ def build_rankings(
         if config.data.drop_incomplete_last_bar:
             benchmark = _drop_incomplete_last_bar(benchmark, as_of)
 
+    return assemble_rankings(
+        config, infos, bars, benchmark, as_of, fetch_failures=tuple(sorted(failures))
+    )
+
+
+def assemble_rankings(
+    config: VenueConfig,
+    infos: list[SymbolInfo],
+    bars: dict[str, pd.DataFrame],
+    benchmark_bars: pd.DataFrame,
+    as_of: datetime.date,
+    fetch_failures: tuple[str, ...] = (),
+) -> RankingsResult:
+    """Pure rankings core: coverage -> quarantine -> regime -> features -> rank.
+
+    No I/O, no clock. build_rankings (live) and the M3 backtester's prepare()
+    both call this, so backtest and live-paper rank identically by construction.
+    """
+    coverage = check_coverage([i.symbol for i in infos], bars, config.data.min_coverage)
+    if not coverage.ok:
+        raise PipelineDataError(
+            f"universe coverage {coverage.ratio:.0%} below "
+            f"{config.data.min_coverage:.0%}; missing: {', '.join(coverage.missing)}"
+        )
+
+    clean, quarantined = quarantine_outliers(
+        bars, config.data.max_daily_move, config.data.quarantine_window_days
+    )
+
     # A corrupt benchmark print must not silently flip venue-wide exposure/
     # regime: run it through the same recent-window sanity check universe
     # symbols get, but fail loudly instead of quietly excluding it.
     _, benchmark_quarantined = quarantine_outliers(
-        {config.benchmark: benchmark},
+        {config.benchmark: benchmark_bars},
         config.data.max_daily_move,
         config.data.quarantine_window_days,
     )
@@ -110,7 +128,7 @@ def build_rankings(
         )
 
     as_of_ts = pd.Timestamp(as_of, tz="UTC")
-    regime = compute_regime(benchmark, as_of_ts, config.regime)
+    regime = compute_regime(benchmark_bars, as_of_ts, config.regime)
     features = compute_features(clean, as_of_ts, config.signals)
     table = rank(features).copy()
 
@@ -125,8 +143,8 @@ def build_rankings(
         table=table,
         coverage=coverage,
         quarantined=quarantined,
-        fetch_failures=tuple(sorted(failures)),
+        fetch_failures=fetch_failures,
         insufficient_history=insufficient,
         bars=clean,
-        benchmark_bars=benchmark,
+        benchmark_bars=benchmark_bars,
     )

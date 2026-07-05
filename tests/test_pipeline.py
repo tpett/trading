@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from sim_helpers import frame
 from trading.config import load_venue_config
 from trading.data.cache import OhlcvCache
 from trading.pipeline import PipelineDataError, build_rankings
@@ -216,3 +217,22 @@ def test_quarantined_symbol_is_excluded_from_bars(tmp_path):
     frames["S5"].loc[spike_at, "close"] = frames["S5"]["close"].loc[prior_at] * 1.7
     result = build_rankings(CONFIG, adapter, cache, AS_OF)
     assert "S5" not in result.bars
+
+
+def test_assemble_rankings_is_pure_and_matches_build_rankings_semantics():
+    # No adapter, no cache: hand it frames directly and get a full RankingsResult.
+    from trading.pipeline import assemble_rankings
+
+    config = load_venue_config("equities", Path("config"))
+    bars = {"AAA": frame(periods=300), "BBB": frame(periods=300)}
+    benchmark = frame(periods=300)
+    infos = [
+        SymbolInfo(symbol="AAA", status="tradable"),
+        SymbolInfo(symbol="BBB", status="sell_only"),
+    ]
+    result = assemble_rankings(config, infos, bars, benchmark, datetime.date(2026, 7, 1))
+    assert set(result.table.index) == {"AAA", "BBB"}
+    assert result.table.loc["BBB", "status"] == "sell_only"
+    assert result.coverage.ratio == 1.0
+    assert result.bars.keys() == bars.keys()  # nothing quarantined
+    assert result.venue == "equities"
