@@ -132,3 +132,57 @@
   Gas (COG) -> Coterra Energy (CTRA), 2021). Guessing a successor CIK here
   risks exactly the kind of misjoin this map exists to prevent, so these stay
   unmapped/fail-open until deliberately researched and added.
+
+## SEC EDGAR fundamentals (M4)
+- Backfill: SEC Financial Statement Data Sets quarterly ZIPs, 2018q1 -> present
+  (https://www.sec.gov/dera/data/financial-statement-data-sets, US-government
+  public domain), cached under data/edgar-raw/ (gitignored).
+- Top-up: https://data.sec.gov/api/xbrl/companyfacts/ (same terms).
+- Access policy: User-Agent "trading-system travis@launchsupply.com", requests
+  spaced under the 10 req/s ceiling.
+- Verification (run 2026-07-06): AAPL 2023-02-03 TTM gross profitability
+  0.4812 (expected 0.4813; single-quarter scout basis was 0.1452 — see
+  scripts/verify_fundamentals.py for the recomputation arithmetic); AAPL value
+  primitives matched the 2023-02-03 10-Q (15,842,407,000 shares; $56,727M
+  book equity; $95,171M TTM net income; earnings yield 0.0389 at the pinned
+  $154.50 close); restatement invariant passed with 186 re-filed fiscal
+  periods, zero later accessions in the store; 1110 symbols with fundamentals
+  (from 33 quarterly ZIPs 2018q1->2026q1 -- 2026q2 not yet published, covered
+  by the weekly companyfacts top-up instead; rerun of the backfill script
+  confirmed idempotence: 0 rows appended).
+- Ticker-recycling reconciliation (routed here from Task 4's review, see
+  scripts/verify_fundamentals.py's check_recycling_reconciliation): every
+  cik_map.csv symbol/CIK interval was checked for at least one filing FILED
+  inside its membership window intersected with the backfill's coverage
+  range. 21 of 1135 intervals had zero filings in-window. Investigated each
+  via data.sec.gov/submissions/CIK##########.json:
+  - 16 are foreign private issuers that file 20-F/40-F instead of 10-K/10-Q
+    (structurally excluded by edgar.py's form filter, benign): ARM, ASML,
+    AZN, BIDU, CCEP, CHKP, FER, GFS, JD, NBIS, NTES, PDD, SE, TCOM, TRI, VOD.
+  - 1 is a domestic bank (OZK / Bank OZK, CIK 1569650, confirmed Nasdaq-listed
+    under this CIK) that reports periodic financials to the FDIC rather than
+    filing 10-K/10-Q with the SEC -- benign, a different regulator, not a
+    mapping error.
+  - 1 is a genuine spinoff too new to have filed an annual/quarterly report
+    yet (FDXF / FedEx Freight Holding Company, Inc., CIK 2082247, added to
+    the sp500 membership 2026-06-01; its only EDGAR filings so far are Form
+    10 registration statements) -- benign, will self-resolve once it files.
+  - 3 are CONFIRMED ticker-recycling mismaps: APC (Anadarko Petroleum,
+    sp500 member 2017-01-01..2019-08-09, acquired by Occidental) currently
+    resolves via company_tickers.json to CIK 2080921, "ARKO Petroleum
+    Corp.", an unrelated company now trading under the recycled APC ticker;
+    BID (Sotheby's, sp400 member 2019-01-01..2019-10-03, taken private)
+    resolves to CIK 2094919, "Tribeca Strategic Acquisition Corp.", an
+    unrelated SPAC; CONE (CyrusOne, sp400 member 2019-01-01..2022-03-30,
+    taken private) resolves to CIK 2103884, "Compass Sub North, Inc.", an
+    unrelated merger shell. In all three cases build_cik_map.py's
+    current-ticker lookup (no RENAMES entry covers a ticker vacated by an
+    acquired/delisted company) attached today's live owner of the ticker to
+    the historical membership interval instead of leaving it unmapped. In
+    practice this is fail-open, not silent corruption: the wrongly-mapped
+    CIK had zero filings during the historical (pre-2022) window the real
+    company occupied, so no misattributed data actually reached the store --
+    but it is a real defect in cik_map.csv worth a deliberate follow-up
+    (e.g. an explicit exclusion/"delisted, do not re-resolve" list in
+    scripts/build_cik_map.py) rather than relying on this fail-open outcome
+    indefinitely.

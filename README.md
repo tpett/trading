@@ -164,3 +164,56 @@ Sub-scores are cross-sectional percentiles (0-1, higher = better):
 (equal-weight blend; the ranking key), `raw_return_30d` (raw return feeding
 the crypto fee gate). `status` is `tradable` / `sell_only` / `untradable`;
 regime is `risk_on` / `neutral` / `risk_off` (full / half / no new entries).
+
+## Fundamentals overlay (M4)
+
+Point-in-time fundamentals from SEC EDGAR XBRL — quality (gross profitability
+= trailing-4-quarter (Revenue − COGS) / latest Assets) and value primitives
+(TTM net income, book equity, shares outstanding) — feeding two opt-in
+rankers: `quality_momentum_v1` (six momentum features + a quality percentile,
+equal weight over 7) and `value_momentum_v1` (six momentum features +
+earnings-yield and book-to-market percentiles, equal weight over 8; both
+ratios computed at ranking time from latest-filed primitives × the last
+close as-of — the stored data is price-free and never rewrites when price
+history refreshes). Missing data — e.g. financials without a COGS concept,
+unmapped delisted symbols — is neutral 0.5, never a penalty. Live and paper
+stay on `momentum_v1`; opt in per run with
+`--config-dir config/experiments/quality` or `config/experiments/value`.
+
+PIT discipline: a value becomes visible at its FILING date; per fiscal period
+only the original (earliest-accession) filing counts — amendments and
+restatements never rewrite history. Provenance (accession, tags, period, form)
+rides on every stored row.
+
+Data flow:
+
+    uv run python scripts/build_cik_map.py          # committed CIK<->symbol map (rare)
+    uv run python scripts/backfill_fundamentals.py  # 2018q1->present ZIPs -> data/fundamentals/
+    uv run python scripts/verify_fundamentals.py    # AAPL spot-check + restatement invariant
+
+The live runner tops up the store weekly from the companyfacts API — only
+when the configured ranker requires fundamentals — failing open (journaled
+warning, rankings proceed on stored values) exactly like the earnings fetch.
+Stores are append-only: history, once visible, is immutable. Note: with the
+locked 2018q1 backfill start, TTM warms up through 2018 (mostly neutral
+quality) until the FY-2018 10-K wave lands in early 2019.
+
+Live run evidence (2026-07-06, full 2018q1->2026q2 backfill, 33 ZIPs, 1110
+symbols with fundamentals): AAPL 2023-02-03 TTM gross profitability 0.4812
+(scout's 0.1452 was single-quarter basis); AAPL value primitives matched
+(15,842,407,000 shares; $56,727M book equity; $95,171M TTM net income;
+earnings yield 0.0389 at the pinned $154.50 close); restatement invariant
+held over 186 re-filed fiscal periods (zero later accessions leaked into the
+store); a ticker-recycling reconciliation audit (every `cik_map.csv`
+symbol/CIK interval checked for at least one filing inside its membership
+window) flagged 21 symbols with no filings in-window — 18 are benign
+(16 foreign private issuers filing 20-F/40-F instead of 10-K/10-Q, one
+bank reporting to the FDIC instead of the SEC, one spinoff too new to have
+filed yet) and 3 (APC, BID, CONE) are confirmed ticker-recycling mismaps
+where `cik_map.csv`'s current-ticker lookup attached a live, unrelated
+company's CIK to a historical (pre-2022) membership interval that belonged
+to a different, since-delisted company — fail-open in practice (the
+wrongly-mapped CIK had no filings during that historical window, so no
+misattributed data reached the store), but worth a deliberate follow-up to
+`scripts/build_cik_map.py`'s RENAMES/exclusion handling. Full detail:
+`src/trading/venues/universes/sources/PROVENANCE.md`.
