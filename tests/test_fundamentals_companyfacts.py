@@ -25,6 +25,10 @@ def _payload():
         # YTD duration inside the same 10-Q: must be dropped (6 months != 1 quarter).
         _entry("2023-06-30", 22.0, "a-02", 2023, "Q2", "10-Q", "2023-08-09", start="2023-01-01"),
         _entry("2023-09-30", 11.0, "a-03", 2023, "Q3", "10-Q", "2023-11-08", start="2023-07-01"),
+        # Prior-year SAME-quarter comparative inside the Q3 10-Q: same tag,
+        # ~92-day duration (passes the quarter-length check), so ONLY the
+        # own-period filter (max end per accession) can drop it.
+        _entry("2022-09-30", 8.0, "a-03", 2023, "Q3", "10-Q", "2023-11-08", start="2022-07-01"),
         _entry("2023-12-31", 48.0, "a-04", 2023, "FY", "10-K", "2024-02-20", start="2023-01-01"),
         # Comparative full-year 2022 re-reported inside the FY2023 10-K: the
         # own-period filter (max end per accession) must drop it.
@@ -86,6 +90,8 @@ def test_normalizes_to_own_period_facts_only():
     assert list(fy["qtrs"]) == [4]
     q2 = facts[(facts["adsh"] == "a-02") & (facts["concept"] == "revenue")]
     assert list(q2["value"]) == [12.0]  # the qtrs=2 YTD duration was dropped
+    q3 = facts[(facts["adsh"] == "a-03") & (facts["concept"] == "revenue")]
+    assert list(q3["value"]) == [11.0]  # prior-year same-quarter comparative dropped
 
 
 def test_shares_cover_date_maps_to_the_filing_period():
