@@ -78,6 +78,7 @@ class PortfolioConfig:
     staleness_hours: int
     atr_window: int
     session_close_buffer_minutes: int  # session venues only; see costs.trades_24_7
+    exit_style: str  # "frozen" (default) or "trailing" (experiment flag)
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,11 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         (datetime.date.fromisoformat(a), datetime.date.fromisoformat(b))
         for a, b in backtest["stress_segments"]
     )
+    portfolio = dict(raw["portfolio"])
+    if portfolio["exit_style"] not in ("frozen", "trailing"):
+        raise ValueError(
+            f"portfolio.exit_style must be 'frozen' or 'trailing', got {portfolio['exit_style']!r}"
+        )
     return VenueConfig(
         name=raw["venue"]["name"],
         benchmark=raw["venue"]["benchmark"],
@@ -148,7 +154,7 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         universe=UniverseConfig(**raw["universe"]),
         signals=SignalConfig(**signals),
         regime=RegimeConfig(**raw["regime"]),
-        portfolio=PortfolioConfig(**raw["portfolio"]),
+        portfolio=PortfolioConfig(**portfolio),
         data=DataConfig(**raw["data"]),
         backtest=BacktestConfig(**backtest),
     )

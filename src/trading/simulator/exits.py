@@ -71,28 +71,58 @@ def evaluate_exits(
             continue
         last_close = float(window["close"].iloc[-1])
 
-        # Regime flush: recompute the stop ONCE at 1.0x the frozen entry ATR.
-        # One-way ratchet — never loosened until the position closes.
-        if rankings.regime.state == "risk_off" and not position.flushed:
-            ratchet = (
-                position.entry_price
-                - config.portfolio.regime_flush_atr_multiple * position.entry_atr
+        if config.portfolio.exit_style == "trailing":
+            # Trailing stop: the sole profit-protection mechanism in this
+            # mode (trend-break is skipped entirely below). The peak ratchets
+            # with new highs; the width tightens one-way on a regime flush,
+            # mirroring the frozen-mode flushed flag's semantics exactly —
+            # once flushed, stays flushed, width never re-widens.
+            if rankings.regime.state == "risk_off" and not position.flushed:
+                position = replace(position, flushed=True)
+                state.positions[symbol] = position
+            width = (
+                config.portfolio.regime_flush_atr_multiple
+                if position.flushed
+                else config.portfolio.stop_atr_multiple
             )
-            position = replace(position, stop_price=max(position.stop_price, ratchet), flushed=True)
+            prior_peak = (
+                position.peak_close if position.peak_close is not None else position.entry_price
+            )
+            peak = max(prior_peak, last_close)
+            candidate = peak - width * position.entry_atr
+            position = replace(
+                position, peak_close=peak, stop_price=max(position.stop_price, candidate)
+            )
             state.positions[symbol] = position
 
-        if last_close <= position.stop_price:
-            orders.append(_sell(symbol, decision_ts, "stop_loss"))
-            continue
-
-        if symbol in ranked:
-            rank_pos = ranked.index(symbol) + 1
-            mean = float(window["close"].iloc[-config.signals.mean_window :].mean())
-            if rank_pos > len(ranked) / 2 and last_close < mean:
-                orders.append(_sell(symbol, decision_ts, "trend_break"))
+            if last_close <= position.stop_price:
+                orders.append(_sell(symbol, decision_ts, "stop_loss"))
                 continue
         else:
-            warnings.append(f"{symbol}: held but unranked this run; trend-break not evaluated")
+            # Regime flush: recompute the stop ONCE at 1.0x the frozen entry ATR.
+            # One-way ratchet — never loosened until the position closes.
+            if rankings.regime.state == "risk_off" and not position.flushed:
+                ratchet = (
+                    position.entry_price
+                    - config.portfolio.regime_flush_atr_multiple * position.entry_atr
+                )
+                position = replace(
+                    position, stop_price=max(position.stop_price, ratchet), flushed=True
+                )
+                state.positions[symbol] = position
+
+            if last_close <= position.stop_price:
+                orders.append(_sell(symbol, decision_ts, "stop_loss"))
+                continue
+
+            if symbol in ranked:
+                rank_pos = ranked.index(symbol) + 1
+                mean = float(window["close"].iloc[-config.signals.mean_window :].mean())
+                if rank_pos > len(ranked) / 2 and last_close < mean:
+                    orders.append(_sell(symbol, decision_ts, "trend_break"))
+                    continue
+            else:
+                warnings.append(f"{symbol}: held but unranked this run; trend-break not evaluated")
 
         bars_held = int((window.index > pd.Timestamp(position.entry_ts)).sum())
         if bars_held >= config.portfolio.time_stop_bars and last_close <= position.entry_price:

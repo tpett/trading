@@ -53,6 +53,7 @@ earnings_blackout_enabled = false
 staleness_hours = 24
 atr_window = 5
 session_close_buffer_minutes = 0
+exit_style = "frozen"
 
 [data]
 cache_dir = "unused-tests-pass-their-own-cache"

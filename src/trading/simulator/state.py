@@ -31,6 +31,7 @@ class Position:
     entry_composite: float  # ranking evidence at decision time (journal/digest rationale)
     entry_rank: int
     entry_fee: float = 0.0  # buy-side fee paid at fill; folded into realized_pnl on exit
+    peak_close: float | None = None  # trailing-exit high-water close; None on old saved state
 
 
 @dataclass(frozen=True)

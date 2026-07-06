@@ -64,6 +64,21 @@ def test_backfill_config_loaded():
     assert equities.data.backfill_exchange == ""
 
 
+def test_exit_style_loaded_as_frozen_by_default_in_real_configs():
+    for venue in ("equities", "crypto"):
+        config = load_venue_config(venue, Path("config"))
+        assert config.portfolio.exit_style == "frozen"
+
+
+def test_invalid_exit_style_raises(tmp_path):
+    raw = (Path("config") / "equities.toml").read_text()
+    bad = raw.replace('exit_style = "frozen"', 'exit_style = "yolo"')
+    assert bad != raw
+    (tmp_path / "equities.toml").write_text(bad)
+    with pytest.raises(ValueError, match="exit_style"):
+        load_venue_config("equities", tmp_path)
+
+
 def test_backtest_config_loaded():
     for venue in ("equities", "crypto"):
         config = load_venue_config(venue, Path("config"))

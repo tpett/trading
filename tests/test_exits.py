@@ -1,6 +1,7 @@
 import dataclasses
 
 import pandas as pd
+import pytest
 
 from sim_helpers import EQ, frame, make_rankings, make_state, make_table
 from trading.simulator.exits import evaluate_exits
@@ -22,6 +23,7 @@ def _position(
     entry_atr=4.0,
     flushed=False,
     entry_ts="2026-06-25T00:00:00+00:00",
+    peak_close=None,
 ):
     return Position(
         symbol=symbol,
@@ -33,7 +35,14 @@ def _position(
         flushed=flushed,
         entry_composite=0.8,
         entry_rank=1,
+        peak_close=peak_close,
     )
+
+
+TRAILING = dataclasses.replace(
+    EQ, portfolio=dataclasses.replace(EQ.portfolio, exit_style="trailing")
+)
+FROZEN = dataclasses.replace(EQ, portfolio=dataclasses.replace(EQ.portfolio, exit_style="frozen"))
 
 
 def _row(status="tradable", composite=0.9):
@@ -208,3 +217,144 @@ def test_pending_sell_is_not_duplicated():
     bars = {"AAA": frame(start_price=50.0)}  # way below stop
     orders, _, _ = evaluate_exits(state, _rankings(bars, {"AAA": _row()}), EQ, DECISION)
     assert orders == []
+
+
+# --- Trailing exit (exit_style="trailing") ------------------------------------
+#
+# Locked design: peak = max(prior peak_close or entry_price, last_close);
+# width = stop_atr_multiple, or regime_flush_atr_multiple once flushed (one-way);
+# candidate = peak - width * entry_atr; stop_price = max(existing, candidate).
+
+
+def test_trailing_ratchets_up_as_closes_make_new_highs():
+    state = make_state(EQ, positions={"AAA": _position("AAA", peak_close=100.0)})
+
+    bars = {"AAA": frame(start_price=105.0)}
+    evaluate_exits(state, _rankings(bars, {"AAA": _row()}), TRAILING, DECISION)
+    assert state.positions["AAA"].peak_close == 105.0
+    assert state.positions["AAA"].stop_price == 99.0  # 105 - 1.5*4
+
+    bars = {"AAA": frame(start_price=110.0)}
+    evaluate_exits(state, _rankings(bars, {"AAA": _row()}), TRAILING, DECISION)
+    assert state.positions["AAA"].peak_close == 110.0
+    assert state.positions["AAA"].stop_price == 104.0  # 110 - 1.5*4
+
+
+def test_trailing_never_loosens_on_a_pullback():
+    state = make_state(EQ, positions={"AAA": _position("AAA", stop=104.0, peak_close=110.0)})
+    bars = {"AAA": frame(start_price=105.0)}  # pullback below the peak
+    orders, _, _ = evaluate_exits(state, _rankings(bars, {"AAA": _row()}), TRAILING, DECISION)
+    assert orders == []
+    assert state.positions["AAA"].peak_close == 110.0  # unchanged: 105 < 110
+    assert state.positions["AAA"].stop_price == 104.0  # unchanged: candidate 104 == existing
+
+
+def test_trailing_fires_stop_loss_when_close_crosses_the_trail():
+    state = make_state(EQ, positions={"AAA": _position("AAA", stop=104.0, peak_close=110.0)})
+    bars = {"AAA": frame(start_price=103.9)}  # <= trail
+    orders, _, _ = evaluate_exits(state, _rankings(bars, {"AAA": _row()}), TRAILING, DECISION)
+    assert [(o.symbol, o.reason) for o in orders] == [("AAA", "stop_loss")]
+
+
+def test_trailing_regime_flush_tightens_one_way_and_never_re_widens():
+    state = make_state(EQ, positions={"AAA": _position("AAA", stop=104.0, peak_close=110.0)})
+
+    # risk_off: width switches to regime_flush_atr_multiple (1.0) and the
+    # flushed flag latches one-way.
+    bars = {"AAA": frame(start_price=115.0)}
+    rankings = _rankings(bars, {"AAA": _row()}, regime_state="risk_off")
+    evaluate_exits(state, rankings, TRAILING, DECISION)
+    assert state.positions["AAA"].peak_close == 115.0
+    assert state.positions["AAA"].stop_price == 111.0  # 115 - 1.0*4
+    assert state.positions["AAA"].flushed is True
+
+    # Regime recovers to risk_on: flushed stays True (one-way), so width must
+    # STAY at 1.0 (tight), not revert to 1.5 (loose). A new high proves which
+    # width is in effect: 1.5 would give 120-6=114 < existing 111 (masked by
+    # max()); 1.0 gives 120-4=116 > 111, which is the only way stop can move.
+    bars = {"AAA": frame(start_price=120.0)}
+    recovered = _rankings(bars, {"AAA": _row()}, regime_state="risk_on")
+    evaluate_exits(state, recovered, TRAILING, DECISION)
+    assert state.positions["AAA"].stop_price == 116.0  # proves width stayed 1.0, not 1.5
+    assert state.positions["AAA"].flushed is True  # never un-flushes
+
+
+def test_trailing_suppresses_trend_break_until_the_trail_itself_fires():
+    # Same shape as test_trend_break_requires_bottom_half_rank_and_close_below_mean:
+    # AAA is bottom-half ranked and below its 20-session mean, so frozen mode
+    # fires trend_break (stop artificially disabled via stop=1.0 to isolate it).
+    down = frame(drift=-0.01, start_price=200.0)
+    bars = {"AAA": down, "BBB": frame(), "CCC": frame(), "DDD": frame()}
+    rows = {
+        "BBB": _row(composite=0.9),
+        "CCC": _row(composite=0.8),
+        "DDD": _row(composite=0.7),
+        "AAA": _row(composite=0.1),  # rank 4 of 4: bottom half
+    }
+    frozen_state = make_state(EQ, positions={"AAA": _position("AAA", stop=1.0)})
+    frozen_orders, _, _ = evaluate_exits(frozen_state, _rankings(bars, rows), FROZEN, DECISION)
+    assert [(o.symbol, o.reason) for o in frozen_orders] == [("AAA", "trend_break")]
+
+    # Under trailing, entry_price=85 keeps the peak pinned near the last close
+    # (89.5046...) so the trail (peak - 1.5*4) sits below it: the position
+    # survives THIS bar, proving trend_break did not fire (it is skipped
+    # entirely in trailing mode -- there is no other mechanism that could
+    # have held it open here).
+    trailing_state = make_state(EQ, positions={"AAA": _position("AAA", entry_price=85.0, stop=1.0)})
+    orders, _, _ = evaluate_exits(trailing_state, _rankings(bars, rows), TRAILING, DECISION)
+    assert orders == []
+    assert trailing_state.positions["AAA"].peak_close == pytest.approx(89.50464275276214)
+    assert trailing_state.positions["AAA"].stop_price == pytest.approx(83.50464275276214)
+
+    # The trail itself eventually fires on a further decline (not trend_break).
+    further_down = {"AAA": frame(start_price=80.0), "BBB": frame(), "CCC": frame(), "DDD": frame()}
+    orders, _, _ = evaluate_exits(trailing_state, _rankings(further_down, rows), TRAILING, DECISION)
+    assert [(o.symbol, o.reason) for o in orders] == [("AAA", "stop_loss")]
+
+
+def test_frozen_mode_explicit_matches_existing_multi_rule_expectations():
+    # Regression: the same scenario as test_regime_flush_ratchets_stop_once_
+    # and_never_loosens, re-run with exit_style="frozen" set EXPLICITLY. The
+    # frozen path must be bit-identical to today's (implicit) behavior.
+    bars = {"AAA": frame(start_price=99.0)}
+    state = make_state(EQ, positions={"AAA": _position("AAA")})
+    rankings = _rankings(bars, {"AAA": _row()}, regime_state="risk_off")
+
+    orders, _, _ = evaluate_exits(state, rankings, FROZEN, DECISION)
+    assert orders == []
+    assert state.positions["AAA"].stop_price == 96.0
+    assert state.positions["AAA"].flushed is True
+
+    state.positions["AAA"] = dataclasses.replace(state.positions["AAA"], stop_price=98.0)
+    evaluate_exits(state, rankings, FROZEN, DECISION)
+    assert state.positions["AAA"].stop_price == 98.0
+    recovered = _rankings(bars, {"AAA": _row()}, regime_state="risk_on")
+    evaluate_exits(state, recovered, FROZEN, DECISION)
+    assert state.positions["AAA"].stop_price == 98.0
+
+
+def test_trailing_hand_trace_exact_numbers():
+    # Locked hand-trace (entry=100, ATR=4, stop_atr_multiple=1.5, no flush):
+    #   initial: peak=100, stop=100-1.5*4=94
+    #   rise to 110: peak=110, candidate=110-6=104, stop=max(94,104)=104
+    #   pullback to 105: peak stays 110, candidate=104, stop=104 (unchanged)
+    #   close=103.9: 103.9 <= 104 -> stop fires, reason "stop_loss"
+    state = make_state(EQ, positions={"AAA": _position("AAA", peak_close=100.0)})
+    assert state.positions["AAA"].stop_price == 94.0  # initial, from fills.py
+
+    evaluate_exits(
+        state, _rankings({"AAA": frame(start_price=110.0)}, {"AAA": _row()}), TRAILING, DECISION
+    )
+    assert state.positions["AAA"].peak_close == 110.0
+    assert state.positions["AAA"].stop_price == 104.0
+
+    evaluate_exits(
+        state, _rankings({"AAA": frame(start_price=105.0)}, {"AAA": _row()}), TRAILING, DECISION
+    )
+    assert state.positions["AAA"].peak_close == 110.0
+    assert state.positions["AAA"].stop_price == 104.0
+
+    orders, _, _ = evaluate_exits(
+        state, _rankings({"AAA": frame(start_price=103.9)}, {"AAA": _row()}), TRAILING, DECISION
+    )
+    assert [(o.symbol, o.reason) for o in orders] == [("AAA", "stop_loss")]

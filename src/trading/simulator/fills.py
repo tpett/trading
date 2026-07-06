@@ -101,6 +101,7 @@ def apply_fills(
                 entry_composite=order.composite,
                 entry_rank=order.rank,
                 entry_fee=fee,
+                peak_close=price,
             )
             fills.append(
                 Fill(order.symbol, "buy", qty, price, fee, bar_ts.isoformat(), order.reason, None)

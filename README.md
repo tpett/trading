@@ -97,6 +97,16 @@ traded twice (journal-enforced); a late run (e.g. after sleep/wake) still
 processes exits but skips entries beyond the staleness bound. Drawdown >20%
 from the high-water mark halts entries venue-wide until `reset-breaker`.
 
+`[portfolio].exit_style` selects which of the two exit mechanisms above
+governs a position: `"frozen"` (default) is the behavior just described.
+`"trailing"` is an experiment flag — it replaces the frozen stop and trend
+break with a single stop that ratchets up with the position's peak close
+(tightening one-way on a regime flush) and is never loosened; time stop and
+forced exits are unchanged. It is evidence-driven, not a parameter tweak:
+walk-forward diagnostics showed frozen stops and the trend-break rule both
+giving back money from held peaks, so it is under evaluation as a config
+flag rather than being turned on by default.
+
 ## Scheduling
 
 `trading schedule install` creates two LaunchAgents in ~/Library/LaunchAgents:

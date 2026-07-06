@@ -115,3 +115,13 @@ def test_position_without_entry_fee_loads_as_zero():
         del position["entry_fee"]
     restored = state_from_dict(payload)
     assert all(p.entry_fee == 0.0 for p in restored.positions.values())
+
+
+def test_position_without_peak_close_loads_as_none():
+    # Old (pre-trailing-exit) state files have no peak_close; they must load as None.
+    state = _populated_state()
+    payload = to_state_dict(state)
+    for position in payload["positions"].values():
+        del position["peak_close"]
+    restored = state_from_dict(payload)
+    assert all(p.peak_close is None for p in restored.positions.values())

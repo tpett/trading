@@ -206,6 +206,13 @@ def test_buy_fill_stores_entry_fee_on_position():
     assert state.positions["BTC"].entry_fee == pytest.approx(300.0 * 95.0 / 1e4)
 
 
+def test_buy_fill_initializes_peak_close_to_fill_price():
+    bars = {"BTC": frame(end="2026-07-01")}
+    state = make_state(CR, pending_orders=[_buy_order(symbol="BTC", notional=300.0)])
+    fills, _ = apply_fills(state, bars, CR)
+    assert state.positions["BTC"].peak_close == pytest.approx(fills[0].price)
+
+
 def test_sell_realized_pnl_includes_entry_fee():
     bars = {"BTC": frame(end="2026-07-01")}
     position = _position(symbol="BTC")
