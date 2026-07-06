@@ -19,8 +19,10 @@ recomputes as (all $M, all from ORIGINAL filings):
 
 Check 1b -- AAPL value primitives at the same 2023-02-03 filing:
 
-    shares outstanding: 15,842,407,000 (dei:EntityCommonStockSharesOutstanding
-    cover-page tag, as of 2023-01-20)
+    shares outstanding: 15,821,946,000 (dei:EntityCommonStockSharesOutstanding
+    cover-page tag, as of 2023-01-20 -- verbatim on the filed 10-Q cover:
+    "15,821,946,000 shares of common stock were issued and outstanding as
+    of January 20, 2023")
     book equity: $56,727M (condensed balance sheet, total shareholders'
     equity at 2022-12-31)
     TTM net income ($M): Q1 FY23 29,998 + derived Q4 FY22
@@ -28,15 +30,19 @@ Check 1b -- AAPL value primitives at the same 2023-02-03 filing:
     + Q2 FY22 25,010 = 95,171
 
     Earnings-yield composition sanity at the PINNED raw close of $154.50
-    (2023-02-03): market cap = 15,842,407,000 x 154.50 = $2.448T ->
-    earnings yield = 95.171e9 / 2.448e12 = 0.0389. This is pure arithmetic
+    (2023-02-03): market cap = 15,821,946,000 x 154.50 = $2.4445T ->
+    earnings yield = 95.171e9 / 2.4445e12 = 0.0389. This is pure arithmetic
     over store primitives -- the live ranker uses adjusted closes from bars,
     so the pinned-close number validates the primitives, not yfinance.
 
-Check 2 -- restatement regression against REAL data: every (cik, fy, fp)
-filed more than once as a plain 10-K/10-Q across 2018+ must appear in the
-store ONLY via its earliest accession; later re-filings never leak
-(amendment forms are excluded structurally and cannot appear at all).
+Check 2 -- restatement regression against REAL data. The invariant is
+VISIBILITY TIMING: for every fiscal period a cik re-filed (same period end
++ form, multiple plain 10-K/10-Q accessions across the raw ZIPs), any
+store row for that period must sit at the EARLIEST filing's filed date --
+history never becomes visible later than the original filing (amendment
+forms are excluded structurally and cannot appear at all). Accession
+provenance is deliberately NOT part of the invariant; see
+check_restatements' docstring for the companyfacts attribution quirk.
 
 Check 3 -- ticker-recycling reconciliation (Task 4 review item, routed here):
 for every cik_map.csv symbol/CIK membership interval, the backfilled store
@@ -53,7 +59,8 @@ the backfill's primary source to companyfacts (see trading.fundamentals.
 backfill) was fixing shares_outstanding coverage; this check holds that
 regime to account. Across CURRENT equities_membership.csv members, the
 LATEST stored row's shares_outstanding must be non-NaN for at least
-SHARES_COVERAGE_MIN (90%) of them, or the run fails loudly.
+SHARES_COVERAGE_MIN (85%; the ceiling is structural, see the constant's
+comment) of them, or the run fails loudly.
 
 Check 5 -- neutral-fraction coverage table (report-only, no gate). Missing
 fundamentals data doesn't error -- it flows through as a NEUTRAL 0.5
@@ -64,6 +71,9 @@ book-to-market component at each date, using the store's step-function
 "last row as-of" read the rankers themselves use. Earnings-yield and
 book-to-market also need shares_outstanding (the market-cap term); this
 check treats that as part of "genuine" for them, same as the ranker would.
+Any date where quality genuine coverage sits below QUALITY_GENUINE_FLOOR
+(30%) gets an explicit NOTE line: a mostly-neutral era ranks mostly on
+momentum, and experiment interpretation must account for that.
 
 Usage: uv run python scripts/verify_fundamentals.py
 """
@@ -89,12 +99,24 @@ MEMBERSHIP_CSV = ROOT / "src" / "trading" / "venues" / "universes" / "equities_m
 AAPL_EXPECTED_GP = (387_537e6 - 220_666e6) / 346_747e6  # 0.4813, derivation above
 AAPL_TOLERANCE = 0.002
 AAPL_EXPECTED_VALUE = {  # derivations in the module docstring (Check 1b)
-    "shares_outstanding": 15_842_407_000.0,
+    # 15,821,946,000 is the dei cover-page count as of 2023-01-20, verified
+    # verbatim against the filed 10-Q document (aapl-20221231.htm). The
+    # PREVIOUS expectation here, 15,842,407,000, was the us-gaap
+    # CommonStockSharesOutstanding balance-sheet instant at 2022-12-31 --
+    # the FALLBACK tag the retired ZIP path resolved because FSDS strips
+    # the dei cover-page fact -- and was wrongly attributed to the cover
+    # page. The companyfacts-primary rebuild resolves the locked chain's
+    # primary tag, so the expectation moved to the true cover-page value
+    # (sanctioned update, final-review fix wave).
+    "shares_outstanding": 15_821_946_000.0,
     "book_equity": 56_727e6,
     "ttm_net_income": 95_171e6,
 }
 VALUE_REL_TOLERANCE = 1e-3
 AAPL_CLOSE_2023_02_03 = 154.50  # pinned raw close for the composition check
+# 95.171e9 / (15,821,946,000 x 154.50 = 2.4445e12) = 0.03893; the shares
+# correction above moved this by +0.00003 (was 0.03890 at the old share
+# count), well inside the tolerance, so the rounded expectation stands.
 AAPL_EXPECTED_EARNINGS_YIELD = 0.0389
 EARNINGS_YIELD_TOLERANCE = 0.001
 # Reconciliation coverage window: the locked backfill start (see
@@ -105,8 +127,15 @@ RECONCILIATION_START = pd.Timestamp("2018-01-01", tz="UTC")
 # Check 4: the regime-mismatch problem the companyfacts-primary switch fixes
 # (see trading.fundamentals.backfill) is specifically shares_outstanding, so
 # this is the one primitive with a hard coverage floor rather than a
-# report-only table.
-SHARES_COVERAGE_MIN = 0.90
+# report-only table. 85%, not higher, for a STRUCTURAL reason: ~77 current
+# members are multi-class filers (META, BRK-B, CMCSA, ACN, ABNB, BF-B,
+# CHTR, ...) whose cover-page share counts are tagged per share class with
+# a class dimension, and the companyfacts API serves consolidated
+# (undimensioned) facts only -- so no source in this pipeline can resolve
+# them and they rank value-neutral (0.5) by design. Measured ceiling at the
+# 2026-07-06 rebuild: 89.7% (823/918). Named follow-up (per-class
+# summation): see PROVENANCE.md's fundamentals section.
+SHARES_COVERAGE_MIN = 0.85
 # Check 5: three points across the backfill's history -- shortly after the
 # TTM warm-up completes (2019), roughly mid-history, and today (whatever the
 # store's latest coverage looks like right now).
@@ -115,6 +144,13 @@ NEUTRAL_FRACTION_SAMPLE_DATES = [
     pd.Timestamp("2022-06-30", tz="UTC"),
     pd.Timestamp(datetime.date.today(), tz="UTC"),
 ]
+# Below this, quality's genuine coverage is sparse enough that a
+# quality_momentum_v1 experiment over that era is mostly momentum in
+# disguise (nearly everyone neutral-0.5); the table flags such dates so
+# experiment interpretation has to account for it. Early history sits
+# there structurally: pre-ASC-606 revenue tags (SalesRevenueNet etc.) are
+# not in the locked chain, so 2018-2019 quality is thin in BOTH sources.
+QUALITY_GENUINE_FLOOR = 0.30
 
 
 def current_member_symbols() -> list[str]:
@@ -156,31 +192,81 @@ def check_aapl(store: FundamentalsStore) -> None:
 
 
 def check_restatements(store_root: Path, cik_map: pd.DataFrame) -> None:
+    """Check 2: for every re-filed report in the raw ZIPs -- same cik, same
+    fiscal period END, same form, multiple plain 10-K/10-Q accessions --
+    any store row for that period must be dated at the EARLIEST filing's
+    filed date. The invariant is visibility TIMING: history never becomes
+    visible later than the original filing.
+
+    Accession provenance is deliberately NOT asserted. SEC's companyfacts
+    dedupes identical facts across original + re-filed submissions and
+    attributes the surviving entry to the NEWEST accession number while
+    keeping the ORIGINAL filed date (verified live: CRM's re-filed Q1 FY21
+    10-Q, accn 0001108524-22-000007, carries filed=2020-06-01 -- the
+    original date -- with the original values; when a re-filing CHANGES a
+    value, companyfacts keeps both entries as separate accessions and the
+    earliest-filed dedup still picks the original). A store adsh naming a
+    re-file accession at the original filed date is therefore expected on
+    a companyfacts-built store, not a leak. A store row dated at the
+    RE-FILING's later date is the real violation this check catches.
+
+    Groups are keyed by (cik, period, form) rather than FSDS (fy, fp)
+    labels: label noise (fiscal-year-change transitions, 52/53-week
+    filers) can give two genuinely different reporting periods one (fy,
+    fp) label, which are not restatements at all. FSDS also rounds some
+    period ends to month end where companyfacts keeps the exact date, so
+    odd-calendar filers' groups may simply match no store row -- they are
+    skipped, and a vacuous run (zero matched rows) fails loudly."""
     ciks = set(cik_map["cik"])
     parts = []
     for zip_path in sorted(RAW_DIR.glob("*.zip")):
         facts = load_quarter_facts(zip_path, ciks)
         if not facts.empty:
-            parts.append(facts[["cik", "adsh", "fy", "fp", "filed"]].drop_duplicates("adsh"))
+            parts.append(facts[["cik", "adsh", "form", "period", "filed"]].drop_duplicates("adsh"))
     filings = pd.concat(parts, ignore_index=True).drop_duplicates("adsh")
-    later_adshes: set[str] = set()
-    dup_groups = 0
-    for _, group in filings.groupby(["cik", "fy", "fp"]):
+    original_filed: dict[tuple[int, str, str], pd.Timestamp] = {}
+    for (cik, period, form), group in filings.groupby(["cik", "period", "form"]):
         if group["adsh"].nunique() > 1:
-            dup_groups += 1
             ordered = group.sort_values(["filed", "adsh"], kind="mergesort")
-            later_adshes.update(ordered["adsh"].iloc[1:])
-    if dup_groups == 0:
-        sys.exit("FATAL: no re-filed (cik, fy, fp) found across 2018+; scan is broken")
-    stored: set[str] = set()
-    for path in sorted(store_root.glob("*.parquet")):
-        stored.update(pd.read_parquet(path, columns=["adsh"])["adsh"])
-    leaked = sorted(later_adshes & stored)
-    if leaked:
-        sys.exit(f"FATAL: PIT violation -- later re-filings leaked into the store: {leaked[:10]}")
+            key = (int(cik), period.date().isoformat(), str(form))
+            original_filed[key] = ordered["filed"].iloc[0]
+    if not original_filed:
+        sys.exit("FATAL: no re-filed (cik, period, form) found across 2018+; scan is broken")
+
+    symbols_by_cik: dict[int, list[str]] = {
+        int(cik): sorted(set(group["symbol"])) for cik, group in cik_map.groupby("cik")
+    }
+    frames: dict[str, pd.DataFrame] = {}  # symbol -> store frame, read once
+    store = FundamentalsStore(store_root)
+    violations: list[str] = []
+    checked = 0
+    for (cik, period_iso, form), orig_filed in original_filed.items():
+        for symbol in symbols_by_cik.get(cik, []):
+            if symbol not in frames:
+                frames[symbol] = store.read(symbol)
+            frame = frames[symbol]
+            if frame.empty:
+                continue
+            rows = frame[(frame["period"] == period_iso) & (frame["form"] == form)]
+            for filed, row in rows.iterrows():
+                checked += 1
+                if filed.tz_localize(None) > orig_filed:
+                    violations.append(
+                        f"{symbol} cik={cik} {form} period={period_iso}: store row filed "
+                        f"{filed.date()} > original filing {orig_filed.date()} "
+                        f"(adsh={row['adsh']})"
+                    )
+    if violations:
+        sys.exit(
+            "FATAL: PIT violation -- store visibility later than the original filing:\n  "
+            + "\n  ".join(violations[:10])
+        )
+    if checked == 0:
+        sys.exit("FATAL: restatement scan matched zero store rows; the check ran vacuously")
     print(
-        f"restatement invariant OK: {dup_groups} re-filed fiscal periods found in the raw "
-        f"data; zero later accessions present in the store"
+        f"restatement invariant OK: {len(original_filed)} re-filed (cik, period, form) "
+        f"groups in the raw data; {checked} matching store row(s) all visible at the "
+        f"original filing date"
     )
 
 
@@ -270,6 +356,7 @@ def check_neutral_fraction_coverage(store: FundamentalsStore, members: list[str]
     print("neutral-fraction coverage (genuine vs neutral-0.5, current members):")
     header = f"  {'date':<12} {'quality':>9} {'earnings_yield':>16} {'book_to_market':>16}"
     print(header)
+    sparse_quality: list[tuple[str, float]] = []
     for as_of in NEUTRAL_FRACTION_SAMPLE_DATES:
         quality_ok = earnings_yield_ok = book_to_market_ok = 0
         for symbol in members:
@@ -284,9 +371,18 @@ def check_neutral_fraction_coverage(store: FundamentalsStore, members: list[str]
             if not math.isnan(row["book_equity"]) and not math.isnan(shares):
                 book_to_market_ok += 1
         n = len(members)
+        quality_frac = quality_ok / n
         print(
-            f"  {as_of.date().isoformat():<12} {quality_ok / n:>9.1%} "
+            f"  {as_of.date().isoformat():<12} {quality_frac:>9.1%} "
             f"{earnings_yield_ok / n:>16.1%} {book_to_market_ok / n:>16.1%}"
+        )
+        if quality_frac < QUALITY_GENUINE_FLOOR:
+            sparse_quality.append((as_of.date().isoformat(), quality_frac))
+    for date_iso, frac in sparse_quality:
+        print(
+            f"  NOTE: quality genuine coverage {frac:.1%} < {QUALITY_GENUINE_FLOOR:.0%} at "
+            f"{date_iso} -- mostly-neutral era (pre-ASC-606 revenue tags are outside the "
+            f"locked chain); interpret quality-ranker results over this period accordingly"
         )
 
 

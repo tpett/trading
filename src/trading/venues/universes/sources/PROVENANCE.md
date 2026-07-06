@@ -134,22 +134,44 @@
   unmapped/fail-open until deliberately researched and added.
 
 ## SEC EDGAR fundamentals (M4)
-- Backfill: SEC Financial Statement Data Sets quarterly ZIPs, 2018q1 -> present
-  (https://www.sec.gov/dera/data/financial-statement-data-sets, US-government
-  public domain), cached under data/edgar-raw/ (gitignored).
-- Top-up: https://data.sec.gov/api/xbrl/companyfacts/ (same terms).
+- Backfill (PRIMARY, final-review fix wave): https://data.sec.gov/api/xbrl/
+  companyfacts/ (US-government public domain), one fetch per cik_map.csv cik.
+  Retired-primary alternative (`--source zips`): SEC Financial Statement Data
+  Sets quarterly ZIPs, 2018q1 -> present
+  (https://www.sec.gov/dera/data/financial-statement-data-sets), cached under
+  data/edgar-raw/ (gitignored). The switch: the ZIPs strip nearly all dei
+  cover-page facts (dei:EntityCommonStockSharesOutstanding on 1 of 5631
+  filings), leaving shares_outstanding at 59% vs companyfacts' 89.7%.
+- Top-up: same companyfacts API (same terms), weekly from the runner.
 - Access policy: User-Agent "trading-system travis@launchsupply.com", requests
   spaced under the 10 req/s ceiling.
-- Verification (run 2026-07-06): AAPL 2023-02-03 TTM gross profitability
-  0.4812 (expected 0.4813; single-quarter scout basis was 0.1452 — see
-  scripts/verify_fundamentals.py for the recomputation arithmetic); AAPL value
-  primitives matched the 2023-02-03 10-Q (15,842,407,000 shares; $56,727M
-  book equity; $95,171M TTM net income; earnings yield 0.0389 at the pinned
-  $154.50 close); restatement invariant passed with 186 re-filed fiscal
-  periods, zero later accessions in the store; 1110 symbols with fundamentals
-  (from 33 quarterly ZIPs 2018q1->2026q1 -- 2026q2 not yet published, covered
-  by the weekly companyfacts top-up instead; rerun of the backfill script
-  confirmed idempotence: 0 rows appended).
+- Verification (companyfacts rebuild, 2026-07-06): AAPL 2023-02-03 TTM gross
+  profitability 0.4812 (expected 0.4813; single-quarter scout basis was
+  0.1452 — see scripts/verify_fundamentals.py for the recomputation
+  arithmetic); AAPL value primitives matched the 2023-02-03 10-Q
+  (15,821,946,000 shares — the dei cover-page count verified verbatim against
+  the filed document; the ZIP-era expectation 15,842,407,000 was the us-gaap
+  balance-sheet fallback at 2022-12-31, mis-attributed as cover page —
+  $56,727M book equity; $95,171M TTM net income; earnings yield 0.0389 at the
+  pinned $154.50 close); restatement invariant (visibility-timing form: any
+  store row for a re-filed (cik, period, form) group sits at the ORIGINAL
+  filing's filed date) passed; 1110 symbols with fundamentals, 38,972 rows
+  from 1109 fetched CIKs (1 persistent 404: OZK/Bank OZK reports to the FDIC,
+  no companyfacts document — benign, on the reconciliation audit list).
+- Known structural limits of the companyfacts source (accepted, fail-open to
+  neutral): (a) multi-class filers (~77 current members incl. META, BRK-B,
+  CMCSA, ACN, ABNB) tag cover-page share counts per share class with a class
+  dimension, and companyfacts serves undimensioned facts only -> no shares ->
+  value ratios neutral. NAMED FOLLOW-UP — per-class share summation: resolve
+  a consolidated share count for multi-class filers by summing the per-class
+  dimensioned dei:EntityCommonStockSharesOutstanding facts (requires the XBRL
+  frames API or per-filing parsing; the companyfacts API cannot serve them).
+  (b) Dual-registrant REIT/LP combined filings can attribute consolidated
+  facts to the partnership CIK (MAA 2014-2019 has no undimensioned Assets
+  under the parent CIK), plus fy/fp label-noise dedup collisions: 185 of
+  33,996 ZIP-original filings (0.54%, 147 symbols, worst MAA=7) have no store
+  row at their filed date; the step-function read serves the prior filing's
+  values across such gaps.
 - Ticker-recycling reconciliation (routed here from Task 4's review, see
   scripts/verify_fundamentals.py's check_recycling_reconciliation): every
   cik_map.csv symbol/CIK interval was checked for at least one filing FILED

@@ -208,13 +208,18 @@ not a bug. Stores are append-only: history, once visible, is immutable.
 Note: with the locked 2018q1 backfill start, TTM warms up through 2018
 (mostly neutral quality) until the FY-2018 10-K wave lands in early 2019.
 
-Live run evidence (2026-07-06, full 2018q1->2026q2 backfill, 33 ZIPs, 1110
-symbols with fundamentals): AAPL 2023-02-03 TTM gross profitability 0.4812
-(scout's 0.1452 was single-quarter basis); AAPL value primitives matched
-(15,842,407,000 shares; $56,727M book equity; $95,171M TTM net income;
-earnings yield 0.0389 at the pinned $154.50 close); restatement invariant
-held over 186 re-filed fiscal periods (zero later accessions leaked into the
-store); a ticker-recycling reconciliation audit (every `cik_map.csv`
+Live run evidence (2026-07-06, companyfacts-primary rebuild: 1109 CIKs
+fetched -> 1110 symbols, 38,972 rows): AAPL 2023-02-03 TTM gross
+profitability 0.4812 (scout's 0.1452 was single-quarter basis); AAPL value
+primitives matched (15,821,946,000 shares — the dei cover-page count,
+verified verbatim against the filed 10-Q; $56,727M book equity; $95,171M
+TTM net income; earnings yield 0.0389 at the pinned $154.50 close);
+restatement invariant held in its visibility-timing form (every store row
+for a re-filed fiscal period sits at the ORIGINAL filing's filed date);
+shares coverage 89.7% of current members (the gap is structural:
+multi-class filers' per-class cover counts are dimensioned and outside the
+companyfacts API — see PROVENANCE.md's named follow-up); a
+ticker-recycling reconciliation audit (every `cik_map.csv`
 symbol/CIK interval checked for at least one filing inside its membership
 window) flagged 21 symbols with no filings in-window — 18 are benign
 (16 foreign private issuers filing 20-F/40-F instead of 10-K/10-Q, one
