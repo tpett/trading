@@ -86,7 +86,14 @@ def compute_pit_series(facts: pd.DataFrame) -> dict[int, pd.DataFrame]:
 def _original_filings(facts: pd.DataFrame) -> pd.DataFrame:
     """Earliest-filed filing per (cik, fy, fp) wins, tie-break lowest adsh:
     the ORIGINAL filing's values are frozen and later filings for the same
-    fiscal period are discarded entirely (PIT: history never rewrites)."""
+    fiscal period are discarded entirely (PIT: history never rewrites).
+
+    Trust assumption: (fy, fp) keying takes SEC's FSDS fiscal labels at face
+    value. A transition period (fiscal-year-end change) can make SEC assign
+    two genuinely DIFFERENT reporting periods the same (fy, fp) label; this
+    dedup would then keep only the earlier one. We accept that -- the
+    alternative (re-deriving fiscal alignment from period dates) invents
+    labels SEC did not assign, a worse silent-corruption surface."""
     filings = (
         facts[["cik", "adsh", "fy", "fp", "filed"]]
         .drop_duplicates("adsh")
@@ -148,24 +155,41 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
         filing[row.concept] = row.value
         filing[f"{row.concept}_tag"] = row.tag
 
+    # Same-day dual filings (a backlog filer submitting a prior-quarter 10-Q
+    # together with its 10-K) are legitimate: BOTH filings' facts enter the
+    # quarter store (they cover different fiscal periods, so there is no true
+    # collision) and ONE row is emitted per filed date, computed from the full
+    # post-ingest state. Within a day, filings ingest in ascending period
+    # order (adsh tie-break) so a prior-quarter 10-Q always lands before the
+    # 10-K's Q4 subtraction -- the outcome is deterministic regardless of
+    # intra-day input ordering. The provenance schema is single-adsh: the
+    # day's row carries the LATEST-period filing of the batch (the 10-K in
+    # the dual-filing case), whose instants (assets/equity/shares) are also
+    # the freshest balance sheet of the day.
     quarters: dict[tuple[str, str], dict] = {}  # (fy, fp) -> single-quarter values
+    ordered = sorted(filings.values(), key=lambda f: (f["filed"], f["period"], f["adsh"]))
+    batches: dict[pd.Timestamp, list[dict]] = {}
+    for f in ordered:
+        batches.setdefault(f["filed"], []).append(f)
     rows: list[dict] = []
-    for f in sorted(filings.values(), key=lambda f: (f["filed"], f["adsh"])):
-        if f["form"] == "10-Q":
-            quarters[(f["fy"], f["fp"])] = {
-                "period": f["period"],
-                "revenue": f["revenue"],
-                "cogs": f["cogs"],
-                "net_income": f["net_income"],
-            }
-        else:  # 10-K reports the FULL year (qtrs=4): derive Q4 = FY - (Q1+Q2+Q3)
-            q123 = [quarters.get((f["fy"], fp)) for fp in ("Q1", "Q2", "Q3")]
-            quarters[(f["fy"], "Q4")] = {
-                "period": f["period"],
-                "revenue": _derive_q4(f["revenue"], q123, "revenue"),
-                "cogs": _derive_q4(f["cogs"], q123, "cogs"),
-                "net_income": _derive_q4(f["net_income"], q123, "net_income"),
-            }
+    for filed, batch in batches.items():
+        for f in batch:
+            if f["form"] == "10-Q":
+                quarters[(f["fy"], f["fp"])] = {
+                    "period": f["period"],
+                    "revenue": f["revenue"],
+                    "cogs": f["cogs"],
+                    "net_income": f["net_income"],
+                }
+            else:  # 10-K reports the FULL year (qtrs=4): derive Q4 = FY - (Q1+Q2+Q3)
+                q123 = [quarters.get((f["fy"], fp)) for fp in ("Q1", "Q2", "Q3")]
+                quarters[(f["fy"], "Q4")] = {
+                    "period": f["period"],
+                    "revenue": _derive_q4(f["revenue"], q123, "revenue"),
+                    "cogs": _derive_q4(f["cogs"], q123, "cogs"),
+                    "net_income": _derive_q4(f["net_income"], q123, "net_income"),
+                }
+        f = batch[-1]  # latest period of the day: provenance + instants
         revenue_ttm, cogs_ttm, ttm_net_income = _ttm(quarters)
         assets = f["assets"]
         gp = math.nan
@@ -178,7 +202,7 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
             gp = (revenue_ttm - cogs_ttm) / assets
         rows.append(
             {
-                "filed": f["filed"],
+                "filed": filed,
                 "gross_profitability": gp,
                 "ttm_net_income": ttm_net_income,
                 "book_equity": f["equity"],
@@ -202,8 +226,4 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
     frame = pd.DataFrame(rows).set_index("filed")
     frame.index = frame.index.tz_localize("UTC")
     frame.index.name = "filed"
-    frame = frame.sort_index(kind="mergesort")
-    # Two filings on one day (10-K + 10-Q together): the last row already
-    # reflects BOTH filings' quarters; keep it, drop the interim duplicate.
-    frame = frame[~frame.index.duplicated(keep="last")]
-    return frame[SERIES_COLUMNS]
+    return frame.sort_index(kind="mergesort")[SERIES_COLUMNS]

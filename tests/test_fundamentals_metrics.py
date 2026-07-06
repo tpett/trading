@@ -345,6 +345,169 @@ def test_ragged_quarter_window_is_nan():
     assert math.isnan(series.loc[pd.Timestamp("2023-11-08", tz="UTC"), "gross_profitability"])
 
 
+def _same_day_dual_filing(q3_adsh: str, tenk_adsh: str, reverse_input: bool) -> list[dict]:
+    """Backlog filer: the Q3 10-Q and the FY 10-K submitted on the SAME day."""
+    rows = []
+    rows += filing_facts(
+        CIK,
+        "g-01",
+        "10-Q",
+        "2023",
+        "Q1",
+        "2023-03-31",
+        "2023-05-10",
+        revenue=10.0,
+        cogs=4.0,
+        assets=90.0,
+        net_income=3.0,
+    )
+    rows += filing_facts(
+        CIK,
+        "g-02",
+        "10-Q",
+        "2023",
+        "Q2",
+        "2023-06-30",
+        "2023-08-09",
+        revenue=12.0,
+        cogs=5.0,
+        assets=95.0,
+        net_income=4.0,
+    )
+    q3 = filing_facts(
+        CIK,
+        q3_adsh,
+        "10-Q",
+        "2023",
+        "Q3",
+        "2023-09-30",
+        "2024-02-20",
+        revenue=11.0,
+        cogs=5.0,
+        assets=98.0,
+        net_income=3.0,
+    )
+    tenk = filing_facts(
+        CIK,
+        tenk_adsh,
+        "10-K",
+        "2023",
+        "FY",
+        "2023-12-31",
+        "2024-02-20",
+        revenue=48.0,
+        cogs=20.0,
+        assets=100.0,
+        net_income=14.0,
+        equity=60.0,
+        shares=101.0,
+    )
+    rows += tenk + q3 if reverse_input else q3 + tenk
+    return rows
+
+
+def test_same_day_10q_and_10k_ingest_both_and_emit_one_row():
+    series = compute_pit_series(facts_frame(_same_day_dual_filing("g-03", "g-04", False)))[CIK]
+    day = pd.Timestamp("2024-02-20", tz="UTC")
+    # Exactly ONE row for the day, computed AFTER both filings ingested: the
+    # same-day Q3 feeds the 10-K's Q4 subtraction (Q4 rev = 48-33 = 15) and
+    # the TTM closes to the FY totals.
+    assert (series.index == day).sum() == 1
+    at_day = series.loc[day]
+    assert at_day["revenue_ttm"] == 48.0
+    assert at_day["cogs_ttm"] == 20.0
+    assert at_day["ttm_net_income"] == 14.0
+    assert at_day["gross_profitability"] == pytest.approx(28.0 / 100.0)
+    # Single-adsh provenance: the latest-period filing of the batch (the
+    # 10-K) carries the row; its instants are the freshest of the day.
+    assert at_day["adsh"] == "g-04"
+    assert at_day["form"] == "10-K"
+    assert at_day["book_equity"] == 60.0
+    assert at_day["shares_outstanding"] == 101.0
+
+
+def test_same_day_dual_filing_is_ordering_independent():
+    # Reverse both the accession sort order (the 10-K gets the LOWER adsh)
+    # and the input row order: the emitted series must be identical apart
+    # from the accession strings, and provenance must still point at the
+    # 10-K (latest period wins, not adsh order).
+    a = compute_pit_series(facts_frame(_same_day_dual_filing("g-03", "g-04", False)))[CIK]
+    b = compute_pit_series(facts_frame(_same_day_dual_filing("h-04", "h-01", True)))[CIK]
+    pd.testing.assert_frame_equal(a.drop(columns=["adsh"]), b.drop(columns=["adsh"]))
+    day = pd.Timestamp("2024-02-20", tz="UTC")
+    assert a.loc[day, "adsh"] == "g-04"
+    assert b.loc[day, "adsh"] == "h-01"
+
+
+def _four_quarters_spanning(last_period: str) -> list[dict]:
+    rows = []
+    rows += filing_facts(
+        CIK,
+        "f-01",
+        "10-Q",
+        "2022",
+        "Q3",
+        "2022-09-30",
+        "2022-11-08",
+        revenue=10.0,
+        cogs=4.0,
+        assets=90.0,
+    )
+    rows += filing_facts(
+        CIK,
+        "f-02",
+        "10-Q",
+        "2023",
+        "Q1",
+        "2023-03-31",
+        "2023-05-10",
+        revenue=10.0,
+        cogs=4.0,
+        assets=90.0,
+    )
+    rows += filing_facts(
+        CIK,
+        "f-03",
+        "10-Q",
+        "2023",
+        "Q2",
+        "2023-06-30",
+        "2023-08-09",
+        revenue=12.0,
+        cogs=5.0,
+        assets=95.0,
+    )
+    rows += filing_facts(
+        CIK,
+        "f-04",
+        "10-Q",
+        "2023",
+        "Q3",
+        last_period,
+        "2023-09-30",
+        revenue=11.0,
+        cogs=5.0,
+        assets=98.0,
+    )
+    return rows
+
+
+def test_ttm_window_of_exactly_330_days_is_valid():
+    # 2022-09-30 + 330 days = 2023-08-26: the boundary itself passes (strict
+    # > semantics), pinned against a >= regression.
+    series = compute_pit_series(facts_frame(_four_quarters_spanning("2023-08-26")))[CIK]
+    row = series.loc[pd.Timestamp("2023-09-30", tz="UTC")]
+    assert row["revenue_ttm"] == pytest.approx(43.0)
+    assert row["gross_profitability"] == pytest.approx((43.0 - 18.0) / 98.0)
+
+
+def test_ttm_window_of_331_days_is_nan():
+    series = compute_pit_series(facts_frame(_four_quarters_spanning("2023-08-27")))[CIK]
+    row = series.loc[pd.Timestamp("2023-09-30", tz="UTC")]
+    assert math.isnan(row["revenue_ttm"])
+    assert math.isnan(row["gross_profitability"])
+
+
 def test_missing_cogs_gives_nan_metric_with_provenance():
     rows = _year_of_filings()
     facts = facts_frame(rows)
