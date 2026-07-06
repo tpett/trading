@@ -23,8 +23,12 @@ from trading.config import VENUES, VenueConfig
 from trading.data.cache import OhlcvCache
 from trading.digest import collect_run_events, write_digest
 from trading.earnings import fetch_earnings_dates
+from trading.fundamentals.cik_map import load_cik_map
+from trading.fundamentals.companyfacts import refresh_fundamentals
+from trading.fundamentals.store import FundamentalsStore
 from trading.journal import Journal, JournalError, config_hash
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
+from trading.signals.registry import get_ranker
 from trading.simulator.core import StepResult, decision_bar, make_run_key, step
 from trading.simulator.state import (
     PortfolioState,
@@ -275,6 +279,32 @@ def run_venue(
             notify("trading: state behind journal", f"{venue}: {message}")
             return RunOutcome(venue, "failed", message)
 
+        # Fundamentals refresh (M4): only when the configured ranker needs it,
+        # at most every fundamentals_refresh_days, BEFORE build_rankings reads
+        # the store. Fail-open exactly like the earnings fetch: a refresh
+        # failure degrades to the last stored values with a journaled warning
+        # -- it must never crash or block the run. The marker is written even
+        # when partially degraded (weekly cadence stands) but NOT on total
+        # failure, so the next run retries immediately.
+        extra_warnings: list[str] = []
+        if get_ranker(config.signals.ranker).requires_fundamentals:
+            store = FundamentalsStore(Path(config.data.fundamentals_dir))
+            last = store.last_refresh()
+            due = last is None or (now.date() - last).days >= config.data.fundamentals_refresh_days
+            if due:
+                try:
+                    symbols = [i.symbol for i in adapter.universe(now.date())]
+                    _, degraded = refresh_fundamentals(store, load_cik_map(), symbols, now.date())
+                    store.mark_refreshed(now.date())
+                    if degraded:
+                        extra_warnings.append(
+                            "fundamentals refresh degraded: some symbols kept stale values"
+                        )
+                except Exception as exc:
+                    extra_warnings.append(
+                        f"fundamentals refresh failed ({exc}); rankings use last stored values"
+                    )
+
         try:
             rankings = build_rankings(config, adapter, cache, now.date())
         except PipelineDataError as exc:
@@ -337,7 +367,6 @@ def run_venue(
 
         earnings = None
         earnings_degraded = False
-        extra_warnings: list[str] = []
         if config.portfolio.earnings_blackout_enabled:
             candidates = list(rankings.table.index[:EARNINGS_CANDIDATE_DEPTH])
             earnings, earnings_degraded = fetch_earnings_dates(candidates)

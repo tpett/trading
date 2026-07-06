@@ -1,3 +1,4 @@
+import dataclasses
 import datetime
 import json
 import subprocess
@@ -531,6 +532,86 @@ def test_digest_write_failure_never_blocks_state_save(tmp_path, monkeypatch):
     assert not (tmp_path / "digest" / "2026-07-01.md").exists()
     digest_notes = [n for n in notes if "digest" in n[0]]
     assert len(digest_notes) == 1  # notified exactly once, then carried on
+
+
+def _quality_eq(tmp_path):
+    return dataclasses.replace(
+        EQ,
+        signals=dataclasses.replace(EQ.signals, ranker="quality_momentum_v1"),
+        data=dataclasses.replace(EQ.data, fundamentals_dir=str(tmp_path / "fund")),
+    )
+
+
+def _run_quality(tmp_path, monkeypatch, refresh):
+    monkeypatch.setattr("trading.runner.refresh_fundamentals", refresh)
+    notes: list[tuple[str, str]] = []
+    outcome = run_venue(
+        _quality_eq(tmp_path),
+        FakeAdapter(),
+        OhlcvCache(tmp_path / "cache", EQ.data.refetch_days),
+        now=NOW,
+        state_root=tmp_path / "state",
+        journal_root=tmp_path / "journal",
+        notify=lambda title, message: notes.append((title, message)),
+    )
+    return outcome, notes
+
+
+def _last_run_event(tmp_path):
+    events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
+    return [e for e in events if e["event"] == "run"][-1]
+
+
+def test_momentum_v1_run_never_refreshes_fundamentals(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("momentum_v1 must never trigger a fundamentals refresh")
+
+    monkeypatch.setattr("trading.runner.refresh_fundamentals", boom)
+    outcome, _ = _run(tmp_path)  # default EQ config: momentum_v1
+    assert outcome.status == "ok"
+
+
+def test_quality_run_refreshes_once_then_respects_the_weekly_gate(tmp_path, monkeypatch):
+    calls: list[tuple] = []
+
+    def refresh(store, cik_map, symbols, as_of, **kwargs):
+        calls.append((sorted(symbols), as_of))
+        return 3, False
+
+    outcome, _ = _run_quality(tmp_path, monkeypatch, refresh)
+    assert outcome.status == "ok"
+    assert calls == [(sorted(SYMBOLS), NOW.date())]
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    store = FundamentalsStore(tmp_path / "fund")
+    assert store.last_refresh() == NOW.date()
+
+    # Second run inside the 7-day window: the gate must skip the refresh.
+    _run_quality(tmp_path, monkeypatch, refresh)
+    assert len(calls) == 1
+
+
+def test_degraded_refresh_journals_a_warning_and_run_proceeds(tmp_path, monkeypatch):
+    outcome, _ = _run_quality(tmp_path, monkeypatch, lambda *a, **k: (0, True))
+    assert outcome.status == "ok"
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh degraded") for w in warnings)
+
+
+def test_failed_refresh_is_fail_open_with_journaled_warning(tmp_path, monkeypatch):
+    def refresh(*args, **kwargs):
+        raise OSError("edgar unreachable")
+
+    outcome, notes = _run_quality(tmp_path, monkeypatch, refresh)
+    assert outcome.status == "ok"  # rankings ran on the (empty) stored fundamentals
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh failed") for w in warnings)
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    # Marker NOT written on total failure: the next run retries immediately.
+    assert FundamentalsStore(tmp_path / "fund").last_refresh() is None
 
 
 def test_session_guard_is_dst_aware():
