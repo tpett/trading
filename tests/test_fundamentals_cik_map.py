@@ -136,3 +136,56 @@ def test_committed_map_excludes_confirmed_ticker_recycling_squatters():
     # APC/BID/CONE (Task-4-review-confirmed recycled-ticker mismaps; see
     # PROVENANCE.md) must never appear in the committed map.
     assert set(MAP["symbol"]) & set(build_cik_map.EXCLUSIONS) == set()
+
+
+# --- identity-mismatch audit (recycling defenses, part b) --------------------
+
+
+def test_identity_audit_flags_a_disagreeing_direct_listing():
+    # NEW resolved via chain to cik 111 (a rename target), but company_
+    # tickers.json's OWN "NEW" entry today independently belongs to cik 999
+    # -- two SEC-recognized identities disagree, worth a human look even
+    # though the zero-filing audit (verify_fundamentals.py) might not catch
+    # it (the wrong cik could easily have real filings).
+    rows = [("NEW", 111, "2020-01-01", "")]
+    current_tickers_raw = {"NEW": {"cik": 999, "title": "Some Unrelated Squatter Inc"}}
+    calls: list[str] = []
+
+    def fetch(url: str) -> dict:
+        calls.append(url)
+        return {"entityName": "The Real Renamed Company"}
+
+    audit = build_cik_map.check_identity_mismatches(rows, current_tickers_raw, fetch_json=fetch)
+    assert audit == [
+        {
+            "symbol": "NEW",
+            "mapped_cik": 111,
+            "mapped_entity_name": "The Real Renamed Company",
+            "symbol_direct_cik": 999,
+            "symbol_direct_title": "Some Unrelated Squatter Inc",
+        }
+    ]
+    assert calls == [build_cik_map.COMPANYFACTS_URL.format(cik=111)]
+
+
+def test_identity_audit_skips_agreeing_or_unlisted_symbols():
+    rows = [
+        ("AGREES", 111, "2017-01-01", ""),  # direct listing matches the assigned cik
+        ("DELISTED", 222, "2017-01-01", "2020-01-01"),  # no independent current listing at all
+    ]
+    current_tickers_raw = {"AGREES": {"cik": 111, "title": "Agrees Co"}}
+    audit = build_cik_map.check_identity_mismatches(
+        rows, current_tickers_raw, fetch_json=lambda url: {}
+    )
+    assert audit == []
+
+
+def test_identity_audit_is_fail_open_on_a_companyfacts_fetch_failure():
+    rows = [("NEW", 111, "2020-01-01", "")]
+    current_tickers_raw = {"NEW": {"cik": 999, "title": "Squatter"}}
+
+    def boom(url: str) -> dict:
+        raise OSError("edgar down")
+
+    audit = build_cik_map.check_identity_mismatches(rows, current_tickers_raw, fetch_json=boom)
+    assert audit[0]["mapped_entity_name"] == "(companyfacts fetch failed)"
