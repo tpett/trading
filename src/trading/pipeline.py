@@ -15,8 +15,9 @@ import pandas as pd
 from trading.config import VenueConfig
 from trading.data.cache import OhlcvCache
 from trading.data.quality import CoverageReport, check_coverage, quarantine_outliers
-from trading.signals.engine import compute_features, rank
+from trading.signals.engine import rank
 from trading.signals.regime import Regime, compute_regime
+from trading.signals.registry import get_ranker
 from trading.venues.base import SymbolInfo, VenueAdapter
 
 
@@ -129,7 +130,8 @@ def assemble_rankings(
 
     as_of_ts = pd.Timestamp(as_of, tz="UTC")
     regime = compute_regime(benchmark_bars, as_of_ts, config.regime)
-    features = compute_features(clean, as_of_ts, config.signals)
+    ranker = get_ranker(config.signals.ranker)
+    features = ranker(clean, as_of_ts, config.signals)
     table = rank(features).copy()
 
     statuses = {i.symbol: i.status for i in infos}
