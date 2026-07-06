@@ -12,7 +12,16 @@ the three revenue tags cover 76.5% of 10-K/10-Q filers, the three COGS tags
 stockholders' equity, shares outstanding). Consolidated rows only (empty
 segments + coreg). Roughly half of filers (banks, insurers) report no COGS
 concept at all -> their quality metric is NaN downstream and ranks neutral
-(0.5) by design, while their net income/equity/shares still resolve.
+(0.5) by design, while their net income/equity still resolve via this
+parser. Shares outstanding is the exception: a later census of the
+2018q1-2026q2 ZIPs found dei:EntityCommonStockSharesOutstanding on exactly
+1 of 5631 filings (the FSDS ZIPs strip nearly all dei cover-page facts), so
+this parser alone leaves shares_outstanding coverage at 59% and ZERO for
+some large filers (JPM, META, BRK-B). trading.fundamentals.companyfacts,
+which DOES carry the dei facts, is the primary source for shares (and, per
+the same regime-mismatch concern, for every primitive) in
+scripts/backfill_fundamentals.py's default rebuild; this ZIP parser is
+retired-primary but stays tested and selectable via `--source zips`.
 
 Shares date rule is PER TAG: the cover-date relaxation (ddate >= period,
 latest wins) applies only to dei:EntityCommonStockSharesOutstanding, whose

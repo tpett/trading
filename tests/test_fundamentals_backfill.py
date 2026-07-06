@@ -7,7 +7,13 @@ import pandas as pd
 import pytest
 
 from fundamentals_helpers import num_line, sub_line, write_quarter_zip
-from trading.fundamentals.backfill import backfill_quarters, last_complete_quarter, quarter_range
+from trading.fundamentals.backfill import (
+    backfill_from_companyfacts,
+    backfill_quarters,
+    last_complete_quarter,
+    quarter_range,
+)
+from trading.fundamentals.companyfacts import COMPANYFACTS_URL
 from trading.fundamentals.store import FundamentalsStore
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -157,6 +163,99 @@ def test_backfill_merges_recycled_ticker_across_ciks(tmp_path):
         pd.Timestamp("2023-11-08", tz="UTC"),
     ]
     assert list(frame["adsh"]) == ["a-01", "b-01"]
+
+
+def _cf_payload(
+    rev,
+    cogs,
+    assets,
+    adsh="a-01",
+    period="2023-03-31",
+    start="2023-01-01",
+    fy=2023,
+    fp="Q1",
+    form="10-Q",
+    filed="2023-05-10",
+):
+    def entry(val, **kw):
+        e = {
+            "end": period,
+            "val": val,
+            "accn": adsh,
+            "fy": fy,
+            "fp": fp,
+            "form": form,
+            "filed": filed,
+        }
+        e.update(kw)
+        return e
+
+    return {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {"units": {"USD": [entry(rev, start=start)]}},
+                "CostOfRevenue": {"units": {"USD": [entry(cogs, start=start)]}},
+                "Assets": {"units": {"USD": [entry(assets)]}},
+            }
+        }
+    }
+
+
+def test_backfill_from_companyfacts_fetches_once_per_cik_and_splits_by_symbol(tmp_path):
+    # CIK 1326801: FB (pre-rename) / NEWCO (post-rename) share one fetch;
+    # CIK 555 (OTHER) is a second, independent fetch.
+    payloads = {
+        1326801: _cf_payload(10.0, 4.0, 90.0, adsh="a-01", filed="2023-05-10"),
+        555: _cf_payload(20.0, 8.0, 190.0, adsh="b-01", filed="2023-06-01"),
+    }
+    calls: list[str] = []
+
+    def fetch(url: str) -> dict:
+        calls.append(url)
+        cik = int(url.rsplit("CIK", 1)[1].split(".")[0])
+        return payloads[cik]
+
+    store = FundamentalsStore(tmp_path / "store")
+    progress_calls: list[tuple[int, int]] = []
+    stats = backfill_from_companyfacts(
+        CIK_MAP, store, fetch_json=fetch, on_progress=lambda i, n: progress_calls.append((i, n))
+    )
+    assert stats == {"filers": 2, "symbols": 2, "rows": 2, "dropped": 0, "failed": 0}
+    # One fetch per unique cik, sorted ascending, not per symbol/row.
+    assert calls == [COMPANYFACTS_URL.format(cik=555), COMPANYFACTS_URL.format(cik=1326801)]
+    assert progress_calls == [(1, 2), (2, 2)]
+    assert list(store.read("FB").index) == [pd.Timestamp("2023-05-10", tz="UTC")]
+    assert store.read("NEWCO").empty  # NEWCO's interval starts after this filing
+    assert list(store.read("OTHER").index) == [pd.Timestamp("2023-06-01", tz="UTC")]
+
+
+def test_backfill_from_companyfacts_is_fail_open_per_cik(tmp_path):
+    payloads = {1326801: _cf_payload(10.0, 4.0, 90.0, filed="2023-05-10")}
+
+    def fetch(url: str) -> dict:
+        if "0000000555" in url:
+            raise OSError("edgar down")
+        return payloads[1326801]
+
+    store = FundamentalsStore(tmp_path / "store")
+    stats = backfill_from_companyfacts(CIK_MAP, store, fetch_json=fetch)
+    assert stats["failed"] == 1
+    assert stats["filers"] == 1
+    # FB still gets its data despite OTHER's cik failing.
+    assert list(store.read("FB").index) == [pd.Timestamp("2023-05-10", tz="UTC")]
+    assert store.read("OTHER").empty
+
+
+def test_ensure_empty_for_rebuild_aborts_when_store_has_files(tmp_path):
+    (tmp_path / "AAPL.parquet").write_bytes(b"not-really-parquet")
+    with pytest.raises(SystemExit, match="EMPTY store"):
+        backfill_script._ensure_empty_for_rebuild(tmp_path)
+
+
+def test_ensure_empty_for_rebuild_passes_when_store_is_empty(tmp_path):
+    backfill_script._ensure_empty_for_rebuild(tmp_path)  # no raise
+    (tmp_path / "not-a-parquet.txt").write_text("x")
+    backfill_script._ensure_empty_for_rebuild(tmp_path)  # still no raise: only *.parquet counts
 
 
 def test_quarter_range_and_last_complete_quarter():
