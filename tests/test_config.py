@@ -174,6 +174,20 @@ def test_fundamentals_requiring_ranker_with_zero_refresh_budget_fails_at_load(tm
         load_venue_config("equities", tmp_path)
 
 
+def test_fundamentals_requiring_ranker_omitting_refresh_budget_loads_with_default(tmp_path):
+    # A fundamentals-requiring TOML that legitimately OMITS
+    # fundamentals_refresh_budget_s must still load -- it gets the
+    # DataConfig field default (900s), not the raw-dict-get sentinel of 0
+    # the validation used to (wrongly) check against.
+    text = (Path("config") / "experiments" / "quality" / "equities.toml").read_text()
+    lines = text.splitlines(keepends=True)
+    text = "".join(line for line in lines if "fundamentals_refresh_budget_s" not in line)
+    assert "fundamentals_refresh_budget_s" not in text
+    (tmp_path / "equities.toml").write_text(text)
+    config = load_venue_config("equities", tmp_path)
+    assert config.data.fundamentals_refresh_budget_s == 900
+
+
 def test_quality_experiment_config_loads():
     config = load_venue_config("equities", Path("config") / "experiments" / "quality")
     assert config.signals.ranker == "quality_momentum_v1"

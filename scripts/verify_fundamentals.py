@@ -92,6 +92,13 @@ from trading.fundamentals.cik_map import load_cik_map
 from trading.fundamentals.edgar import load_quarter_facts
 from trading.fundamentals.store import FundamentalsStore
 
+# scripts/ has no __init__.py (not a package); when this file runs as
+# `uv run python scripts/verify_fundamentals.py`, Python already puts its own
+# directory on sys.path, but the explicit insert also makes the import work
+# under pytest (which imports this module by path, not by running it).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from backfill_fundamentals import SOURCE_MARKER, _read_source_marker  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "edgar-raw"
 MEMBERSHIP_CSV = ROOT / "src" / "trading" / "venues" / "universes" / "equities_membership.csv"
@@ -386,9 +393,38 @@ def check_neutral_fraction_coverage(store: FundamentalsStore, members: list[str]
         )
 
 
+def check_source_regime(store_root: Path) -> None:
+    """This suite's expectations -- Check 1's AAPL TTM primitives (the
+    dei cover-page shares count only companyfacts resolves) and Check 4's
+    85% shares_outstanding coverage floor -- are locked to the
+    companyfacts-primary regime (see trading.fundamentals.backfill's module
+    docstring). A store built with --source zips has materially different
+    (much lower) shares_outstanding coverage and would fail those checks for
+    a reason that has nothing to do with a real regression, surfacing as a
+    confusing AAPL FATAL deep in check_aapl rather than naming the real
+    problem. Read the marker up front instead and fail loudly with a clear
+    message. A missing marker (legacy store predating the marker, or one
+    whose backfill was interrupted before the marker write) is not itself
+    disqualifying -- warn and continue assuming companyfacts, rather than
+    block a store that may well be fine."""
+    marker = _read_source_marker(store_root)
+    if marker is not None and marker != "companyfacts":
+        sys.exit(
+            "FATAL: this verification suite assumes a companyfacts-built store "
+            f"(found: {marker}); rebuild with --source companyfacts"
+        )
+    if marker is None:
+        print(
+            f"WARNING: no {SOURCE_MARKER} marker at {store_root} (legacy store predating "
+            "the marker, or a backfill interrupted before it was written); assuming "
+            "companyfacts regime and continuing"
+        )
+
+
 def main() -> None:
     data_cfg = tomllib.loads((ROOT / "config" / "equities.toml").read_text())["data"]
     store_root = ROOT / data_cfg["fundamentals_dir"]
+    check_source_regime(store_root)
     store = FundamentalsStore(store_root)
     cik_map = load_cik_map()
     members = current_member_symbols()

@@ -272,11 +272,13 @@ def test_ensure_zips_allowed_proceeds_with_no_marker_or_its_own_marker(tmp_path)
 
 def test_companyfacts_backfill_writes_source_marker(tmp_path):
     # Same shape as scripts/backfill_fundamentals.py's companyfacts branch:
-    # empty-store guard, then the backfill itself, then the marker write --
-    # all against tmp store fixtures, no network.
+    # empty-store guard, THEN the marker write, THEN the backfill itself --
+    # the marker precedes the per-CIK loop (see the interrupt-simulation
+    # test below for why) -- all against tmp store fixtures, no network.
     store_root = tmp_path / "store"
     backfill_script._ensure_empty_for_rebuild(store_root)
-    store = FundamentalsStore(store_root)
+    store = FundamentalsStore(store_root)  # creates store_root, like main() does
+    backfill_script._write_source_marker(store_root, "companyfacts")
     payloads = {
         1326801: _cf_payload(10.0, 4.0, 90.0, adsh="a-01", filed="2023-05-10"),
         555: _cf_payload(20.0, 8.0, 190.0, adsh="b-01", filed="2023-06-01"),
@@ -287,11 +289,37 @@ def test_companyfacts_backfill_writes_source_marker(tmp_path):
         return payloads[cik]
 
     backfill_from_companyfacts(CIK_MAP, store, fetch_json=fetch)
-    backfill_script._write_source_marker(store_root, "companyfacts")
     assert (store_root / backfill_script.SOURCE_MARKER).read_text() == "companyfacts"
     # A stale marker from a prior source is overwritten, not left in place.
     backfill_script._write_source_marker(store_root, "companyfacts")
     assert (store_root / backfill_script.SOURCE_MARKER).read_text() == "companyfacts"
+
+
+def test_interrupted_companyfacts_backfill_still_leaves_marker_guarding_zips(tmp_path):
+    # Regression for the marker-write timing bug: it used to be written only
+    # AFTER backfill_from_companyfacts returned, so an interrupt mid per-CIK
+    # loop left a non-empty, marker-less store that a subsequent
+    # --source zips run would treat as unguarded (silently mixing regimes).
+    # Simulated here with a fetch_json that raises KeyboardInterrupt (a
+    # BaseException, NOT caught by backfill_from_companyfacts's per-cik
+    # `except Exception` fail-open) partway through the loop -- exactly like
+    # a real Ctrl-C landing mid-fetch.
+    store_root = tmp_path / "store"
+    backfill_script._ensure_empty_for_rebuild(store_root)
+    store = FundamentalsStore(store_root)  # creates store_root, like main() does
+    backfill_script._write_source_marker(store_root, "companyfacts")  # written BEFORE the loop
+
+    def fetch(url: str) -> dict:
+        raise KeyboardInterrupt("simulated interrupt mid per-cik loop")
+
+    with pytest.raises(KeyboardInterrupt):
+        backfill_from_companyfacts(CIK_MAP, store, fetch_json=fetch)
+
+    # The store is guarded even though the backfill never finished (and
+    # never wrote a single row).
+    assert (store_root / backfill_script.SOURCE_MARKER).read_text() == "companyfacts"
+    with pytest.raises(SystemExit, match="companyfacts"):
+        backfill_script._ensure_zips_allowed(store_root)
 
 
 def test_write_source_marker_overwrites_stale_marker(tmp_path):

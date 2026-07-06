@@ -175,20 +175,26 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
     from trading.signals.registry import get_ranker
 
     spec = get_ranker(signals["ranker"])
-    if spec.requires_fundamentals and not raw["data"].get("fundamentals_dir"):
+    data_config = DataConfig(**raw["data"])
+    if spec.requires_fundamentals and not data_config.fundamentals_dir:
         raise ValueError(f"ranker {signals['ranker']!r} requires [data] fundamentals_dir to be set")
-    if spec.requires_fundamentals and raw["data"].get("fundamentals_refresh_days", 0) < 1:
+    if spec.requires_fundamentals and data_config.fundamentals_refresh_days < 1:
         # 0 (the field's own default) means "never refresh", which for a
         # fundamentals-requiring ranker is a misconfiguration -- not a valid
         # cadence -- so it must fail at load, not silently never top up.
+        # Validated against the CONSTRUCTED dataclass (not the raw TOML dict)
+        # so a config that legitimately OMITS this key still fails here
+        # (default 0 is itself invalid for a fundamentals-requiring ranker).
         raise ValueError(
             f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_days >= 1"
         )
-    if spec.requires_fundamentals and raw["data"].get("fundamentals_refresh_budget_s", 0) < 1:
-        # Same misconfiguration shape as refresh_days above: 0 (the field's
-        # own default) means "no wall-clock budget for a refresh", which for
-        # a fundamentals-requiring ranker would let refresh_fundamentals stop
-        # before doing any work -- fail at load, not silently at runtime.
+    if spec.requires_fundamentals and data_config.fundamentals_refresh_budget_s < 1:
+        # Same misconfiguration shape as refresh_days above, but the default
+        # here is 900 (a valid budget), not 0 -- so this MUST read the
+        # constructed dataclass rather than raw["data"].get(..., 0): a config
+        # that omits the key entirely should load fine (getting the 900s
+        # default), while an explicit 0 is still a real misconfiguration
+        # (no wall-clock budget at all) and must still fail at load.
         raise ValueError(
             f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_budget_s >= 1"
         )
@@ -215,6 +221,6 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         signals=SignalConfig(**signals),
         regime=RegimeConfig(**raw["regime"]),
         portfolio=PortfolioConfig(**portfolio),
-        data=DataConfig(**raw["data"]),
+        data=data_config,
         backtest=BacktestConfig(**backtest),
     )

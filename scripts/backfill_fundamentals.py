@@ -191,7 +191,15 @@ def main() -> None:
 
     if args.source == "companyfacts":
         _ensure_empty_for_rebuild(store_root)
-        store = FundamentalsStore(store_root)
+        store = FundamentalsStore(store_root)  # creates store_root if needed
+        # Written BEFORE the per-CIK loop starts, not after it completes: the
+        # marker's job is guarding against a --source zips run mixing
+        # regimes on top of THIS store, and that risk exists the moment this
+        # rebuild starts writing rows, not only once it finishes. An
+        # interrupt partway through the loop below must still leave the
+        # store guarded -- see test_interrupted_companyfacts_backfill_
+        # still_leaves_marker_guarding_zips.
+        _write_source_marker(store_root, "companyfacts")
         n_ciks = len(set(cik_map["cik"]))
         print(f"backfilling {n_ciks} CIKs from companyfacts (primary source) ...")
 
@@ -200,7 +208,6 @@ def main() -> None:
                 print(f"  {done}/{total} CIKs fetched")
 
         stats = backfill_from_companyfacts(cik_map, store, on_progress=progress)
-        _write_source_marker(store_root, "companyfacts")
         print(
             f"done: {stats['filers']} filers -> {stats['symbols']} symbols, "
             f"{stats['rows']} rows appended ({stats['dropped']} rows outside every symbol "
