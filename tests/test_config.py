@@ -143,3 +143,18 @@ def test_membership_exit_buffer_days_defaults_to_30_days():
     for venue in ("equities", "crypto"):
         config = load_venue_config(venue, Path("config"))
         assert config.backtest.membership_exit_buffer_days == 30
+
+
+def test_fundamentals_requiring_ranker_with_empty_dir_fails_at_load(tmp_path):
+    text = (Path("config") / "equities.toml").read_text()
+    text = text.replace('ranker = "momentum_v1"', 'ranker = "quality_momentum_v1"')
+    text = text.replace('fundamentals_dir = "data/fundamentals/equities"', 'fundamentals_dir = ""')
+    (tmp_path / "equities.toml").write_text(text)
+    with pytest.raises(ValueError, match="fundamentals_dir"):
+        load_venue_config("equities", tmp_path)
+
+
+def test_quality_experiment_config_loads():
+    config = load_venue_config("equities", Path("config") / "experiments" / "quality")
+    assert config.signals.ranker == "quality_momentum_v1"
+    assert config.data.fundamentals_dir == "data/fundamentals/equities"
