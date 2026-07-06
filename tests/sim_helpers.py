@@ -11,8 +11,11 @@ from trading.pipeline import RankingsResult
 from trading.signals.regime import Regime
 from trading.simulator.state import initial_state
 
-EQ = load_venue_config("equities", Path("config"))
-CR = load_venue_config("crypto", Path("config"))
+# Frozen copies of the pre-promotion venue configs (tests/simconfig/): simulator
+# mechanics tests hand-compute expectations against THESE numbers, so live
+# config promotions (evidence-driven tuning) must never ripple into them.
+EQ = load_venue_config("equities", Path("tests/simconfig"))
+CR = load_venue_config("crypto", Path("tests/simconfig"))
 AS_OF = pd.Timestamp("2026-07-01", tz="UTC")
 
 REGIME_MULT = {"risk_on": 1.0, "neutral": 0.5, "risk_off": 0.0}

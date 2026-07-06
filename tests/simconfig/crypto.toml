@@ -1,0 +1,107 @@
+[venue]
+name = "crypto"
+benchmark = "BTC"  # fetched through the crypto adapter as BTC/USD on Kraken
+
+[costs]
+taker_fee_bps = 95.0   # 0.95% taker at <$10K 30-day volume (spec, June 2026 schedule)
+maker_fee_bps = 50.0   # 0.50% maker
+slippage_bps = 5.0
+settlement_days = 0
+trades_24_7 = true
+
+[universe]
+min_dollar_volume = 0.0  # no dollar-volume floor for crypto in v1
+point_in_time = false    # today's Robinhood snapshot; backtests infer listing
+                         # dates from data availability (see engine prepare)
+
+[signals]
+momentum_windows = [7, 30, 90]  # calendar days (spec)
+calendar_days = true
+vol_window = 20
+volume_week = 7                 # "current week" = 7 calendar days
+volume_baseline = 90            # trailing 3 months = 90 calendar days
+breakout_windows = [20, 60]
+rsi_window = 14
+mean_window = 20
+raw_return_days = 30
+ranker = "momentum_v1"          # key into trading.signals.registry.RANKERS
+
+[regime]
+sma_fast = 50
+sma_slow = 200
+vol_window = 20
+vol_lookback = 252
+vol_high_percentile = 0.80
+exposure_risk_on = 1.0
+exposure_neutral = 0.5
+exposure_risk_off = 0.0
+
+[portfolio]  # consumed by the M2 simulator
+max_positions = 3
+position_size_pct = 0.30
+starting_balance = 1000.0
+time_stop_bars = 30                 # 30 calendar days = 30 daily bars (24/7 venue)
+stop_atr_multiple = 1.5
+regime_flush_atr_multiple = 1.0
+cooldown_days = 7
+max_daily_deployment_pct = 0.35     # must exceed position_size_pct (0.30) or entries deadlock;
+                                    # still allows only ONE new crypto position per day
+drawdown_halt_pct = 0.20
+entry_score_threshold = 0.70
+min_raw_return_cost_multiple = 3.0  # raw 30d return must exceed 3x round-trip cost (spec)
+earnings_blackout_sessions = 0      # no earnings in crypto
+earnings_blackout_enabled = false   # no earnings in crypto
+staleness_hours = 7    # bar completes 00:00 UTC; the 01:00 America/New_York run
+                       # lands 05:00 (EDT) / 06:00 (EST) UTC — 6h would sit exactly
+                       # on the winter boundary, so widen to 7
+atr_window = 20                     # ATR-20 (spec); frozen at entry
+session_close_buffer_minutes = 0    # unused: 24/7 venue, no intraday partial-bar guard
+# exit_style: "frozen" (default) or "trailing" (experiment flag, evidence-driven
+# -- see README). "trailing" is under evaluation and not yet the default.
+exit_style = "frozen"
+
+[data]
+cache_dir = "data/crypto"
+refetch_days = 30
+min_coverage = 0.90
+max_daily_move = 0.60          # mid-cap crypto legitimately has 40-60% days
+history_days = 500
+# Outlier scan only looks at the trailing N calendar days of each symbol's
+# own history, anchored to its last bar. Window ~= refetch_days: the point
+# is recent-data sanity (bad prints in the live-refetched tail), not
+# history-wide policing of moves that happened many months ago.
+quarantine_window_days = 40
+# Kraken serves the current UTC day's candle while it's still in progress.
+# A day-D candle only completes at D+1, so drop any bar dated as_of or
+# later before computing signals -- decisions use data through the last
+# completed bar only (spec).
+drop_incomplete_last_bar = true
+
+# --- M3 deep-history backfill (spec Open Item: Kraken caps daily history) ---
+# Kraken's public OHLC endpoint serves only the ~720 most-recent daily candles,
+# anchored to TODAY -- not to the requested window. The adapter fetches Kraken
+# first, judges coverage from what it actually returned, and fills only the
+# head Kraken could not serve from backfill_exchange via ccxt (including fully
+# historical windows where Kraken returns nothing in range). Precedence:
+# Kraken wins any overlap. Live rankings (history_days = 500, end ~ today)
+# are always fully covered by Kraken and never touch the backfill exchange.
+backfill_exchange = "coinbase"    # ccxt exchange id verified at implementation; "" disables
+backfill_page_limit = 300         # candles per page on the backfill exchange
+# Seam guard AND head tolerance: when both sources contribute, a date hole
+# between the backfill's last row and Kraken's first row beyond this many
+# calendar days fails the fetch loudly instead of reaching signal computation
+# silently; the same tolerance decides whether Kraken alone covers a request
+# from its start. Crypto trades 24/7 so daily bars are contiguous; a small
+# tolerance absorbs isolated exchange-outage days.
+seam_max_gap_days = 3
+
+[backtest]  # spec: Backtesting & Validation
+start = 2018-01-01
+holdout_start = 2026-01-05   # fixed boundary; see equities.toml note
+train_months = 30
+test_months = 3
+entry_score_threshold_grid = [0.60, 0.65, 0.70, 0.75, 0.80]
+stop_atr_multiple_grid = [1.0, 1.5, 2.0, 2.5]
+min_session_coverage = 0.90  # deep history exists for listed coins; gaps mean data trouble
+periods_per_year = 365       # 24/7 venue: UTC daily bars
+stress_segments = [["2022-01-01", "2022-12-31"]]

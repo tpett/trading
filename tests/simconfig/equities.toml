@@ -21,7 +21,7 @@ point_in_time = true            # PIT membership intervals: a member missing dat
 # would change the live/paper universe.
 
 [signals]
-momentum_windows = [63, 126, 252]  # trading days (spec)
+momentum_windows = [5, 20, 60]  # trading days (spec)
 calendar_days = false           # lookbacks in trading-day rows
 vol_window = 20                 # realized-vol window for vol adjustment
 volume_week = 5                 # "current week" = 5 trading days
@@ -43,10 +43,10 @@ exposure_neutral = 0.5
 exposure_risk_off = 0.0
 
 [portfolio]  # consumed by the M2 simulator; shaped now so M2 does not restructure config
-max_positions = 20
-position_size_pct = 0.045
+max_positions = 5
+position_size_pct = 0.18
 starting_balance = 1000.0
-time_stop_bars = 60                 # 20 sessions (spec)
+time_stop_bars = 20                 # 20 sessions (spec)
 stop_atr_multiple = 1.5
 regime_flush_atr_multiple = 1.0
 cooldown_days = 7

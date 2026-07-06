@@ -16,11 +16,11 @@ def test_load_equities_config():
     assert config.costs.slippage_bps == 5.0
     assert config.costs.settlement_days == 1
     assert config.costs.trades_24_7 is False
-    assert config.signals.momentum_windows == (5, 20, 60)
+    assert config.signals.momentum_windows == (63, 126, 252)
     assert config.signals.calendar_days is False
     assert config.signals.breakout_windows == (20, 60)
     assert config.regime.sma_slow == 200
-    assert config.portfolio.max_positions == 5
+    assert config.portfolio.max_positions == 20
     assert config.data.min_coverage == 0.90
     assert config.data.max_daily_move == 0.40
     assert config.portfolio.atr_window == 20
