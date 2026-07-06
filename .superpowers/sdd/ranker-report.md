@@ -168,3 +168,29 @@ the annotation into a `Ranker` type alias, reused in both places.
   ranker needing new SignalConfig fields would need those fields added to
   the shared dataclass, since all rankers currently share one `SignalConfig`
   shape).
+
+## Polish pass (post-review, 2026-07-05)
+
+Review approved with three Minor items; all applied in one commit:
+
+1. `load_venue_config` no longer duplicates the known-rankers enumeration:
+   it now calls `get_ranker(signals["ranker"])` and lets the registry's
+   ValueError propagate, making `registry.get_ranker` the single source of
+   truth for the unknown-ranker message. Fail-fast-at-load is preserved
+   (the call still happens inside `load_venue_config`, before any pipeline
+   run); the deferred-import comment was updated accordingly.
+2. `test_unknown_ranker_raises_at_load_time` now additionally asserts the
+   error message enumerates the known rankers (`"momentum_v1" in str(...)`),
+   pinning the message-content contract end to end through config load.
+3. `registry.py`'s module docstring gained an explicit INPUT contract
+   section: `bars` values are OHLCV frames with columns exactly
+   [open, high, low, close, volume] on a sorted tz-aware UTC DatetimeIndex
+   (the trading.venues.base.validate_ohlcv shape), frames may extend past
+   as_of, and truncation is the RANKER's responsibility -- with the exact
+   location of momentum_v1's cut named (`window = df.loc[:as_of]`, first
+   step of compute_features' per-symbol loop). A float64-dtype claim was
+   deliberately NOT made: validate_ohlcv does not enforce dtype, only
+   columns/index shape.
+
+Re-verified after the pass: full suite 325 passed, 0 warnings; ruff clean.
+`tests/golden/expected.json` remains untouched.

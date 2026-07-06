@@ -90,8 +90,10 @@ def test_unknown_ranker_raises_at_load_time(tmp_path):
     bad = raw.replace('ranker = "momentum_v1"', 'ranker = "bogus_ranker"')
     assert bad != raw
     (tmp_path / "equities.toml").write_text(bad)
-    with pytest.raises(ValueError, match="bogus_ranker"):
+    # The message must name the bad value AND enumerate the known rankers.
+    with pytest.raises(ValueError, match="bogus_ranker") as excinfo:
         load_venue_config("equities", tmp_path)
+    assert "momentum_v1" in str(excinfo.value)
 
 
 def test_backtest_config_loaded():

@@ -140,13 +140,11 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
     # the SignalConfig type it dispatches on), so importing it at module
     # level here would be circular. Validating at load time (rather than at
     # first pipeline run) is the point: a typo'd ranker name must fail fast.
-    from trading.signals.registry import RANKERS
+    # get_ranker's ValueError propagates as-is: the registry is the single
+    # source of truth for the unknown-ranker message and known-names list.
+    from trading.signals.registry import get_ranker
 
-    if signals["ranker"] not in RANKERS:
-        known = ", ".join(sorted(RANKERS))
-        raise ValueError(
-            f"signals.ranker must be one of [{known}], got {signals['ranker']!r}"
-        )
+    get_ranker(signals["ranker"])
     backtest = dict(raw["backtest"])
     backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
     backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])

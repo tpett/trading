@@ -5,15 +5,26 @@ A "ranker" is any callable matching compute_features' exact contract:
     ranker(bars: dict[str, pd.DataFrame], as_of: pd.Timestamp,
            config: SignalConfig) -> pd.DataFrame
 
+Input contract (what a ranker receives):
+
+- `bars` maps symbol -> OHLCV DataFrame with columns exactly
+  [open, high, low, close, volume], indexed by a sorted tz-aware UTC
+  DatetimeIndex normalized to the bar's date (the shape enforced by
+  trading.venues.base.validate_ohlcv, which every adapter's frames pass
+  through). Frames may extend PAST as_of: the caller does not pre-cut them.
+- `as_of` is a tz-aware UTC pd.Timestamp; momentum_v1 rejects a naive one.
+
 Contract a registered ranker MUST guarantee (identical to the signal engine's
 existing guarantees -- see trading.signals.engine):
 
 - Purity: no I/O, no wall-clock reads. as_of is always an explicit parameter;
   the only time input a ranker may act on is the one it is given.
-- Truncation is the ranker's own responsibility: it must cut each symbol's
-  frame to rows at or before as_of itself (compute_features does this via
-  `df.loc[:as_of]`, the "structural no-lookahead cut"). The registry and its
-  caller (assemble_rankings) do not truncate on the ranker's behalf.
+- Truncation to as_of is the RANKER's responsibility, not the caller's: it
+  must cut each symbol's frame to rows at or before as_of itself.
+  momentum_v1 (compute_features) performs that truncation as the first step
+  of its per-symbol loop, via `window = df.loc[:as_of]` -- the "structural
+  no-lookahead cut" in trading.signals.engine. The registry and its caller
+  (assemble_rankings) do not truncate on the ranker's behalf.
 - Column contract: the returned DataFrame is indexed by symbol and has
   exactly the feature-percentile columns plus "composite" and
   "raw_return_30d" (see trading.signals.engine.OUTPUT_COLUMNS). Symbols
