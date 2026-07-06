@@ -167,22 +167,24 @@
     yet (FDXF / FedEx Freight Holding Company, Inc., CIK 2082247, added to
     the sp500 membership 2026-06-01; its only EDGAR filings so far are Form
     10 registration statements) -- benign, will self-resolve once it files.
-  - 3 are CONFIRMED ticker-recycling mismaps: APC (Anadarko Petroleum,
-    sp500 member 2017-01-01..2019-08-09, acquired by Occidental) currently
-    resolves via company_tickers.json to CIK 2080921, "ARKO Petroleum
-    Corp.", an unrelated company now trading under the recycled APC ticker;
-    BID (Sotheby's, sp400 member 2019-01-01..2019-10-03, taken private)
-    resolves to CIK 2094919, "Tribeca Strategic Acquisition Corp.", an
-    unrelated SPAC; CONE (CyrusOne, sp400 member 2019-01-01..2022-03-30,
-    taken private) resolves to CIK 2103884, "Compass Sub North, Inc.", an
-    unrelated merger shell. In all three cases build_cik_map.py's
-    current-ticker lookup (no RENAMES entry covers a ticker vacated by an
-    acquired/delisted company) attached today's live owner of the ticker to
-    the historical membership interval instead of leaving it unmapped. In
-    practice this is fail-open, not silent corruption: the wrongly-mapped
-    CIK had zero filings during the historical (pre-2022) window the real
-    company occupied, so no misattributed data actually reached the store --
-    but it is a real defect in cik_map.csv worth a deliberate follow-up
-    (e.g. an explicit exclusion/"delisted, do not re-resolve" list in
-    scripts/build_cik_map.py) rather than relying on this fail-open outcome
-    indefinitely.
+  - 3 WERE confirmed ticker-recycling mismaps: APC (Anadarko Petroleum,
+    sp500 member 2017-01-01..2019-08-09, acquired by Occidental) resolved via
+    company_tickers.json to CIK 2080921, "ARKO Petroleum Corp.", an unrelated
+    company now trading under the recycled APC ticker; BID (Sotheby's, sp400
+    member 2019-01-01..2019-10-03, taken private) resolved to CIK 2094919,
+    "Tribeca Strategic Acquisition Corp.", an unrelated SPAC; CONE (CyrusOne,
+    sp400 member 2019-01-01..2022-03-30, taken private) resolved to CIK
+    2103884, "Compass Sub North, Inc.", an unrelated merger shell. In all
+    three cases build_cik_map.py's current-ticker lookup (no RENAMES entry
+    covers a ticker vacated by an acquired/delisted company) attached today's
+    live owner of the ticker to the historical membership interval instead of
+    leaving it unmapped. In practice this was fail-open, not silent
+    corruption: the wrongly-mapped CIK had zero filings during the historical
+    (pre-2022) window the real company occupied, so no misattributed data
+    actually reached the store -- but it was a real defect in cik_map.csv.
+    FIXED (final-review fix wave): APC/BID/CONE are now seeded into
+    `build_cik_map.py`'s `EXCLUSIONS` dict (symbol -> reason) and always
+    unmapped regardless of what company_tickers.json currently resolves them
+    to; regenerated cik_map.csv (2026-07-06) confirms all three are absent
+    (100.0% of 918 current members still mapped). Extend EXCLUSIONS
+    deliberately if a future recycled ticker is found the same way.

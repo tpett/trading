@@ -209,11 +209,12 @@ symbol/CIK interval checked for at least one filing inside its membership
 window) flagged 21 symbols with no filings in-window — 18 are benign
 (16 foreign private issuers filing 20-F/40-F instead of 10-K/10-Q, one
 bank reporting to the FDIC instead of the SEC, one spinoff too new to have
-filed yet) and 3 (APC, BID, CONE) are confirmed ticker-recycling mismaps
+filed yet) and 3 (APC, BID, CONE) were confirmed ticker-recycling mismaps
 where `cik_map.csv`'s current-ticker lookup attached a live, unrelated
 company's CIK to a historical (pre-2022) membership interval that belonged
 to a different, since-delisted company — fail-open in practice (the
 wrongly-mapped CIK had no filings during that historical window, so no
-misattributed data reached the store), but worth a deliberate follow-up to
-`scripts/build_cik_map.py`'s RENAMES/exclusion handling. Full detail:
+misattributed data reached the store). Fixed: the three symbols are now
+seeded in `scripts/build_cik_map.py`'s `EXCLUSIONS` dict and always unmapped;
+the regenerated `cik_map.csv` confirms all three are absent. Full detail:
 `src/trading/venues/universes/sources/PROVENANCE.md`.

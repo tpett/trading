@@ -36,6 +36,34 @@ TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 USER_AGENT = "trading-system travis@launchsupply.com"
 SINCE = "2017-01-01"  # same pad as the membership build
 
+# Symbols whose CURRENT company_tickers.json entry is a confirmed
+# ticker-recycling squatter: the real (historical) membership-era company
+# was acquired or went private and delisted -- with no RENAMES entry to
+# follow -- so build_rows' current-ticker lookup would otherwise attach an
+# unrelated, later company's CIK to the historical membership interval
+# (investigated live via data.sec.gov/submissions/CIK##########.json; see
+# src/trading/venues/universes/sources/PROVENANCE.md for the full writeup).
+# Excluded symbols are always unmapped (fail-open, neutral rank) rather than
+# silently mismapped. Extend deliberately: a new entry here should cite the
+# specific squatter CIK/name it was found resolving to.
+EXCLUSIONS: dict[str, str] = {
+    "APC": (
+        "ticker recycled: real APC (Anadarko Petroleum, sp500 member "
+        "2017-01-01..2019-08-09) was acquired by Occidental; company_tickers.json "
+        "now maps APC to CIK 2080921 (ARKO Petroleum Corp), an unrelated company"
+    ),
+    "BID": (
+        "ticker recycled: real BID (Sotheby's, sp400 member "
+        "2019-01-01..2019-10-03) went private; company_tickers.json now maps BID "
+        "to CIK 2094919 (Tribeca Strategic Acquisition Corp), an unrelated SPAC"
+    ),
+    "CONE": (
+        "ticker recycled: real CONE (CyrusOne, sp400 member "
+        "2019-01-01..2022-03-30) went private; company_tickers.json now maps "
+        "CONE to CIK 2103884 (Compass Sub North, Inc.), an unrelated merger shell"
+    ),
+}
+
 # (old_symbol, new_symbol, change_date). Reviewed ticker renames among 2017+
 # membership symbols; the boundary date decides which symbol a filing filed
 # near it attaches to, so day-exactness is low-stakes but should match the
@@ -84,6 +112,9 @@ def build_rows(
     rows: list[tuple[str, int, str, str]] = []
     unmapped: list[str] = []
     for symbol in sorted(symbols):
+        if symbol in EXCLUSIONS:
+            unmapped.append(symbol)
+            continue
         # Follow the rename chain forward until we hit a current EDGAR ticker.
         cursor, end, seen = symbol, "", set()
         while cursor not in current_tickers:
@@ -118,6 +149,12 @@ def validate(rows: list[tuple[str, int, str, str]], current_members: set[str]) -
     abc, cor = by_symbol.get("ABC"), by_symbol.get("COR")
     if abc is None or cor is None or abc[0] != 1140859 or cor[0] != 1140859:
         sys.exit(f"FATAL: ABC/COR rename mapping wrong: ABC={abc}, COR={cor}")
+    excluded_present = set(EXCLUSIONS) & set(by_symbol)
+    if excluded_present:
+        sys.exit(
+            f"FATAL: excluded (recycled-ticker) symbols leaked into cik_map: "
+            f"{sorted(excluded_present)}"
+        )
     mapped_current = current_members & set(by_symbol)
     ratio = len(mapped_current) / len(current_members)
     if ratio < 0.95:
@@ -139,6 +176,11 @@ def main() -> None:
     OUTPUT.write_text("\n".join(lines) + "\n")
     print(f"wrote {OUTPUT} ({len(rows)} intervals; {len(unmapped)} membership symbols unmapped)")
     print("unmapped (no fundamentals -> neutral rank): " + ", ".join(unmapped))
+    excluded_unmapped = [s for s in unmapped if s in EXCLUSIONS]
+    if excluded_unmapped:
+        print(f"of which {len(excluded_unmapped)} deliberately excluded (recycled tickers):")
+        for symbol in excluded_unmapped:
+            print(f"  {symbol}: {EXCLUSIONS[symbol]}")
 
 
 if __name__ == "__main__":

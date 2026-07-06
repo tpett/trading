@@ -119,3 +119,20 @@ def test_build_rows_dead_end_symbol_is_unmapped(monkeypatch):
     rows, unmapped = build_cik_map.build_rows({"GONE", "LIVE"}, {"LIVE": 555})
     assert rows == [("LIVE", 555, "2017-01-01", "")]
     assert unmapped == ["GONE"]
+
+
+def test_build_rows_excluded_symbol_is_unmapped_even_when_currently_live(monkeypatch):
+    # A recycled ticker DOES resolve in current_tickers (a squatter now holds
+    # it) -- EXCLUSIONS must short-circuit before that lookup so it lands
+    # unmapped (fail-open) instead of silently attaching the squatter's CIK.
+    monkeypatch.setattr(build_cik_map, "RENAMES", [])
+    monkeypatch.setattr(build_cik_map, "EXCLUSIONS", {"APC": "ticker recycled: see test"})
+    rows, unmapped = build_cik_map.build_rows({"APC", "LIVE"}, {"APC": 2080921, "LIVE": 555})
+    assert rows == [("LIVE", 555, "2017-01-01", "")]
+    assert unmapped == ["APC"]
+
+
+def test_committed_map_excludes_confirmed_ticker_recycling_squatters():
+    # APC/BID/CONE (Task-4-review-confirmed recycled-ticker mismaps; see
+    # PROVENANCE.md) must never appear in the committed map.
+    assert set(MAP["symbol"]) & set(build_cik_map.EXCLUSIONS) == set()
