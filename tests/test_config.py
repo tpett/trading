@@ -79,6 +79,17 @@ def test_invalid_exit_style_raises(tmp_path):
         load_venue_config("equities", tmp_path)
 
 
+def test_fundamentals_data_keys_load_for_both_venues():
+    eq = load_venue_config("equities", Path("config"))
+    assert eq.data.fundamentals_dir == "data/fundamentals/equities"
+    assert eq.data.fundamentals_refresh_days == 7
+    assert eq.data.fundamentals_refresh_budget_s == 900
+    cr = load_venue_config("crypto", Path("config"))
+    assert cr.data.fundamentals_dir == ""  # no fundamentals concept for crypto
+    assert cr.data.fundamentals_refresh_days == 0
+    assert cr.data.fundamentals_refresh_budget_s == 0
+
+
 def test_ranker_loaded_as_momentum_v1_by_default_in_real_configs():
     for venue in ("equities", "crypto"):
         config = load_venue_config(venue, Path("config"))
@@ -134,3 +145,56 @@ def test_membership_exit_buffer_days_defaults_to_30_days():
     for venue in ("equities", "crypto"):
         config = load_venue_config(venue, Path("config"))
         assert config.backtest.membership_exit_buffer_days == 30
+
+
+def test_fundamentals_requiring_ranker_with_empty_dir_fails_at_load(tmp_path):
+    text = (Path("config") / "equities.toml").read_text()
+    text = text.replace('ranker = "momentum_v1"', 'ranker = "quality_momentum_v1"')
+    text = text.replace('fundamentals_dir = "data/fundamentals/equities"', 'fundamentals_dir = ""')
+    (tmp_path / "equities.toml").write_text(text)
+    with pytest.raises(ValueError, match="fundamentals_dir"):
+        load_venue_config("equities", tmp_path)
+
+
+def test_fundamentals_requiring_ranker_with_zero_refresh_days_fails_at_load(tmp_path):
+    text = (Path("config") / "experiments" / "quality" / "equities.toml").read_text()
+    text = text.replace("fundamentals_refresh_days = 7", "fundamentals_refresh_days = 0")
+    assert "fundamentals_refresh_days = 0" in text
+    (tmp_path / "equities.toml").write_text(text)
+    with pytest.raises(ValueError, match="fundamentals_refresh_days"):
+        load_venue_config("equities", tmp_path)
+
+
+def test_fundamentals_requiring_ranker_with_zero_refresh_budget_fails_at_load(tmp_path):
+    text = (Path("config") / "experiments" / "quality" / "equities.toml").read_text()
+    text = text.replace("fundamentals_refresh_budget_s = 900", "fundamentals_refresh_budget_s = 0")
+    assert "fundamentals_refresh_budget_s = 0" in text
+    (tmp_path / "equities.toml").write_text(text)
+    with pytest.raises(ValueError, match="fundamentals_refresh_budget_s"):
+        load_venue_config("equities", tmp_path)
+
+
+def test_fundamentals_requiring_ranker_omitting_refresh_budget_loads_with_default(tmp_path):
+    # A fundamentals-requiring TOML that legitimately OMITS
+    # fundamentals_refresh_budget_s must still load -- it gets the
+    # DataConfig field default (900s), not the raw-dict-get sentinel of 0
+    # the validation used to (wrongly) check against.
+    text = (Path("config") / "experiments" / "quality" / "equities.toml").read_text()
+    lines = text.splitlines(keepends=True)
+    text = "".join(line for line in lines if "fundamentals_refresh_budget_s" not in line)
+    assert "fundamentals_refresh_budget_s" not in text
+    (tmp_path / "equities.toml").write_text(text)
+    config = load_venue_config("equities", tmp_path)
+    assert config.data.fundamentals_refresh_budget_s == 900
+
+
+def test_quality_experiment_config_loads():
+    config = load_venue_config("equities", Path("config") / "experiments" / "quality")
+    assert config.signals.ranker == "quality_momentum_v1"
+    assert config.data.fundamentals_dir == "data/fundamentals/equities"
+
+
+def test_value_experiment_config_loads():
+    config = load_venue_config("equities", Path("config") / "experiments" / "value")
+    assert config.signals.ranker == "value_momentum_v1"
+    assert config.data.fundamentals_dir == "data/fundamentals/equities"

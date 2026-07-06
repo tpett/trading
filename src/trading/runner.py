@@ -23,8 +23,12 @@ from trading.config import VENUES, VenueConfig
 from trading.data.cache import OhlcvCache
 from trading.digest import collect_run_events, write_digest
 from trading.earnings import fetch_earnings_dates
+from trading.fundamentals.cik_map import load_cik_map
+from trading.fundamentals.companyfacts import refresh_fundamentals
+from trading.fundamentals.store import FundamentalsStore
 from trading.journal import Journal, JournalError, config_hash
 from trading.pipeline import PipelineDataError, RankingsResult, build_rankings
+from trading.signals.registry import get_ranker
 from trading.simulator.core import StepResult, decision_bar, make_run_key, step
 from trading.simulator.state import (
     PortfolioState,
@@ -275,6 +279,67 @@ def run_venue(
             notify("trading: state behind journal", f"{venue}: {message}")
             return RunOutcome(venue, "failed", message)
 
+        # Fundamentals refresh (M4): only when the configured ranker needs it,
+        # at most every fundamentals_refresh_days, BEFORE build_rankings reads
+        # the store. Fail-open exactly like the earnings fetch: the ENTIRE
+        # block -- store construction, marker read, staleness decision,
+        # refresh, marker write -- degrades to whatever store state exists,
+        # with a journaled warning; nothing here may ever escape and crash or
+        # block the run (a corrupt marker file or an unwritable store dir
+        # must page via the journal, not an unhandled traceback). The marker
+        # is written even when partially degraded (weekly cadence stands) but
+        # NOT on total failure, so the next run retries immediately.
+        #
+        # Bounded-cost tradeoff, deliberate: this runs before the has_run
+        # noop check because that check needs decision_ts, i.e. a completed
+        # build_rankings. A rerun on an already-processed bar with a stale
+        # marker therefore refreshes once more than strictly necessary -- at
+        # most one extra refresh per marker expiry, and the advanced marker
+        # gates the rest of the week. The universe fetch here is likewise
+        # separate from build_rankings' own (its signature owns that call);
+        # sharing one fetch would mean restructuring build_rankings, not
+        # worth it for a weekly, cached-cheap lookup.
+        #
+        # A symbol's FIRST refresh (empty store -- e.g. newly added to the
+        # universe) pulls its ENTIRE companyfacts history in one call, not
+        # just the past week: a one-time row surge relative to the steady-
+        # state weekly top-up, which only adds the latest filing per symbol.
+        # fundamentals_refresh_budget_s (data plumbing, not a tunable) caps
+        # how long the whole refresh_fundamentals call may run wall-clock;
+        # once exceeded it stops cleanly and reports degraded=True, same as
+        # a per-symbol fetch failure.
+        extra_warnings: list[str] = []
+        if get_ranker(config.signals.ranker).requires_fundamentals:
+            try:
+                store = FundamentalsStore(Path(config.data.fundamentals_dir))
+                last = store.last_refresh()
+                days = config.data.fundamentals_refresh_days
+                if last is None or (now.date() - last).days >= days:
+                    symbols = [i.symbol for i in adapter.universe(now.date())]
+                    appended, degraded = refresh_fundamentals(
+                        store,
+                        load_cik_map(),
+                        symbols,
+                        now.date(),
+                        budget_s=config.data.fundamentals_refresh_budget_s,
+                    )
+                    # appended == 0 AND degraded means EVERY symbol failed (or
+                    # the budget tripped before the first one even started):
+                    # a total-failure week, not the partial-progress case the
+                    # comment above promises the marker for. Skip the write so
+                    # the next run retries immediately instead of waiting out
+                    # the rest of the cadence on stale data.
+                    if not (appended == 0 and degraded):
+                        store.mark_refreshed(now.date())
+                    if degraded:
+                        extra_warnings.append(
+                            "fundamentals refresh degraded: some symbols kept stale values"
+                        )
+            except Exception as exc:
+                extra_warnings.append(
+                    f"fundamentals refresh failed ({exc}); rankings use last stored values"
+                )
+
         try:
             rankings = build_rankings(config, adapter, cache, now.date())
         except PipelineDataError as exc:
@@ -337,7 +402,6 @@ def run_venue(
 
         earnings = None
         earnings_degraded = False
-        extra_warnings: list[str] = []
         if config.portfolio.earnings_blackout_enabled:
             candidates = list(rankings.table.index[:EARNINGS_CANDIDATE_DEPTH])
             earnings, earnings_degraded = fetch_earnings_dates(candidates)

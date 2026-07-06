@@ -95,6 +95,13 @@ backfill_exchange = ""
 backfill_page_limit = 0
 seam_max_gap_days = 0
 
+# M4 fundamentals overlay: fundamentals_dir stays unset ("") here -- runner
+# tests that exercise quality_momentum_v1 override it per-test via
+# dataclasses.replace. refresh_days mirrors the live venue's weekly cadence
+# (data plumbing, not a hand-computed simulator number, so setting it cannot
+# ripple into the frozen mechanics expectations this file exists to pin).
+fundamentals_refresh_days = 7
+
 [backtest]  # spec: Backtesting & Validation
 start = 2018-01-01
 # Final holdout boundary: FIXED date (not rolling) so the untouched period is

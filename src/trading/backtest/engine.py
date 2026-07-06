@@ -17,12 +17,15 @@ from __future__ import annotations
 import datetime
 import math
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 import pandas as pd
 
 from trading.config import VenueConfig
 from trading.data.cache import OhlcvCache
+from trading.fundamentals.store import FundamentalsStore
 from trading.pipeline import PipelineDataError, RankingsResult, assemble_rankings
+from trading.signals.registry import get_ranker
 from trading.simulator.core import step
 from trading.simulator.fills import Fill
 from trading.simulator.state import initial_state
@@ -162,6 +165,13 @@ def prepare(
         else:
             bars[symbol] = frame
 
+    spec = get_ranker(config.signals.ranker)
+    fundamentals_all: dict[str, pd.DataFrame] = {}
+    if spec.requires_fundamentals:
+        # Full-span load once; sliced per session below. Same discipline as
+        # bars: nothing FILED after a session may influence it.
+        fundamentals_all = FundamentalsStore(Path(config.data.fundamentals_dir)).load(union)
+
     sessions: list[SessionPlan] = []
     for ts in session_index:
         infos = members_by_session[ts]
@@ -202,8 +212,22 @@ def prepare(
             )
             continue
         sliced = {i.symbol: bars[i.symbol].loc[:ts] for i in available}
+        fundamentals = None
+        if spec.requires_fundamentals:
+            fundamentals = {
+                symbol: window
+                for symbol, frame in fundamentals_all.items()
+                if not (window := frame.loc[:ts]).empty
+            }
         try:
-            rankings = assemble_rankings(config, available, sliced, benchmark.loc[:ts], ts.date())
+            rankings = assemble_rankings(
+                config,
+                available,
+                sliced,
+                benchmark.loc[:ts],
+                ts.date(),
+                fundamentals=fundamentals,
+            )
         except PipelineDataError as exc:
             sessions.append(SessionPlan(ts, None, (), ratio, len(eligible), str(exc)))
             continue

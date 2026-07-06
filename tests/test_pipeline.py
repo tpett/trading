@@ -288,3 +288,60 @@ def test_build_rankings_delegates_to_assemble_rankings_with_identical_results(tm
     for symbol in direct.bars:
         pd.testing.assert_frame_equal(direct.bars[symbol], via_build.bars[symbol])
     pd.testing.assert_frame_equal(direct.benchmark_bars, via_build.benchmark_bars)
+
+
+def _quality_config(tmp_path):
+    return dataclasses.replace(
+        CONFIG,
+        signals=dataclasses.replace(CONFIG.signals, ranker="quality_momentum_v1"),
+        data=dataclasses.replace(CONFIG.data, fundamentals_dir=str(tmp_path / "fundamentals")),
+    )
+
+
+def _fund_rows(dated: dict[str, float]) -> pd.DataFrame:
+    idx = pd.DatetimeIndex([pd.Timestamp(d, tz="UTC") for d in dated], name="filed")
+    return pd.DataFrame({"gross_profitability": list(dated.values())}, index=idx)
+
+
+def test_build_rankings_loads_fundamentals_for_a_quality_ranker(tmp_path):
+    from trading.fundamentals.store import FundamentalsStore
+
+    adapter, cache, _ = _make(tmp_path)
+    config = _quality_config(tmp_path)
+    store = FundamentalsStore(Path(config.data.fundamentals_dir))
+    store.append("S0", _fund_rows({"2026-06-01": 0.6}))
+    store.append("S1", _fund_rows({"2026-06-01": 0.2}))
+    result = build_rankings(config, adapter, cache, AS_OF)
+    assert "quality" in result.table.columns
+    assert result.table.loc["S0", "quality"] == 1.0
+    assert result.table.loc["S1", "quality"] == 0.5
+    assert result.table.loc["S2", "quality"] == 0.5  # no store file -> neutral
+
+
+def test_momentum_v1_never_touches_the_fundamentals_store(tmp_path, monkeypatch):
+    import trading.pipeline as pipeline_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("momentum_v1 must not construct a FundamentalsStore")
+
+    monkeypatch.setattr(pipeline_module, "FundamentalsStore", boom)
+    adapter, cache, _ = _make(tmp_path)
+    result = build_rankings(CONFIG, adapter, cache, AS_OF)  # default momentum_v1
+    assert "quality" not in result.table.columns
+
+
+def test_assemble_rankings_threads_fundamentals_to_the_ranker(tmp_path):
+    from trading.pipeline import assemble_rankings
+
+    config = _quality_config(tmp_path)
+    bars = {"AAA": frame(periods=300), "BBB": frame(periods=300)}
+    infos = [SymbolInfo("AAA", "tradable"), SymbolInfo("BBB", "tradable")]
+    fundamentals = {
+        "AAA": _fund_rows({"2026-06-01": 0.7}),
+        "BBB": _fund_rows({"2026-06-01": 0.1}),
+    }
+    result = assemble_rankings(
+        config, infos, bars, frame(periods=300), AS_OF, fundamentals=fundamentals
+    )
+    assert result.table.loc["AAA", "quality"] == 1.0
+    assert result.table.loc["BBB", "quality"] == 0.5

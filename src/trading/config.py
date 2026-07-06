@@ -102,6 +102,23 @@ class DataConfig:
     # Max calendar-day hole tolerated at the backfill/Kraken seam; doubles as
     # the head tolerance when judging whether Kraken alone covers a request.
     seam_max_gap_days: int
+    # M4 fundamentals overlay. fundamentals_dir = "" means "this venue has no
+    # fundamentals" (crypto); a ranker that requires fundamentals refuses to
+    # load with it empty. refresh_days is the live top-up cadence -- data
+    # plumbing, NOT a tunable hyperparameter (the walk-forward surface stays
+    # entry_score_threshold x stop_atr_multiple only). Defaulted (like
+    # membership_exit_buffer_days) so frozen test-venue TOMLs -- notably
+    # tests/golden/golden.toml, which must stay byte-identical -- keep
+    # loading; both real venue TOMLs still set them explicitly.
+    fundamentals_dir: str = ""
+    fundamentals_refresh_days: int = 0
+    # Wall-clock ceiling (seconds) on one weekly refresh_fundamentals call:
+    # data plumbing, same non-tunable status as refresh_days. A ~1,100-cik
+    # companyfacts refresh over a slow/degraded network could otherwise run
+    # long enough to threaten the run's own cadence; refresh_fundamentals
+    # stops cleanly once this elapses, keeping symbols already processed and
+    # deferring the remainder to next run (see trading.runner).
+    fundamentals_refresh_budget_s: int = 900
 
 
 @dataclass(frozen=True)
@@ -157,7 +174,30 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
     # source of truth for the unknown-ranker message and known-names list.
     from trading.signals.registry import get_ranker
 
-    get_ranker(signals["ranker"])
+    spec = get_ranker(signals["ranker"])
+    data_config = DataConfig(**raw["data"])
+    if spec.requires_fundamentals and not data_config.fundamentals_dir:
+        raise ValueError(f"ranker {signals['ranker']!r} requires [data] fundamentals_dir to be set")
+    if spec.requires_fundamentals and data_config.fundamentals_refresh_days < 1:
+        # 0 (the field's own default) means "never refresh", which for a
+        # fundamentals-requiring ranker is a misconfiguration -- not a valid
+        # cadence -- so it must fail at load, not silently never top up.
+        # Validated against the CONSTRUCTED dataclass (not the raw TOML dict)
+        # so a config that legitimately OMITS this key still fails here
+        # (default 0 is itself invalid for a fundamentals-requiring ranker).
+        raise ValueError(
+            f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_days >= 1"
+        )
+    if spec.requires_fundamentals and data_config.fundamentals_refresh_budget_s < 1:
+        # Same misconfiguration shape as refresh_days above, but the default
+        # here is 900 (a valid budget), not 0 -- so this MUST read the
+        # constructed dataclass rather than raw["data"].get(..., 0): a config
+        # that omits the key entirely should load fine (getting the 900s
+        # default), while an explicit 0 is still a real misconfiguration
+        # (no wall-clock budget at all) and must still fail at load.
+        raise ValueError(
+            f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_budget_s >= 1"
+        )
     backtest = dict(raw["backtest"])
     backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
     backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])
@@ -181,6 +221,6 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         signals=SignalConfig(**signals),
         regime=RegimeConfig(**raw["regime"]),
         portfolio=PortfolioConfig(**portfolio),
-        data=DataConfig(**raw["data"]),
+        data=data_config,
         backtest=BacktestConfig(**backtest),
     )

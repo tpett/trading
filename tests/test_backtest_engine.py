@@ -1,5 +1,7 @@
 import datetime
 import math
+from dataclasses import replace
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -438,3 +440,115 @@ def test_quarantine_of_held_symbol_defers_fill_and_marks_at_entry_price():
     assert not any(t.symbol == "AAA" for t in result.trades)
     # Marked at entry price the quarantined session -- the live fallback.
     assert any("AAA" in w and "using entry price" in w for w in result.warnings)
+
+
+def test_prepare_slices_fundamentals_to_each_sessions_filed_dates(tmp_path):
+    from trading.fundamentals.store import FundamentalsStore
+
+    frames = {
+        "AAA": noisy_frame(seed=1, periods=120),
+        "BBB": noisy_frame(seed=2, periods=120),
+        "CCC": noisy_frame(seed=3, periods=120),
+        "BENCH": noisy_frame(seed=9, periods=120),
+    }
+    adapter = FakeBacktestAdapter(frames, "BENCH")
+    cache = OhlcvCache(tmp_path / "cache", 3)
+    base = small_config()
+    config = replace(
+        base,
+        benchmark="BENCH",
+        signals=replace(base.signals, ranker="quality_momentum_v1"),
+        data=replace(base.data, fundamentals_dir=str(tmp_path / "fund")),
+    )
+    store = FundamentalsStore(Path(config.data.fundamentals_dir))
+
+    def fund_rows(dated):
+        idx = pd.DatetimeIndex([pd.Timestamp(d, tz="UTC") for d in dated], name="filed")
+        return pd.DataFrame({"gross_profitability": list(dated.values())}, index=idx)
+
+    # AAA files 0.9 in March, then 0.05 in April; BBB has a steady 0.2.
+    store.append("AAA", fund_rows({"2025-03-01": 0.9, "2025-04-01": 0.05}))
+    store.append("BBB", fund_rows({"2025-03-01": 0.2}))
+
+    prepared = prepare(
+        config, adapter, cache, datetime.date(2025, 3, 10), datetime.date(2025, 4, 10)
+    )
+    by_date = {plan.ts.date().isoformat(): plan for plan in prepared.sessions}
+    march = by_date["2025-03-15"].rankings.table
+    april = by_date["2025-04-10"].rankings.table
+    # March session: April's filing is INVISIBLE -> AAA (0.9) outranks BBB (0.2).
+    assert march.loc["AAA", "quality"] == 1.0
+    assert march.loc["BBB", "quality"] == 0.5
+    # April session: the new filing is visible -> AAA (0.05) now below BBB (0.2).
+    assert april.loc["AAA", "quality"] == 0.5
+    assert april.loc["BBB", "quality"] == 1.0
+    # CCC never filed anything: neutral both times.
+    assert march.loc["CCC", "quality"] == 0.5
+    assert april.loc["CCC", "quality"] == 0.5
+
+
+def test_prepare_keeps_a_row_filed_exactly_on_the_session_timestamp(tmp_path):
+    """Double-cut boundary guard: a fundamentals row filed EXACTLY on session
+    S's timestamp passes BOTH inclusive as-of cuts (prepare's per-session
+    slice, then the ranker's latest_filed_row) and is visible in S's ranking
+    -- while remaining invisible to the session strictly before it."""
+    from trading.fundamentals.store import FundamentalsStore
+
+    frames = {
+        "AAA": noisy_frame(seed=1, periods=120),
+        "BBB": noisy_frame(seed=2, periods=120),
+        "BENCH": noisy_frame(seed=9, periods=120),
+    }
+    adapter = FakeBacktestAdapter(frames, "BENCH")
+    cache = OhlcvCache(tmp_path / "cache", 3)
+    base = small_config()
+    config = replace(
+        base,
+        benchmark="BENCH",
+        signals=replace(base.signals, ranker="quality_momentum_v1"),
+        data=replace(base.data, fundamentals_dir=str(tmp_path / "fund")),
+    )
+    store = FundamentalsStore(Path(config.data.fundamentals_dir))
+
+    def fund_rows(dated):
+        idx = pd.DatetimeIndex([pd.Timestamp(d, tz="UTC") for d in dated], name="filed")
+        return pd.DataFrame({"gross_profitability": list(dated.values())}, index=idx)
+
+    # AAA's only filing lands EXACTLY on the 2025-03-15 session timestamp
+    # (daily UTC-midnight bars); BBB filed long before the window.
+    store.append("AAA", fund_rows({"2025-03-15": 0.9}))
+    store.append("BBB", fund_rows({"2025-03-01": 0.2}))
+
+    prepared = prepare(
+        config, adapter, cache, datetime.date(2025, 3, 10), datetime.date(2025, 3, 20)
+    )
+    by_date = {plan.ts.date().isoformat(): plan for plan in prepared.sessions}
+    before = by_date["2025-03-14"].rankings.table
+    boundary = by_date["2025-03-15"].rankings.table
+    # Strictly before the filing: AAA has nothing visible -> neutral; BBB's
+    # 0.2 is the only real value -> top percentile.
+    assert before.loc["AAA", "quality"] == 0.5
+    assert before.loc["BBB", "quality"] == 1.0
+    # ON the filing timestamp: the boundary row must survive both cuts, so
+    # AAA (0.9) outranks BBB (0.2). A dropped boundary row would leave AAA
+    # neutral at 0.5 here.
+    assert boundary.loc["AAA", "quality"] == 1.0
+    assert boundary.loc["BBB", "quality"] == 0.5
+
+
+def test_momentum_v1_prepare_never_touches_the_fundamentals_store(tmp_path, monkeypatch):
+    """Mirror of the build_rankings guard: momentum_v1 backtests must never
+    construct a FundamentalsStore anywhere in prepare()."""
+    import trading.backtest.engine as engine_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("momentum_v1 prepare() must not construct a FundamentalsStore")
+
+    monkeypatch.setattr(engine_module, "FundamentalsStore", boom)
+    config = _with_benchmark(small_config())  # default ranker: momentum_v1
+    adapter = FakeBacktestAdapter(_fixture_frames(), "BENCH")
+    cache = OhlcvCache(tmp_path / "cache", config.data.refetch_days)
+    prepared = prepare(config, adapter, cache, START, END)
+    ranked = [s for s in prepared.sessions if s.rankings is not None]
+    assert ranked
+    assert all("quality" not in s.rankings.table.columns for s in ranked)

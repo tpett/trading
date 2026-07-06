@@ -164,3 +164,72 @@ Sub-scores are cross-sectional percentiles (0-1, higher = better):
 (equal-weight blend; the ranking key), `raw_return_30d` (raw return feeding
 the crypto fee gate). `status` is `tradable` / `sell_only` / `untradable`;
 regime is `risk_on` / `neutral` / `risk_off` (full / half / no new entries).
+
+## Fundamentals overlay (M4)
+
+Point-in-time fundamentals from SEC EDGAR XBRL — quality (gross profitability
+= trailing-4-quarter (Revenue − COGS) / latest Assets) and value primitives
+(TTM net income, book equity, shares outstanding) — feeding two opt-in
+rankers: `quality_momentum_v1` (six momentum features + a quality percentile,
+equal weight over 7) and `value_momentum_v1` (six momentum features +
+earnings-yield and book-to-market percentiles, equal weight over 8; both
+ratios computed at ranking time from latest-filed primitives × the last
+close as-of — the stored data is price-free and never rewrites when price
+history refreshes). Missing data — e.g. financials without a COGS concept,
+unmapped delisted symbols — is neutral 0.5, never a penalty. Live and paper
+stay on `momentum_v1`; opt in per run with
+`--config-dir config/experiments/quality` or `config/experiments/value`.
+
+PIT discipline: a value becomes visible at its FILING date; per fiscal period
+only the original (earliest-accession) filing counts — amendments and
+restatements never rewrite history. Provenance (accession, tags, period, form)
+rides on every stored row.
+
+Data flow:
+
+    uv run python scripts/build_cik_map.py          # committed CIK<->symbol map (rare)
+    uv run python scripts/backfill_fundamentals.py  # companyfacts (default, primary) -> data/fundamentals/
+    uv run python scripts/verify_fundamentals.py    # AAPL spot-check + restatement invariant + coverage gate
+
+`backfill_fundamentals.py --source zips` selects the retired-primary
+quarterly-ZIP path instead (kept for its bulk-download shape without a
+per-CIK network round trip); a companyfacts rebuild REQUIRES an empty
+`[data] fundamentals_dir` (append-only semantics would otherwise silently
+keep any stale rows a prior run already wrote for a filed date).
+
+The live runner tops up the store weekly from the companyfacts API — only
+when the configured ranker requires fundamentals — failing open (journaled
+warning, rankings proceed on stored values) exactly like the earnings fetch,
+bounded by `fundamentals_refresh_budget_s` (default 900s) so a slow network
+can't run the refresh past its own cadence. A symbol's FIRST refresh (empty
+store, e.g. newly added to the universe) pulls its ENTIRE companyfacts
+history in one call rather than just the past week — a one-time row surge,
+not a bug. Stores are append-only: history, once visible, is immutable.
+Note: with the locked 2018q1 backfill start, TTM warms up through 2018
+(mostly neutral quality) until the FY-2018 10-K wave lands in early 2019.
+
+Live run evidence (2026-07-06, companyfacts-primary rebuild: 1109 CIKs
+fetched -> 1110 symbols, 38,972 rows): AAPL 2023-02-03 TTM gross
+profitability 0.4812 (scout's 0.1452 was single-quarter basis); AAPL value
+primitives matched (15,821,946,000 shares — the dei cover-page count,
+verified verbatim against the filed 10-Q; $56,727M book equity; $95,171M
+TTM net income; earnings yield 0.0389 at the pinned $154.50 close);
+restatement invariant held in its visibility-timing form (every store row
+for a re-filed fiscal period sits at the ORIGINAL filing's filed date);
+shares coverage 89.7% of current members (the gap is structural:
+multi-class filers' per-class cover counts are dimensioned and outside the
+companyfacts API — see PROVENANCE.md's named follow-up); a
+ticker-recycling reconciliation audit (every `cik_map.csv`
+symbol/CIK interval checked for at least one filing inside its membership
+window) flagged 21 symbols with no filings in-window — 18 are benign
+(16 foreign private issuers filing 20-F/40-F instead of 10-K/10-Q, one
+bank reporting to the FDIC instead of the SEC, one spinoff too new to have
+filed yet) and 3 (APC, BID, CONE) were confirmed ticker-recycling mismaps
+where `cik_map.csv`'s current-ticker lookup attached a live, unrelated
+company's CIK to a historical (pre-2022) membership interval that belonged
+to a different, since-delisted company — fail-open in practice (the
+wrongly-mapped CIK had no filings during that historical window, so no
+misattributed data reached the store). Fixed: the three symbols are now
+seeded in `scripts/build_cik_map.py`'s `EXCLUSIONS` dict and always unmapped;
+the regenerated `cik_map.csv` confirms all three are absent. Full detail:
+`src/trading/venues/universes/sources/PROVENANCE.md`.

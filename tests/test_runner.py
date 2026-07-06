@@ -1,3 +1,4 @@
+import dataclasses
 import datetime
 import json
 import subprocess
@@ -531,6 +532,185 @@ def test_digest_write_failure_never_blocks_state_save(tmp_path, monkeypatch):
     assert not (tmp_path / "digest" / "2026-07-01.md").exists()
     digest_notes = [n for n in notes if "digest" in n[0]]
     assert len(digest_notes) == 1  # notified exactly once, then carried on
+
+
+def _quality_eq(tmp_path):
+    return dataclasses.replace(
+        EQ,
+        signals=dataclasses.replace(EQ.signals, ranker="quality_momentum_v1"),
+        data=dataclasses.replace(EQ.data, fundamentals_dir=str(tmp_path / "fund")),
+    )
+
+
+def _run_quality(tmp_path, monkeypatch, refresh):
+    monkeypatch.setattr("trading.runner.refresh_fundamentals", refresh)
+    notes: list[tuple[str, str]] = []
+    outcome = run_venue(
+        _quality_eq(tmp_path),
+        FakeAdapter(),
+        OhlcvCache(tmp_path / "cache", EQ.data.refetch_days),
+        now=NOW,
+        state_root=tmp_path / "state",
+        journal_root=tmp_path / "journal",
+        notify=lambda title, message: notes.append((title, message)),
+    )
+    return outcome, notes
+
+
+def _last_run_event(tmp_path):
+    events = list(Journal(tmp_path / "journal" / "equities.jsonl").events())
+    return [e for e in events if e["event"] == "run"][-1]
+
+
+def test_momentum_v1_run_never_refreshes_fundamentals(tmp_path, monkeypatch):
+    # Assert on OBSERVABLES, not a raising tripwire: the refresh block is
+    # fail-open, so a raised AssertionError would be swallowed into a warning
+    # and this test would pass vacuously. Record calls instead.
+    calls: list[list[str]] = []
+
+    def recorder(store, cik_map, symbols, as_of, **kwargs):
+        calls.append(sorted(symbols))
+        return 0, False
+
+    monkeypatch.setattr("trading.runner.refresh_fundamentals", recorder)
+    outcome, _ = _run(tmp_path)  # default EQ config: momentum_v1
+    assert outcome.status == "ok"
+    assert calls == []  # the refresh hook never fired
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert not any(w.startswith("fundamentals refresh") for w in warnings)
+    assert not (tmp_path / "fund").exists()  # no store dir, no marker file
+
+    # Sensitivity check: the identical recorder DOES fire under a
+    # fundamentals-requiring ranker, so the empty list above is load-bearing.
+    _run_quality(tmp_path / "quality", monkeypatch, recorder)
+    assert calls == [sorted(SYMBOLS)]
+
+
+def test_quality_run_refreshes_once_then_respects_the_weekly_gate(tmp_path, monkeypatch):
+    calls: list[tuple] = []
+
+    def refresh(store, cik_map, symbols, as_of, **kwargs):
+        calls.append((sorted(symbols), as_of))
+        return 3, False
+
+    outcome, _ = _run_quality(tmp_path, monkeypatch, refresh)
+    assert outcome.status == "ok"
+    assert calls == [(sorted(SYMBOLS), NOW.date())]
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    store = FundamentalsStore(tmp_path / "fund")
+    assert store.last_refresh() == NOW.date()
+
+    # Second run inside the 7-day window: the gate must skip the refresh.
+    _run_quality(tmp_path, monkeypatch, refresh)
+    assert len(calls) == 1
+
+
+def test_partially_degraded_refresh_with_progress_advances_marker(tmp_path, monkeypatch):
+    # Some symbols failed (degraded=True) but at least one appended rows: a
+    # PARTIAL degradation still advances the marker -- the weekly cadence
+    # stands, and the next scheduled refresh (not tomorrow) retries the rest.
+    outcome, _ = _run_quality(tmp_path, monkeypatch, lambda *a, **k: (2, True))
+    assert outcome.status == "ok"
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh degraded") for w in warnings)
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    assert FundamentalsStore(tmp_path / "fund").last_refresh() == NOW.date()
+
+
+def test_total_failure_degraded_refresh_does_not_advance_marker(tmp_path, monkeypatch):
+    # Zero rows appended AND degraded == every symbol failed (or the budget
+    # tripped before the first one started): a total-failure week, load-
+    # bearing distinct from the partial case above -- the marker must NOT
+    # advance, so the next run retries immediately instead of waiting out
+    # the rest of the cadence on stale data (same rationale as a raised
+    # exception, exercised below).
+    outcome, _ = _run_quality(tmp_path, monkeypatch, lambda *a, **k: (0, True))
+    assert outcome.status == "ok"
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh degraded") for w in warnings)
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    assert FundamentalsStore(tmp_path / "fund").last_refresh() is None
+
+
+def test_failed_refresh_is_fail_open_with_journaled_warning(tmp_path, monkeypatch):
+    def refresh(*args, **kwargs):
+        raise OSError("edgar unreachable")
+
+    outcome, notes = _run_quality(tmp_path, monkeypatch, refresh)
+    assert outcome.status == "ok"  # rankings ran on the (empty) stored fundamentals
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh failed") for w in warnings)
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    # Marker NOT written on total failure: the next run retries immediately.
+    assert FundamentalsStore(tmp_path / "fund").last_refresh() is None
+
+
+def test_corrupt_marker_file_fails_open_with_journaled_warning(tmp_path, monkeypatch):
+    # A garbage .last_refresh makes last_refresh() raise ValueError BEFORE
+    # the staleness decision; that too must degrade, never escape run_venue.
+    marker = tmp_path / "fund" / ".last_refresh"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("not-a-date")
+
+    calls: list[list[str]] = []
+
+    def recorder(store, cik_map, symbols, as_of, **kwargs):
+        calls.append(sorted(symbols))
+        return 0, False
+
+    outcome, _ = _run_quality(tmp_path, monkeypatch, recorder)
+    assert outcome.status == "ok"
+    assert calls == []  # never got as far as the refresh
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh failed") for w in warnings)
+    assert marker.read_text() == "not-a-date"  # untouched: next run retries
+
+
+def test_store_construction_failure_fails_open_with_journaled_warning(tmp_path, monkeypatch):
+    # Store construction (mkdir) sits INSIDE the fail-open block: an
+    # unwritable fundamentals dir degrades with a warning, never a traceback.
+    def boom(root):
+        raise PermissionError(f"mkdir denied: {root}")
+
+    monkeypatch.setattr("trading.runner.FundamentalsStore", boom)
+    outcome, _ = _run_quality(tmp_path, monkeypatch, lambda *a, **k: (0, False))
+    assert outcome.status == "ok"
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh failed") for w in warnings)
+
+
+def test_stale_marker_on_processed_bar_refreshes_once_and_noops_cleanly(tmp_path, monkeypatch):
+    # Bounded-cost tradeoff, pinned: the refresh gate runs before the has_run
+    # noop check (which needs build_rankings for decision_ts), so a rerun on
+    # an already-processed bar with a stale marker refreshes exactly once
+    # more, advances the marker, and the run still noops cleanly.
+    calls: list[datetime.date] = []
+
+    def refresh(store, cik_map, symbols, as_of, **kwargs):
+        calls.append(as_of)
+        return 0, False
+
+    outcome, _ = _run_quality(tmp_path, monkeypatch, refresh)
+    assert outcome.status == "ok"
+    assert len(calls) == 1
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    store = FundamentalsStore(tmp_path / "fund")
+    store.mark_refreshed(NOW.date() - datetime.timedelta(days=8))  # expire the gate
+
+    outcome, _ = _run_quality(tmp_path, monkeypatch, refresh)
+    assert outcome.status == "noop"  # decision bar already processed
+    assert len(calls) == 2  # the one extra refresh the ordering costs
+    assert store.last_refresh() == NOW.date()  # marker advanced: gates the week
 
 
 def test_session_guard_is_dst_aware():
