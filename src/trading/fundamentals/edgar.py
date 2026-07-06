@@ -14,6 +14,13 @@ segments + coreg). Roughly half of filers (banks, insurers) report no COGS
 concept at all -> their quality metric is NaN downstream and ranks neutral
 (0.5) by design, while their net income/equity/shares still resolve.
 
+Shares date rule is PER TAG: the cover-date relaxation (ddate >= period,
+latest wins) applies only to dei:EntityCommonStockSharesOutstanding, whose
+post-period dating is a dei cover-page artifact; the us-gaap
+CommonStockSharesOutstanding fallback is a normal balance-sheet instant held
+to strict ddate == period (a later-dated instant may belong to the next
+period's comparative).
+
 Forms accepted are EXACTLY 10-K and 10-Q: amendments (10-K/A, 10-Q/A) never
 enter the facts table, which is half of the PIT original-filing discipline
 (the other half is metrics' earliest-filed dedup per (cik, fy, fp)).
@@ -49,7 +56,13 @@ EQUITY_TAGS = [
 # taxonomy); CommonStockSharesOutstanding is the us-gaap balance-sheet
 # fallback. num.txt keys facts by tag name only, so the taxonomy split
 # matters solely to the companyfacts path (_TAXONOMY_BY_TAG there).
-SHARES_TAGS = ["EntityCommonStockSharesOutstanding", "CommonStockSharesOutstanding"]
+# Date rule is PER TAG: the cover-date relaxation (ddate >= period, latest
+# wins) applies ONLY to the dei tag -- its post-period dating is a dei
+# cover-page artifact. The us-gaap fallback is a normal balance-sheet
+# instant held to strict ddate == period (a later-dated instant may belong
+# to the next period's comparative).
+_DEI_SHARES_TAG = "EntityCommonStockSharesOutstanding"
+SHARES_TAGS = [_DEI_SHARES_TAG, "CommonStockSharesOutstanding"]
 TAG_PRIORITY: dict[str, list[str]] = {
     "revenue": REVENUE_TAGS,
     "cogs": COGS_TAGS,
@@ -82,18 +95,28 @@ _SUB_COLS = ["adsh", "cik", "form", "period", "fy", "fp", "filed"]
 _NUM_COLS = ["adsh", "tag", "ddate", "qtrs", "uom", "segments", "coreg", "value"]
 
 
+_FACT_DTYPES = {
+    "cik": "int64",
+    "qtrs": "int64",
+    "value": "float64",
+    "period": "datetime64[ns]",
+    "filed": "datetime64[ns]",
+}
+
+
 def empty_facts() -> pd.DataFrame:
-    return pd.DataFrame(columns=FACT_COLUMNS)
+    return pd.DataFrame(columns=FACT_COLUMNS).astype(_FACT_DTYPES)
 
 
 def load_quarter_facts(zip_path: Path, ciks: set[int] | None = None) -> pd.DataFrame:
     """One quarterly ZIP -> normalized facts: per (filing, concept) the single
     best fact by tag priority, consolidated only, the filing's OWN fiscal
     period only (ddate == sub.period), duration matched to the form (10-K
-    qtrs=4 full year, 10-Q qtrs=1; instants qtrs=0). Exception: the shares
-    cover-page count is dated AFTER the period end, so it takes the latest
-    qtrs=0 share fact at-or-after the period instead. All output rows carry
-    the FILING's fiscal period in the `period` column regardless."""
+    qtrs=4 full year, 10-Q qtrs=1; instants qtrs=0). Exception: the dei
+    cover-page share count is dated AFTER the period end, so THAT TAG ONLY
+    takes the latest qtrs=0 fact at-or-after the period; the us-gaap shares
+    fallback stays strict (ddate == period). All output rows carry the
+    FILING's fiscal period in the `period` column regardless."""
     with zipfile.ZipFile(zip_path) as zf, zf.open("sub.txt") as fh:
         sub = pd.read_csv(fh, sep="\t", dtype=str, usecols=_SUB_COLS, encoding="latin-1")
     sub = sub[sub["form"].isin(["10-K", "10-Q"])]
@@ -136,9 +159,17 @@ def load_quarter_facts(zip_path: Path, ciks: set[int] | None = None) -> pd.DataF
         if concept == "shares":
             # The dei cover-page share count is dated "as of" a day AFTER the
             # fiscal period end (FSDS rounds it to month end), so requiring
-            # ddate == period would drop it: accept the LATEST instant dated
-            # at-or-after the period end instead (stale comparatives lose).
-            sel = sel[(sel["qtrs"] == 0) & (sel["ddate"] >= sel["period"])]
+            # ddate == period would drop it: for the dei tag ONLY, accept the
+            # LATEST instant dated at-or-after the period end instead (stale
+            # comparatives lose). The us-gaap fallback is a normal
+            # balance-sheet instant: strict ddate == period (a later-dated
+            # instant may belong to the next period's comparative).
+            sel = sel[sel["qtrs"] == 0]
+            is_dei = sel["tag"] == _DEI_SHARES_TAG
+            sel = sel[
+                (is_dei & (sel["ddate"] >= sel["period"]))
+                | (~is_dei & (sel["ddate"] == sel["period"]))
+            ]
         elif concept in INSTANT_CONCEPTS:
             sel = sel[(sel["qtrs"] == 0) & (sel["ddate"] == sel["period"])]
         else:  # flows: the filing's own fiscal period at the form's duration

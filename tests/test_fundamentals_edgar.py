@@ -67,7 +67,9 @@ def _facts(tmp_path, ciks=None):
 
 def test_tag_priority_and_consolidated_only(tmp_path):
     facts = _facts(tmp_path)
-    row = facts[(facts["cik"] == 100) & (facts["concept"] == "revenue")].iloc[0]
+    rows = facts[(facts["cik"] == 100) & (facts["concept"] == "revenue")]
+    assert len(rows) == 1
+    row = rows.iloc[0]
     assert row["tag"] == "RevenueFromContractWithCustomerExcludingAssessedTax"
     assert row["value"] == 100.0
     assert row["qtrs"] == 1
@@ -75,10 +77,14 @@ def test_tag_priority_and_consolidated_only(tmp_path):
 
 def test_form_duration_selection(tmp_path):
     facts = _facts(tmp_path)
-    annual = facts[(facts["cik"] == 200) & (facts["concept"] == "revenue")].iloc[0]
+    annual_rows = facts[(facts["cik"] == 200) & (facts["concept"] == "revenue")]
+    assert len(annual_rows) == 1
+    annual = annual_rows.iloc[0]
     assert annual["qtrs"] == 4
     assert annual["value"] == 480.0
-    assets = facts[(facts["cik"] == 200) & (facts["concept"] == "assets")].iloc[0]
+    assets_rows = facts[(facts["cik"] == 200) & (facts["concept"] == "assets")]
+    assert len(assets_rows) == 1
+    assets = assets_rows.iloc[0]
     assert assets["qtrs"] == 0
     assert assets["value"] == 2000.0
 
@@ -92,15 +98,21 @@ def test_amendments_and_other_forms_never_parse(tmp_path):
 
 def test_value_primitive_concepts(tmp_path):
     facts = _facts(tmp_path)
-    ni = facts[(facts["cik"] == 100) & (facts["concept"] == "net_income")].iloc[0]
+    ni_rows = facts[(facts["cik"] == 100) & (facts["concept"] == "net_income")]
+    assert len(ni_rows) == 1
+    ni = ni_rows.iloc[0]
     assert ni["tag"] == "NetIncomeLoss"
     assert ni["value"] == 25.0
     assert ni["qtrs"] == 1  # flow: 10-Q -> single quarter, like revenue
-    eq = facts[(facts["cik"] == 100) & (facts["concept"] == "equity")].iloc[0]
+    eq_rows = facts[(facts["cik"] == 100) & (facts["concept"] == "equity")]
+    assert len(eq_rows) == 1
+    eq = eq_rows.iloc[0]
     assert eq["tag"] == "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
     assert eq["value"] == 500.0
     assert eq["qtrs"] == 0
-    sh = facts[(facts["cik"] == 100) & (facts["concept"] == "shares")].iloc[0]
+    sh_rows = facts[(facts["cik"] == 100) & (facts["concept"] == "shares")]
+    assert len(sh_rows) == 1
+    sh = sh_rows.iloc[0]
     assert sh["tag"] == "EntityCommonStockSharesOutstanding"  # dei beats the us-gaap fallback
     assert sh["value"] == 1000.0  # LATEST cover-date instant wins; stale 900.0 dropped
     assert sh["qtrs"] == 0
@@ -119,10 +131,81 @@ def test_cik_filter_and_dtypes(tmp_path):
     facts = _facts(tmp_path, ciks={100})
     assert set(facts["cik"]) == {100}
     assert list(facts.columns) == FACT_COLUMNS
+    assert len(facts) >= 1
     assert str(facts["filed"].iloc[0].date()) == "2023-05-10"
 
 
 def test_no_matching_filings_returns_empty(tmp_path):
     facts = _facts(tmp_path, ciks={999})
     assert facts.empty
-    assert list(empty_facts().columns) == FACT_COLUMNS
+    for frame in (facts, empty_facts()):
+        assert list(frame.columns) == FACT_COLUMNS
+        assert frame["cik"].dtype == "int64"
+        assert frame["qtrs"].dtype == "int64"
+        assert frame["value"].dtype == "float64"
+        assert frame["period"].dtype == "datetime64[ns]"
+        assert frame["filed"].dtype == "datetime64[ns]"
+
+
+def test_dimensional_rows_neither_win_nor_block(tmp_path):
+    subs = [
+        sub_line("0010-23-000001", 500, "10-Q", "20230331", "2023", "Q1", "20230510"),
+        sub_line("0011-23-000001", 600, "10-Q", "20230331", "2023", "Q1", "20230510"),
+    ]
+    nums = [
+        # cik 500: the HIGHEST-priority revenue tag exists ONLY as a
+        # dimensional row -> it must not win; the next-priority tag's
+        # consolidated row must be selected instead (not blocked).
+        num_line(
+            "0010-23-000001",
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "20230331",
+            1,
+            70.0,
+            segments="Product=A;",
+        ),
+        num_line("0010-23-000001", "Revenues", "20230331", 1, 60.0),
+        # cik 600: NO consolidated row for ANY revenue chain tag -> the
+        # concept must be absent for this filing entirely.
+        num_line(
+            "0011-23-000001",
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "20230331",
+            1,
+            71.0,
+            segments="Product=A;",
+        ),
+        num_line("0011-23-000001", "Revenues", "20230331", 1, 61.0, segments="Region=US;"),
+    ]
+    facts = load_quarter_facts(write_quarter_zip(tmp_path / "dim.zip", subs, nums))
+    rev = facts[(facts["cik"] == 500) & (facts["concept"] == "revenue")]
+    assert len(rev) == 1
+    assert rev.iloc[0]["tag"] == "Revenues"
+    assert rev.iloc[0]["value"] == 60.0
+    assert facts[(facts["cik"] == 600) & (facts["concept"] == "revenue")].empty
+
+
+def test_shares_fallback_tag_requires_period_end_date(tmp_path):
+    # The cover-date relaxation (ddate >= period) is dei-only: the us-gaap
+    # CommonStockSharesOutstanding fallback is a normal balance-sheet instant
+    # and must match the period end exactly.
+    subs = [
+        sub_line("0020-23-000001", 700, "10-Q", "20230331", "2023", "Q1", "20230510"),
+        sub_line("0021-23-000001", 800, "10-Q", "20230331", "2023", "Q1", "20230510"),
+    ]
+    nums = [
+        # cik 700: fallback tag exists ONLY post-period -> NOT selected.
+        num_line(
+            "0020-23-000001", "CommonStockSharesOutstanding", "20230430", 0, 800.0, uom="shares"
+        ),
+        # cik 800: fallback tag at the period end -> selected.
+        num_line(
+            "0021-23-000001", "CommonStockSharesOutstanding", "20230331", 0, 850.0, uom="shares"
+        ),
+    ]
+    facts = load_quarter_facts(write_quarter_zip(tmp_path / "shares.zip", subs, nums))
+    assert facts[(facts["cik"] == 700) & (facts["concept"] == "shares")].empty
+    sh = facts[(facts["cik"] == 800) & (facts["concept"] == "shares")]
+    assert len(sh) == 1
+    assert sh.iloc[0]["tag"] == "CommonStockSharesOutstanding"
+    assert sh.iloc[0]["value"] == 850.0
