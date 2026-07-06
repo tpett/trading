@@ -188,15 +188,25 @@ rides on every stored row.
 Data flow:
 
     uv run python scripts/build_cik_map.py          # committed CIK<->symbol map (rare)
-    uv run python scripts/backfill_fundamentals.py  # 2018q1->present ZIPs -> data/fundamentals/
-    uv run python scripts/verify_fundamentals.py    # AAPL spot-check + restatement invariant
+    uv run python scripts/backfill_fundamentals.py  # companyfacts (default, primary) -> data/fundamentals/
+    uv run python scripts/verify_fundamentals.py    # AAPL spot-check + restatement invariant + coverage gate
+
+`backfill_fundamentals.py --source zips` selects the retired-primary
+quarterly-ZIP path instead (kept for its bulk-download shape without a
+per-CIK network round trip); a companyfacts rebuild REQUIRES an empty
+`[data] fundamentals_dir` (append-only semantics would otherwise silently
+keep any stale rows a prior run already wrote for a filed date).
 
 The live runner tops up the store weekly from the companyfacts API — only
 when the configured ranker requires fundamentals — failing open (journaled
-warning, rankings proceed on stored values) exactly like the earnings fetch.
-Stores are append-only: history, once visible, is immutable. Note: with the
-locked 2018q1 backfill start, TTM warms up through 2018 (mostly neutral
-quality) until the FY-2018 10-K wave lands in early 2019.
+warning, rankings proceed on stored values) exactly like the earnings fetch,
+bounded by `fundamentals_refresh_budget_s` (default 900s) so a slow network
+can't run the refresh past its own cadence. A symbol's FIRST refresh (empty
+store, e.g. newly added to the universe) pulls its ENTIRE companyfacts
+history in one call rather than just the past week — a one-time row surge,
+not a bug. Stores are append-only: history, once visible, is immutable.
+Note: with the locked 2018q1 backfill start, TTM warms up through 2018
+(mostly neutral quality) until the FY-2018 10-K wave lands in early 2019.
 
 Live run evidence (2026-07-06, full 2018q1->2026q2 backfill, 33 ZIPs, 1110
 symbols with fundamentals): AAPL 2023-02-03 TTM gross profitability 0.4812

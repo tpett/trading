@@ -21,6 +21,13 @@ PIT discipline (non-negotiable):
   visible downstream; the ranker reads the LAST row as-of a session (a step
   function on FILED dates), so a NaN latest filing means neutral, never a
   silent reach-back to a stale value.
+- Same-day multi-filing consequence: when two filings for one cik share a
+  FILED date (e.g. a backlog 10-Q alongside its 10-K), the emitted row's
+  instants (assets/equity/shares) come from ONLY the batch's LATEST-period
+  filing (see _cik_series) -- there is no cross-filing fallback within a
+  batch. If that specific filing lacks a resolvable instant tag (a rare
+  tag-fallback miss), the row is NaN for that instant on that day even
+  though an EARLIER same-day filing in the batch had a real value.
 """
 
 from __future__ import annotations
