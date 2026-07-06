@@ -281,18 +281,31 @@ def run_venue(
 
         # Fundamentals refresh (M4): only when the configured ranker needs it,
         # at most every fundamentals_refresh_days, BEFORE build_rankings reads
-        # the store. Fail-open exactly like the earnings fetch: a refresh
-        # failure degrades to the last stored values with a journaled warning
-        # -- it must never crash or block the run. The marker is written even
-        # when partially degraded (weekly cadence stands) but NOT on total
-        # failure, so the next run retries immediately.
+        # the store. Fail-open exactly like the earnings fetch: the ENTIRE
+        # block -- store construction, marker read, staleness decision,
+        # refresh, marker write -- degrades to whatever store state exists,
+        # with a journaled warning; nothing here may ever escape and crash or
+        # block the run (a corrupt marker file or an unwritable store dir
+        # must page via the journal, not an unhandled traceback). The marker
+        # is written even when partially degraded (weekly cadence stands) but
+        # NOT on total failure, so the next run retries immediately.
+        #
+        # Bounded-cost tradeoff, deliberate: this runs before the has_run
+        # noop check because that check needs decision_ts, i.e. a completed
+        # build_rankings. A rerun on an already-processed bar with a stale
+        # marker therefore refreshes once more than strictly necessary -- at
+        # most one extra refresh per marker expiry, and the advanced marker
+        # gates the rest of the week. The universe fetch here is likewise
+        # separate from build_rankings' own (its signature owns that call);
+        # sharing one fetch would mean restructuring build_rankings, not
+        # worth it for a weekly, cached-cheap lookup.
         extra_warnings: list[str] = []
         if get_ranker(config.signals.ranker).requires_fundamentals:
-            store = FundamentalsStore(Path(config.data.fundamentals_dir))
-            last = store.last_refresh()
-            due = last is None or (now.date() - last).days >= config.data.fundamentals_refresh_days
-            if due:
-                try:
+            try:
+                store = FundamentalsStore(Path(config.data.fundamentals_dir))
+                last = store.last_refresh()
+                days = config.data.fundamentals_refresh_days
+                if last is None or (now.date() - last).days >= days:
                     symbols = [i.symbol for i in adapter.universe(now.date())]
                     _, degraded = refresh_fundamentals(store, load_cik_map(), symbols, now.date())
                     store.mark_refreshed(now.date())
@@ -300,10 +313,10 @@ def run_venue(
                         extra_warnings.append(
                             "fundamentals refresh degraded: some symbols kept stale values"
                         )
-                except Exception as exc:
-                    extra_warnings.append(
-                        f"fundamentals refresh failed ({exc}); rankings use last stored values"
-                    )
+            except Exception as exc:
+                extra_warnings.append(
+                    f"fundamentals refresh failed ({exc}); rankings use last stored values"
+                )
 
         try:
             rankings = build_rankings(config, adapter, cache, now.date())
