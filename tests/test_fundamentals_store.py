@@ -66,6 +66,26 @@ def test_load_returns_only_symbols_with_rows(tmp_path):
     assert set(loaded) == {"AAPL"}
 
 
+def test_slash_symbol_maps_to_dash_and_round_trips(tmp_path):
+    store = FundamentalsStore(tmp_path)
+    added = store.append("BRK/B", _rows({"2023-02-03": 0.48}))
+    assert added == 1
+    path = store.path_for("BRK/B")
+    assert path.name == "BRK-B.parquet"
+    assert path.exists()
+    frame = store.read("BRK/B")
+    assert list(frame["gross_profitability"]) == [0.48]
+
+
+def test_out_of_order_appends_keep_index_sorted(tmp_path):
+    store = FundamentalsStore(tmp_path)
+    store.append("AAPL", _rows({"2023-05-05": 0.47}))
+    store.append("AAPL", _rows({"2023-02-03": 0.48}))
+    frame = store.read("AAPL")
+    assert frame.index.is_monotonic_increasing
+    assert list(frame["gross_profitability"]) == [0.48, 0.47]
+
+
 def test_refresh_marker_round_trips(tmp_path):
     store = FundamentalsStore(tmp_path)
     assert store.last_refresh() is None
