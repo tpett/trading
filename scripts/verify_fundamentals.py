@@ -19,7 +19,8 @@ recomputes as (all $M, all from ORIGINAL filings):
 
 Check 1b -- AAPL value primitives at the same 2023-02-03 filing:
 
-    shares outstanding: 15,842,407,000 (10-Q cover page, as of 2023-01-20)
+    shares outstanding: 15,842,407,000 (dei:EntityCommonStockSharesOutstanding
+    cover-page tag, as of 2023-01-20)
     book equity: $56,727M (condensed balance sheet, total shareholders'
     equity at 2022-12-31)
     TTM net income ($M): Q1 FY23 29,998 + derived Q4 FY22
@@ -47,12 +48,30 @@ or evidence the symbol was mapped to the wrong CIK (e.g. ticker recycling).
 Either way it lands on an audit list -- this check observes, it does not
 gate the backfill.
 
+Check 4 -- shares_outstanding coverage gate. The whole point of switching
+the backfill's primary source to companyfacts (see trading.fundamentals.
+backfill) was fixing shares_outstanding coverage; this check holds that
+regime to account. Across CURRENT equities_membership.csv members, the
+LATEST stored row's shares_outstanding must be non-NaN for at least
+SHARES_COVERAGE_MIN (90%) of them, or the run fails loudly.
+
+Check 5 -- neutral-fraction coverage table (report-only, no gate). Missing
+fundamentals data doesn't error -- it flows through as a NEUTRAL 0.5
+percentile in the quality/value rankers (spec). That's silent by design,
+so this prints, at NEUTRAL_FRACTION_SAMPLE_DATES, what fraction of current
+members would see a GENUINE (non-neutral) quality / earnings-yield /
+book-to-market component at each date, using the store's step-function
+"last row as-of" read the rankers themselves use. Earnings-yield and
+book-to-market also need shares_outstanding (the market-cap term); this
+check treats that as part of "genuine" for them, same as the ranker would.
+
 Usage: uv run python scripts/verify_fundamentals.py
 """
 
 from __future__ import annotations
 
 import datetime
+import math
 import sys
 import tomllib
 from pathlib import Path
@@ -65,6 +84,7 @@ from trading.fundamentals.store import FundamentalsStore
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "edgar-raw"
+MEMBERSHIP_CSV = ROOT / "src" / "trading" / "venues" / "universes" / "equities_membership.csv"
 
 AAPL_EXPECTED_GP = (387_537e6 - 220_666e6) / 346_747e6  # 0.4813, derivation above
 AAPL_TOLERANCE = 0.002
@@ -82,6 +102,24 @@ EARNINGS_YIELD_TOLERANCE = 0.001
 # overlaps this window (e.g. a company delisted before 2018) has nothing to
 # reconcile and is skipped.
 RECONCILIATION_START = pd.Timestamp("2018-01-01", tz="UTC")
+# Check 4: the regime-mismatch problem the companyfacts-primary switch fixes
+# (see trading.fundamentals.backfill) is specifically shares_outstanding, so
+# this is the one primitive with a hard coverage floor rather than a
+# report-only table.
+SHARES_COVERAGE_MIN = 0.90
+# Check 5: three points across the backfill's history -- shortly after the
+# TTM warm-up completes (2019), roughly mid-history, and today (whatever the
+# store's latest coverage looks like right now).
+NEUTRAL_FRACTION_SAMPLE_DATES = [
+    pd.Timestamp("2019-07-01", tz="UTC"),
+    pd.Timestamp("2022-06-30", tz="UTC"),
+    pd.Timestamp(datetime.date.today(), tz="UTC"),
+]
+
+
+def current_member_symbols() -> list[str]:
+    df = pd.read_csv(MEMBERSHIP_CSV, comment="#", dtype=str).fillna("")
+    return sorted(set(df.loc[df["end"] == "", "symbol"]))
 
 
 def check_aapl(store: FundamentalsStore) -> None:
@@ -190,14 +228,79 @@ def check_recycling_reconciliation(
     return audit
 
 
+def check_shares_coverage(store: FundamentalsStore, members: list[str]) -> None:
+    """Check 4: the companyfacts-primary switch exists to fix
+    shares_outstanding coverage (trading.fundamentals.backfill), so this is
+    a hard gate, not a report-only table -- across CURRENT members, the
+    latest stored row's shares_outstanding must resolve at least
+    SHARES_COVERAGE_MIN of the time."""
+    covered = 0
+    missing: list[str] = []
+    for symbol in members:
+        frame = store.read(symbol)
+        if not frame.empty and not math.isnan(frame.iloc[-1]["shares_outstanding"]):
+            covered += 1
+        else:
+            missing.append(symbol)
+    coverage = covered / len(members) if members else 0.0
+    print(
+        f"shares_outstanding coverage (current members, latest stored row): "
+        f"{coverage:.1%} ({covered}/{len(members)})"
+    )
+    if coverage < SHARES_COVERAGE_MIN:
+        sys.exit(
+            f"FATAL: shares_outstanding coverage {coverage:.1%} < {SHARES_COVERAGE_MIN:.0%} "
+            f"across current members; missing (first 20): {sorted(missing)[:20]}"
+        )
+
+
+def _as_of_row(frame: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series | None:
+    """The step-function "last row as-of" read the quality/value rankers
+    use: the latest filing visible by `as_of`, or None before any filing."""
+    window = frame[frame.index <= as_of]
+    return window.iloc[-1] if not window.empty else None
+
+
+def check_neutral_fraction_coverage(store: FundamentalsStore, members: list[str]) -> None:
+    """Check 5 (report-only): at each NEUTRAL_FRACTION_SAMPLE_DATES, what
+    fraction of current members have a GENUINE (non-neutral) value for each
+    ranker component, versus falling through to the neutral 0.5 percentile
+    (missing filing, NaN metric, or -- for the two ratios -- missing
+    shares_outstanding, which the ranker also needs for market cap)."""
+    print("neutral-fraction coverage (genuine vs neutral-0.5, current members):")
+    header = f"  {'date':<12} {'quality':>9} {'earnings_yield':>16} {'book_to_market':>16}"
+    print(header)
+    for as_of in NEUTRAL_FRACTION_SAMPLE_DATES:
+        quality_ok = earnings_yield_ok = book_to_market_ok = 0
+        for symbol in members:
+            row = _as_of_row(store.read(symbol), as_of)
+            if row is None:
+                continue
+            shares = row["shares_outstanding"]
+            if not math.isnan(row["gross_profitability"]):
+                quality_ok += 1
+            if not math.isnan(row["ttm_net_income"]) and not math.isnan(shares):
+                earnings_yield_ok += 1
+            if not math.isnan(row["book_equity"]) and not math.isnan(shares):
+                book_to_market_ok += 1
+        n = len(members)
+        print(
+            f"  {as_of.date().isoformat():<12} {quality_ok / n:>9.1%} "
+            f"{earnings_yield_ok / n:>16.1%} {book_to_market_ok / n:>16.1%}"
+        )
+
+
 def main() -> None:
     data_cfg = tomllib.loads((ROOT / "config" / "equities.toml").read_text())["data"]
     store_root = ROOT / data_cfg["fundamentals_dir"]
     store = FundamentalsStore(store_root)
     cik_map = load_cik_map()
+    members = current_member_symbols()
     check_aapl(store)
     check_restatements(store_root, cik_map)
     check_recycling_reconciliation(store, cik_map)
+    check_shares_coverage(store, members)
+    check_neutral_fraction_coverage(store, members)
     n_files = len(list(store_root.glob("*.parquet")))
     print(f"store coverage: {n_files} symbols with fundamentals under {store_root}")
 
