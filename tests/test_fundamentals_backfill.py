@@ -1,10 +1,18 @@
 import datetime
+import sys
+import urllib.error
+from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from fundamentals_helpers import num_line, sub_line, write_quarter_zip
 from trading.fundamentals.backfill import backfill_quarters, last_complete_quarter, quarter_range
 from trading.fundamentals.store import FundamentalsStore
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+import backfill_fundamentals as backfill_script  # noqa: E402
 
 # CIK 1326801 renamed FB -> NEWCO at 2023-08-01 in this fixture map: one CIK's
 # series must split across the two symbols by FILED date.
@@ -18,8 +26,10 @@ CIK_MAP = pd.DataFrame(
 )
 
 
-def _quarter_zip(tmp_path, name, adsh, fy, fp, period, filed, rev, cogs, assets, form="10-Q"):
-    subs = [sub_line(adsh, 1326801, form, period, fy, fp, filed)]
+def _quarter_zip(
+    tmp_path, name, adsh, fy, fp, period, filed, rev, cogs, assets, form="10-Q", cik=1326801
+):
+    subs = [sub_line(adsh, cik, form, period, fy, fp, filed)]
     qtrs = 4 if form == "10-K" else 1
     nums = [
         num_line(adsh, "Revenues", period, qtrs, rev),
@@ -59,7 +69,7 @@ def _fixture_zips(tmp_path):
 def test_backfill_splits_one_cik_series_across_rename_symbols(tmp_path):
     store = FundamentalsStore(tmp_path / "store")
     stats = backfill_quarters(_fixture_zips(tmp_path), CIK_MAP, store)
-    assert stats == {"filers": 1, "symbols": 2, "rows": 4}
+    assert stats == {"filers": 1, "symbols": 2, "rows": 4, "dropped": 0}
     fb = store.read("FB")
     newco = store.read("NEWCO")
     # Filed 2023-05-10 lands on FB (pre-rename); the rest on NEWCO.
@@ -71,12 +81,82 @@ def test_backfill_splits_one_cik_series_across_rename_symbols(tmp_path):
     assert store.read("OTHER").empty
 
 
+def test_backfill_boundary_filing_lands_on_successor_symbol(tmp_path):
+    # Filed exactly ON the rename date: start is inclusive, end exclusive, so
+    # the row belongs to the successor (NEWCO) and never the predecessor (FB).
+    zips = [
+        _quarter_zip(
+            tmp_path, "2023q3.zip", "f-01", "2023", "Q2", "20230630", "20230801", 12.0, 5.0, 95.0
+        )
+    ]
+    store = FundamentalsStore(tmp_path / "store")
+    stats = backfill_quarters(zips, CIK_MAP, store)
+    assert store.read("FB").empty
+    assert list(store.read("NEWCO").index) == [pd.Timestamp("2023-08-01", tz="UTC")]
+    assert stats == {"filers": 1, "symbols": 1, "rows": 1, "dropped": 0}
+
+
 def test_backfill_rerun_is_idempotent(tmp_path):
     store = FundamentalsStore(tmp_path / "store")
     zips = _fixture_zips(tmp_path)
     backfill_quarters(zips, CIK_MAP, store)
+    first_run = {symbol: store.read(symbol) for symbol in ("FB", "NEWCO")}
     stats = backfill_quarters(zips, CIK_MAP, store)
     assert stats["rows"] == 0  # append-only store: reprocessing adds nothing
+    # Stored VALUES are byte-identical too, not just the appended-row counter.
+    for symbol, frame in first_run.items():
+        pd.testing.assert_frame_equal(store.read(symbol), frame)
+
+
+def test_backfill_merges_recycled_ticker_across_ciks(tmp_path):
+    # Ticker reuse: two DIFFERENT companies (CIKs) hold the same symbol over
+    # disjoint intervals -> one chronologically merged store, each row from
+    # the CIK that owned the symbol at its FILED date.
+    cik_map = pd.DataFrame(
+        {
+            "symbol": ["RECYCLE", "RECYCLE"],
+            "cik": [111, 222],
+            "start": ["2017-01-01", "2023-08-01"],
+            "end": ["2023-08-01", ""],
+        }
+    )
+    zips = [
+        _quarter_zip(
+            tmp_path,
+            "2023q2.zip",
+            "a-01",
+            "2023",
+            "Q1",
+            "20230331",
+            "20230510",
+            10.0,
+            4.0,
+            90.0,
+            cik=111,
+        ),
+        _quarter_zip(
+            tmp_path,
+            "2023q4.zip",
+            "b-01",
+            "2023",
+            "Q3",
+            "20230930",
+            "20231108",
+            11.0,
+            5.0,
+            98.0,
+            cik=222,
+        ),
+    ]
+    store = FundamentalsStore(tmp_path / "store")
+    stats = backfill_quarters(zips, cik_map, store)
+    assert stats == {"filers": 2, "symbols": 1, "rows": 2, "dropped": 0}
+    frame = store.read("RECYCLE")
+    assert list(frame.index) == [
+        pd.Timestamp("2023-05-10", tz="UTC"),
+        pd.Timestamp("2023-11-08", tz="UTC"),
+    ]
+    assert list(frame["adsh"]) == ["a-01", "b-01"]
 
 
 def test_quarter_range_and_last_complete_quarter():
@@ -84,3 +164,37 @@ def test_quarter_range_and_last_complete_quarter():
     assert quarter_range("2018q3", "2019q2") == ["2018q3", "2018q4", "2019q1", "2019q2"]
     assert last_complete_quarter(datetime.date(2026, 7, 6)) == "2026q2"
     assert last_complete_quarter(datetime.date(2026, 2, 1)) == "2025q4"
+
+
+def _raise_http(code):
+    def fake_urlopen(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, code, "err", None, None)
+
+    return fake_urlopen
+
+
+def test_download_range_404_on_newest_quarter_skips(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(backfill_script, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(backfill_script.urllib.request, "urlopen", _raise_http(404))
+    # The NEWEST quarter is the only one SEC may not have published yet:
+    # warn + skip, no abort.
+    assert backfill_script.download_range(["2026q2"]) == []
+    assert "not published yet" in capsys.readouterr().out
+
+
+def test_download_range_404_on_older_quarter_aborts(tmp_path, monkeypatch):
+    monkeypatch.setattr(backfill_script, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(backfill_script.urllib.request, "urlopen", _raise_http(404))
+    # 2018q1 is definitely published: its 404 means a broken URL, never a
+    # silent skip that would produce an incomplete backfill with exit 0.
+    with pytest.raises(SystemExit) as excinfo:
+        backfill_script.download_range(["2018q1", "2018q2"])
+    assert backfill_script.ZIP_URL.format(quarter="2018q1") in str(excinfo.value)
+
+
+def test_download_range_non_404_error_aborts_even_on_newest(tmp_path, monkeypatch):
+    monkeypatch.setattr(backfill_script, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(backfill_script.urllib.request, "urlopen", _raise_http(500))
+    with pytest.raises(SystemExit) as excinfo:
+        backfill_script.download_range(["2026q2"])
+    assert backfill_script.ZIP_URL.format(quarter="2026q2") in str(excinfo.value)

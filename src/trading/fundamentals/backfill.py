@@ -52,6 +52,10 @@ def backfill_quarters(
     series_by_cik = compute_pit_series(facts)
     rows_appended = 0
     symbols_written: set[str] = set()
+    # Filed dates covered by SOME symbol interval, per cik: the remainder fell
+    # in an interval gap and reached no store (observability only -- "dropped"
+    # in the returned stats -- behavior is unchanged).
+    covered: dict[int, set] = {}
     for row in cik_map.itertuples():
         frame = series_by_cik.get(row.cik)
         if frame is None:
@@ -59,8 +63,15 @@ def backfill_quarters(
         window = interval_slice(frame, row.start, row.end)
         if window.empty:
             continue
+        covered.setdefault(row.cik, set()).update(window.index)
         added = store.append(row.symbol, window)
         if added:
             symbols_written.add(row.symbol)
             rows_appended += added
-    return {"filers": len(series_by_cik), "symbols": len(symbols_written), "rows": rows_appended}
+    dropped = sum(len(frame) - len(covered.get(cik, set())) for cik, frame in series_by_cik.items())
+    return {
+        "filers": len(series_by_cik),
+        "symbols": len(symbols_written),
+        "rows": rows_appended,
+        "dropped": dropped,
+    }

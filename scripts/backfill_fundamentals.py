@@ -4,7 +4,10 @@ build the per-symbol fundamentals store at [data] fundamentals_dir.
 
 Rerun-safe: ZIPs already on disk are not re-downloaded, and the store is
 append-only so reprocessing appends 0 rows. The in-progress quarter has no
-ZIP yet (404 -> warn + skip); the weekly companyfacts top-up covers it.
+ZIP yet (404 on the NEWEST quarter only -> warn + skip); the weekly
+companyfacts top-up covers it. A 404 on any OLDER quarter -- one SEC has
+definitely published -- means a broken URL, so it aborts nonzero instead of
+silently producing an incomplete backfill.
 
 Locked default span is 2018q1 (see plan); TTM needs 4 trailing quarters, so
 most metrics stay NaN/neutral until the FY-2018 10-K wave in early 2019.
@@ -36,7 +39,13 @@ ZIP_URL = "https://www.sec.gov/files/dera/data/financial-statement-data-sets/{qu
 REQUEST_SPACING_S = 0.11  # SEC ceiling is 10 req/s; stay under it
 
 
-def download(quarter: str) -> Path | None:
+def download(quarter: str, allow_missing: bool = False) -> Path | None:
+    """Fetch one quarterly ZIP into RAW_DIR (cached: on-disk files are never
+    re-downloaded). A 404 is legitimate ONLY for the newest quarter (SEC
+    publication lag; allow_missing=True): warn and skip. Any other 404 -- an
+    old, definitely-published quarter -- or any non-404 HTTP error means a
+    broken URL or server problem: abort nonzero with the URL rather than
+    silently producing an incomplete backfill."""
     dest = RAW_DIR / f"{quarter}.zip"
     if dest.exists():
         return dest
@@ -47,15 +56,26 @@ def download(quarter: str) -> Path | None:
         with urllib.request.urlopen(req, timeout=300) as resp:
             data = resp.read()
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        if exc.code == 404 and allow_missing:
             print(f"WARNING: {quarter}.zip not published yet; skipping (top-up covers it)")
             return None
-        raise
+        raise SystemExit(f"ERROR: HTTP {exc.code} downloading {url}") from exc
     tmp = dest.with_suffix(".zip.tmp")
     tmp.write_bytes(data)
     os.replace(tmp, dest)
     time.sleep(REQUEST_SPACING_S)
     return dest
+
+
+def download_range(quarters: list[str]) -> list[Path]:
+    """Download every quarter in order; only the NEWEST (last) quarter in the
+    range may be missing upstream (publication lag) and skip."""
+    zips: list[Path] = []
+    for quarter in quarters:
+        path = download(quarter, allow_missing=quarter == quarters[-1])
+        if path is not None:
+            zips.append(path)
+    return zips
 
 
 def main() -> None:
@@ -69,12 +89,12 @@ def main() -> None:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     quarters = quarter_range(args.from_quarter, last_complete_quarter(datetime.date.today()))
-    zips = [path for quarter in quarters if (path := download(quarter)) is not None]
+    zips = download_range(quarters)
     print(f"parsing {len(zips)} quarterly ZIPs for {len(set(cik_map['cik']))} CIKs ...")
     stats = backfill_quarters(zips, cik_map, store)
     print(
         f"done: {stats['filers']} filers -> {stats['symbols']} symbols, "
-        f"{stats['rows']} rows appended"
+        f"{stats['rows']} rows appended ({stats['dropped']} rows outside every symbol interval)"
     )
 
 
