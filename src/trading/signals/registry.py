@@ -1,69 +1,96 @@
-"""Ranker registry (spec: pluggable ranking strategies).
+"""Ranker registry (spec: pluggable ranking strategies), contract v2.
 
-A "ranker" is any callable matching compute_features' exact contract:
+A registered ranker is a RankerSpec whose fn matches:
 
-    ranker(bars: dict[str, pd.DataFrame], as_of: pd.Timestamp,
-           config: SignalConfig) -> pd.DataFrame
+    fn(bars: dict[str, pd.DataFrame], as_of: pd.Timestamp,
+       config: SignalConfig, fundamentals: dict[str, pd.DataFrame] | None
+       ) -> pd.DataFrame
 
 Input contract (what a ranker receives):
 
 - `bars` maps symbol -> OHLCV DataFrame with columns exactly
   [open, high, low, close, volume], indexed by a sorted tz-aware UTC
   DatetimeIndex normalized to the bar's date (the shape enforced by
-  trading.venues.base.validate_ohlcv, which every adapter's frames pass
-  through). Frames may extend PAST as_of: the caller does not pre-cut them.
+  trading.venues.base.validate_ohlcv). Frames may extend PAST as_of: the
+  caller does not pre-cut them.
 - `as_of` is a tz-aware UTC pd.Timestamp; momentum_v1 rejects a naive one.
+- `fundamentals` maps symbol -> per-symbol fundamentals frame indexed by
+  tz-aware UTC FILING dates (trading.fundamentals.store schema: price-free
+  primitives such as "gross_profitability", "ttm_net_income", "book_equity",
+  "shares_outstanding" -- a ranker reads only the columns it needs).
+  Price-dependent ratios are computed INSIDE the ranker from these
+  primitives plus bars. None (or a missing symbol) means "no fundamentals
+  known" -- a ranker must treat that as neutral, never crash. Like bars,
+  frames may extend past as_of; cutting to rows FILED at or before as_of is
+  the RANKER's responsibility (same structural no-lookahead rule as bars).
 
-Contract a registered ranker MUST guarantee (identical to the signal engine's
-existing guarantees -- see trading.signals.engine):
+Contract a registered ranker MUST guarantee (identical to the signal
+engine's existing guarantees -- see trading.signals.engine):
 
-- Purity: no I/O, no wall-clock reads. as_of is always an explicit parameter;
-  the only time input a ranker may act on is the one it is given.
-- Truncation to as_of is the RANKER's responsibility, not the caller's: it
-  must cut each symbol's frame to rows at or before as_of itself.
-  momentum_v1 (compute_features) performs that truncation as the first step
-  of its per-symbol loop, via `window = df.loc[:as_of]` -- the "structural
-  no-lookahead cut" in trading.signals.engine. The registry and its caller
-  (assemble_rankings) do not truncate on the ranker's behalf.
-- Column contract: the returned DataFrame is indexed by symbol and has
-  exactly the feature-percentile columns plus "composite" and
-  "raw_return_30d" (see trading.signals.engine.OUTPUT_COLUMNS). Symbols
-  without enough history to compute all features are simply omitted from
-  the index (not included with NaN rows).
-- NaN semantics: a symbol may still appear with a NaN in an individual
-  feature column (and therefore a NaN composite) when that one feature is
-  undefined for it (e.g. zero-volume breaking volume_surge) -- see
-  test_partial_nan_feature_gives_nan_composite_and_clean_cross_section in
-  tests/test_engine.py. NaN composites sort last in rank().
+- Purity: no I/O, no wall-clock reads; as_of is the only time input.
+- Truncation to as_of is the ranker's job for BOTH bars and fundamentals.
+- Column contract: the returned DataFrame is indexed by symbol and contains
+  the ranker's feature-percentile columns plus "composite" and
+  "raw_return_30d" (momentum_v1: trading.signals.engine.OUTPUT_COLUMNS;
+  quality_momentum_v1 adds "quality"; value_momentum_v1 adds
+  "earnings_yield" and "book_to_market"). Symbols without enough PRICE
+  history are omitted; missing FUNDAMENTALS never drop a symbol (neutral
+  instead).
+- NaN semantics: an individual NaN feature yields a NaN composite for that
+  symbol, which sorts last in rank().
 
-The shared rank() sort (stable, composite descending, alphabetical tie-break,
-NaNs last) is NOT part of a ranker's job: every ranker's output is fed
-through the same trading.signals.engine.rank() afterward, so ranker authors
-only need to produce the feature/composite table above.
+requires_fundamentals tells the I/O layers what to do BEFORE the ranker
+runs: pipeline/backtest load the fundamentals store and the live runner
+refreshes it only when the configured ranker sets this flag -- momentum_v1
+venues never touch fundamentals I/O at all.
 
-To add a new ranker: implement a callable with the signature above and
-register it here under a new key in RANKERS. Select it per-venue via the
-`ranker` key in a venue's [signals] TOML section; trading.config validates
-the name against this registry at config-load time.
+The shared rank() sort is NOT part of a ranker's job: every ranker's output
+feeds through trading.signals.engine.rank() afterward.
+
+To add a new ranker: implement a RankerFn and register a RankerSpec here
+under a new key. Select it per-venue via the `ranker` key in a venue's
+[signals] TOML section; trading.config validates the name at load time.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import pandas as pd
 
 from trading.config import SignalConfig
 from trading.signals.engine import compute_features
 
-Ranker = Callable[[dict[str, pd.DataFrame], pd.Timestamp, SignalConfig], pd.DataFrame]
+RankerFn = Callable[
+    [dict[str, pd.DataFrame], pd.Timestamp, SignalConfig, dict[str, pd.DataFrame] | None],
+    pd.DataFrame,
+]
 
-RANKERS: dict[str, Ranker] = {
-    "momentum_v1": compute_features,
+
+@dataclass(frozen=True)
+class RankerSpec:
+    fn: RankerFn
+    requires_fundamentals: bool
+
+
+def _momentum_v1(
+    bars: dict[str, pd.DataFrame],
+    as_of: pd.Timestamp,
+    config: SignalConfig,
+    fundamentals: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    """v2-contract adapter: momentum_v1 has no fundamentals input by design;
+    compute_features keeps its original 3-arg signature untouched."""
+    return compute_features(bars, as_of, config)
+
+
+RANKERS: dict[str, RankerSpec] = {
+    "momentum_v1": RankerSpec(_momentum_v1, requires_fundamentals=False),
 }
 
 
-def get_ranker(name: str) -> Ranker:
+def get_ranker(name: str) -> RankerSpec:
     try:
         return RANKERS[name]
     except KeyError:

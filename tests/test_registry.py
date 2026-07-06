@@ -4,7 +4,7 @@ import pytest
 
 from trading.config import SignalConfig
 from trading.signals.engine import compute_features
-from trading.signals.registry import RANKERS, get_ranker
+from trading.signals.registry import RANKERS, RankerSpec, get_ranker
 
 CONFIG = SignalConfig(
     momentum_windows=(5, 10, 20),
@@ -41,18 +41,23 @@ def test_get_ranker_unknown_name_raises_listing_known_names():
         get_ranker("bogus")
 
 
-def test_get_ranker_returns_registered_callable():
-    assert get_ranker("momentum_v1") is RANKERS["momentum_v1"]
+def test_get_ranker_returns_registered_spec():
+    spec = get_ranker("momentum_v1")
+    assert isinstance(spec, RankerSpec)
+    assert spec is RANKERS["momentum_v1"]
+    assert spec.requires_fundamentals is False
 
 
-def test_momentum_v1_output_matches_compute_features_exactly():
+def test_momentum_v1_ignores_fundamentals_and_matches_compute_features():
     bars = {
         "UP": _trending_bars(0.01),
         "FLAT": _trending_bars(0.0),
         "DOWN": _trending_bars(-0.01),
     }
     as_of = bars["UP"].index[-1]
-    ranker = get_ranker("momentum_v1")
-    via_registry = ranker(bars, as_of, CONFIG)
+    spec = get_ranker("momentum_v1")
+    with_none = spec.fn(bars, as_of, CONFIG, None)
+    with_junk = spec.fn(bars, as_of, CONFIG, {"UP": pd.DataFrame()})
     direct = compute_features(bars, as_of, CONFIG)
-    pd.testing.assert_frame_equal(via_registry, direct)
+    pd.testing.assert_frame_equal(with_none, direct)
+    pd.testing.assert_frame_equal(with_junk, direct)

@@ -95,6 +95,11 @@ backfill_exchange = ""
 backfill_page_limit = 0
 seam_max_gap_days = 0
 
+# M4 fundamentals overlay (used only when [signals] ranker requires it --
+# the default momentum_v1 never touches these). Weekly companyfacts top-up.
+fundamentals_dir = "data/fundamentals/equities"
+fundamentals_refresh_days = 7
+
 [backtest]  # spec: Backtesting & Validation
 start = 2018-01-01
 # Final holdout boundary: FIXED date (not rolling) so the untouched period is

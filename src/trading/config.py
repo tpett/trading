@@ -102,6 +102,16 @@ class DataConfig:
     # Max calendar-day hole tolerated at the backfill/Kraken seam; doubles as
     # the head tolerance when judging whether Kraken alone covers a request.
     seam_max_gap_days: int
+    # M4 fundamentals overlay. fundamentals_dir = "" means "this venue has no
+    # fundamentals" (crypto); a ranker that requires fundamentals refuses to
+    # load with it empty. refresh_days is the live top-up cadence -- data
+    # plumbing, NOT a tunable hyperparameter (the walk-forward surface stays
+    # entry_score_threshold x stop_atr_multiple only). Defaulted (like
+    # membership_exit_buffer_days) so frozen test-venue TOMLs -- notably
+    # tests/golden/golden.toml, which must stay byte-identical -- keep
+    # loading; both real venue TOMLs still set them explicitly.
+    fundamentals_dir: str = ""
+    fundamentals_refresh_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -157,7 +167,9 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
     # source of truth for the unknown-ranker message and known-names list.
     from trading.signals.registry import get_ranker
 
-    get_ranker(signals["ranker"])
+    spec = get_ranker(signals["ranker"])
+    if spec.requires_fundamentals and not raw["data"].get("fundamentals_dir"):
+        raise ValueError(f"ranker {signals['ranker']!r} requires [data] fundamentals_dir to be set")
     backtest = dict(raw["backtest"])
     backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
     backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])

@@ -95,6 +95,11 @@ backfill_page_limit = 300         # candles per page on the backfill exchange
 # tolerance absorbs isolated exchange-outage days.
 seam_max_gap_days = 3
 
+# No fundamentals concept for crypto; "" disables (a fundamentals-requiring
+# ranker then refuses to load for this venue).
+fundamentals_dir = ""
+fundamentals_refresh_days = 0
+
 [backtest]  # spec: Backtesting & Validation
 start = 2018-01-01
 holdout_start = 2026-01-05   # fixed boundary; see equities.toml note

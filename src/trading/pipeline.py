@@ -130,8 +130,8 @@ def assemble_rankings(
 
     as_of_ts = pd.Timestamp(as_of, tz="UTC")
     regime = compute_regime(benchmark_bars, as_of_ts, config.regime)
-    ranker = get_ranker(config.signals.ranker)
-    features = ranker(clean, as_of_ts, config.signals)
+    spec = get_ranker(config.signals.ranker)
+    features = spec.fn(clean, as_of_ts, config.signals, None)
     table = rank(features).copy()
 
     statuses = {i.symbol: i.status for i in infos}
