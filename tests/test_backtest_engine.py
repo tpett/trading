@@ -223,6 +223,55 @@ def test_point_in_time_member_with_late_data_degrades_coverage(tmp_path):
     assert all(s.skip_reason is None for s in late)
 
 
+def test_membership_exit_recycling_guard_truncates_closed_symbol_bars(tmp_path):
+    """A symbol whose membership closed mid-window may still have bars in
+    the cache reaching well past that close -- e.g. yfinance keeps serving
+    data under that ticker because an unrelated live company was later
+    assigned the same recycled symbol. prepare() must truncate such a
+    symbol's bars at (last closed interval end + membership_exit_buffer_days)
+    so no post-exit price ever reaches the simulator. A symbol with an
+    open-ended interval (still a current member) is left untouched -- even
+    when a DIFFERENT index's interval for it has closed (cross-index case:
+    e.g. left sp400 by moving up to the sp500)."""
+    closed_end = "2025-03-01"
+
+    def intervals(symbol: str) -> list[tuple[str, str]]:
+        if symbol == "AAA":
+            return [("2025-01-01", closed_end)]  # every interval closed: recycling risk
+        if symbol == "CCC":
+            # Closed in one index but open-ended in another (promotion):
+            # still a live, correctly-priced ticker -- must NOT be truncated.
+            return [("2025-01-01", closed_end), ("2025-01-01", "")]
+        return [("2025-01-01", "")]  # open-ended: current member
+
+    config = _with_benchmark(small_config(membership_exit_buffer_days=10))
+    adapter = FakeBacktestAdapter(_fixture_frames(), "BENCH", intervals=intervals)
+    cache = OhlcvCache(tmp_path / "cache", config.data.refetch_days)
+    prepared = prepare(config, adapter, cache, START, END)
+
+    # The buffer must be APPLIED, not just "some truncation happened": bars
+    # in (end, end+buffer] survive; anything past the buffer is gone. The
+    # fixture has daily bars, so with buffer=10 the last AAA bar is exactly
+    # end+10d and end+5d is still present.
+    assert prepared.bars["AAA"].index.max() == pd.Timestamp("2025-03-11", tz="UTC")
+    assert pd.Timestamp("2025-03-06", tz="UTC") in prepared.bars["AAA"].index
+    full_end = pd.Timestamp("2025-04-30", tz="UTC")  # last fixture bar
+    assert prepared.bars["BBB"].index.max() == full_end  # open-ended: untouched
+    assert prepared.bars["CCC"].index.max() == full_end  # cross-index open: untouched
+
+
+def test_membership_intervals_absent_leaves_bars_untouched(tmp_path):
+    """Adapters without membership_intervals (crypto; the golden fixture)
+    have no PIT interval concept -- the guard must no-op, not error. Same
+    fixture/frames as the plain _prepare() smoke test above, so if the guard
+    silently dropped data here, prepare()'s bars would shrink vs that
+    baseline; they must not."""
+    config, prepared = _prepare(tmp_path)  # FakeBacktestAdapter with no `intervals` fn
+    for frame in prepared.bars.values():
+        assert not frame.empty
+        assert frame.index.max() == pd.Timestamp("2025-04-30", tz="UTC")
+
+
 def test_crypto_results_carry_survivorship_caveat(tmp_path):
     config, prepared = _prepare(tmp_path)  # small_config is crypto-based
     result = replay(prepared, config)

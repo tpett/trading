@@ -38,6 +38,37 @@ class BacktestError(RuntimeError):
     pass
 
 
+def _truncate_for_membership_exit(
+    adapter: VenueAdapter, symbol: str, frame: pd.DataFrame, buffer_days: int
+) -> pd.DataFrame:
+    """Ticker-recycling guard (spec: survivorship). A symbol with NO
+    open-ended membership interval has left every index for good; if the
+    data source later serves a DIFFERENT company's prices under that same,
+    recycled ticker (e.g. equities: yfinance keeps a symbol "live" for
+    whoever holds it today), those post-exit prices must never reach the
+    simulator. Truncate at (latest closed interval end + buffer_days).
+
+    Symbols with an open-ended interval (still a current member of some
+    index) are returned untouched, as are symbols an adapter has no
+    membership_intervals opinion about (crypto; the golden fixture) --
+    optional duck-typed method, absent means "no PIT interval concept, do
+    not touch". The LIVE path never reaches this code at all: it calls
+    universe(as_of=today()), which already excludes anything not currently
+    listed, so there is nothing to truncate there (this guard is
+    prepare()-only, i.e. backtest-only).
+    """
+    get_intervals = getattr(adapter, "membership_intervals", None)
+    if get_intervals is None:
+        return frame
+    intervals = get_intervals(symbol)
+    if not intervals or any(end == "" for _, end in intervals):
+        return frame  # no info, or still open-ended: never truncate
+    cutoff = pd.Timestamp(max(end for _, end in intervals), tz="UTC") + pd.Timedelta(
+        buffer_days, unit="D"
+    )
+    return frame.loc[:cutoff]
+
+
 @dataclass(frozen=True)
 class SessionPlan:
     ts: pd.Timestamp
@@ -122,6 +153,10 @@ def prepare(
             frame = cache.fetch(symbol, warmup_start, end, adapter.fetch_ohlcv)
         except Exception:
             frame = pd.DataFrame()
+        if not frame.empty:
+            frame = _truncate_for_membership_exit(
+                adapter, symbol, frame, config.backtest.membership_exit_buffer_days
+            )
         if frame.empty:
             missing.append(symbol)  # survivorship gap: counted + annotated (spec)
         else:

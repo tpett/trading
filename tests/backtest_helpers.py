@@ -84,10 +84,16 @@ class FakeBacktestAdapter:
         frames: dict[str, pd.DataFrame],
         benchmark: str,
         members_on: Callable[[datetime.date], list[str]] | None = None,
+        intervals: Callable[[str], list[tuple[str, str]]] | None = None,
     ):
         self._frames = frames
         self._benchmark = benchmark
         self._members_on = members_on  # date -> list[str]; None = all non-benchmark symbols
+        # symbol -> [(start, end), ...]; None = no per-symbol data (every
+        # test that doesn't care about the recycling guard leaves this
+        # unset, and membership_intervals then reports "no info" for every
+        # symbol, which the guard treats as "never truncate").
+        self._intervals = intervals
 
     def universe(self, as_of: datetime.date) -> list[SymbolInfo]:
         if self._members_on is not None:
@@ -95,6 +101,9 @@ class FakeBacktestAdapter:
         else:
             names = [s for s in sorted(self._frames) if s != self._benchmark]
         return [SymbolInfo(symbol=s, status="tradable") for s in names]
+
+    def membership_intervals(self, symbol: str) -> list[tuple[str, str]]:
+        return self._intervals(symbol) if self._intervals is not None else []
 
     def constraints(self) -> VenueConstraints:
         return VenueConstraints(
