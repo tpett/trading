@@ -17,6 +17,7 @@ CONFIG = SignalConfig(
     rsi_window=14,
     mean_window=20,
     raw_return_days=30,
+    ranker="momentum_v1",
 )
 
 

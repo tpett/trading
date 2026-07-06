@@ -24,6 +24,7 @@ breakout_windows = [20, 60]
 rsi_window = 14
 mean_window = 20
 raw_return_days = 30
+ranker = "momentum_v1"          # key into trading.signals.registry.RANKERS
 
 [regime]
 sma_fast = 50

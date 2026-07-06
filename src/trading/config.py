@@ -44,6 +44,7 @@ class SignalConfig:
     rsi_window: int
     mean_window: int
     raw_return_days: int
+    ranker: str  # key into trading.signals.registry.RANKERS; validated at load time
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,17 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
     signals = dict(raw["signals"])
     signals["momentum_windows"] = tuple(signals["momentum_windows"])
     signals["breakout_windows"] = tuple(signals["breakout_windows"])
+    # Deferred import: trading.signals.registry imports trading.config (for
+    # the SignalConfig type it dispatches on), so importing it at module
+    # level here would be circular. Validating at load time (rather than at
+    # first pipeline run) is the point: a typo'd ranker name must fail fast.
+    from trading.signals.registry import RANKERS
+
+    if signals["ranker"] not in RANKERS:
+        known = ", ".join(sorted(RANKERS))
+        raise ValueError(
+            f"signals.ranker must be one of [{known}], got {signals['ranker']!r}"
+        )
     backtest = dict(raw["backtest"])
     backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
     backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])

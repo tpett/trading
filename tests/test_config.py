@@ -79,6 +79,21 @@ def test_invalid_exit_style_raises(tmp_path):
         load_venue_config("equities", tmp_path)
 
 
+def test_ranker_loaded_as_momentum_v1_by_default_in_real_configs():
+    for venue in ("equities", "crypto"):
+        config = load_venue_config(venue, Path("config"))
+        assert config.signals.ranker == "momentum_v1"
+
+
+def test_unknown_ranker_raises_at_load_time(tmp_path):
+    raw = (Path("config") / "equities.toml").read_text()
+    bad = raw.replace('ranker = "momentum_v1"', 'ranker = "bogus_ranker"')
+    assert bad != raw
+    (tmp_path / "equities.toml").write_text(bad)
+    with pytest.raises(ValueError, match="bogus_ranker"):
+        load_venue_config("equities", tmp_path)
+
+
 def test_backtest_config_loaded():
     for venue in ("equities", "crypto"):
         config = load_venue_config(venue, Path("config"))

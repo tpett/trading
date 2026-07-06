@@ -25,6 +25,7 @@ breakout_windows = [5, 8]
 rsi_window = 5
 mean_window = 5
 raw_return_days = 5
+ranker = "momentum_v1"
 
 [regime]
 sma_fast = 5

@@ -24,6 +24,7 @@ breakout_windows = [20, 60]     # spec: distance from 20/60-day highs
 rsi_window = 14                 # spec: RSI-14 stretch
 mean_window = 20                # spec: distance above 20-day mean
 raw_return_days = 30            # raw 30-day return (calendar), feeds M2 crypto fee gate
+ranker = "momentum_v1"          # key into trading.signals.registry.RANKERS
 
 [regime]
 sma_fast = 50
