@@ -120,6 +120,11 @@ skipped (exits are unaffected).
 ## Where things live
 
 - `config/<venue>.toml` — every tunable number (fees, windows, risk rules).
+  `[signals].ranker` selects the ranking strategy by name (default
+  `"momentum_v1"`), validated against the registry at config-load time. To
+  add a new ranker, register a callable matching `compute_features`'s
+  contract in `RANKERS` in `src/trading/signals/registry.py`, then reference
+  its key from a venue's TOML.
 - `state/<venue>/portfolio.json` — paper portfolio (gitignored; atomic
   writes). If it corrupts, the run refuses to act and notifies; recover with
   `trading run --venue V --restore-from-journal`.
