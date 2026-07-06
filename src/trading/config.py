@@ -170,6 +170,13 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
     spec = get_ranker(signals["ranker"])
     if spec.requires_fundamentals and not raw["data"].get("fundamentals_dir"):
         raise ValueError(f"ranker {signals['ranker']!r} requires [data] fundamentals_dir to be set")
+    if spec.requires_fundamentals and raw["data"].get("fundamentals_refresh_days", 0) < 1:
+        # 0 (the field's own default) means "never refresh", which for a
+        # fundamentals-requiring ranker is a misconfiguration -- not a valid
+        # cadence -- so it must fail at load, not silently never top up.
+        raise ValueError(
+            f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_days >= 1"
+        )
     backtest = dict(raw["backtest"])
     backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
     backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])

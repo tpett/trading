@@ -154,6 +154,15 @@ def test_fundamentals_requiring_ranker_with_empty_dir_fails_at_load(tmp_path):
         load_venue_config("equities", tmp_path)
 
 
+def test_fundamentals_requiring_ranker_with_zero_refresh_days_fails_at_load(tmp_path):
+    text = (Path("config") / "experiments" / "quality" / "equities.toml").read_text()
+    text = text.replace("fundamentals_refresh_days = 7", "fundamentals_refresh_days = 0")
+    assert "fundamentals_refresh_days = 0" in text
+    (tmp_path / "equities.toml").write_text(text)
+    with pytest.raises(ValueError, match="fundamentals_refresh_days"):
+        load_venue_config("equities", tmp_path)
+
+
 def test_quality_experiment_config_loads():
     config = load_venue_config("equities", Path("config") / "experiments" / "quality")
     assert config.signals.ranker == "quality_momentum_v1"
