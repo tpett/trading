@@ -13,7 +13,10 @@ rewrite when price history refreshes (adjusted closes rewrite on corporate
 actions; filings do not). A missing component (no filing yet, NaN primitive)
 or a non-positive market cap contributes the NEUTRAL 0.5 percentile -- the
 same policy as quality. A NEGATIVE ttm_net_income is a real (low) earnings
-yield, not missing data: loss-makers rank at the bottom, deliberately.
+yield, not missing data: loss-makers rank at the bottom, deliberately. The
+same rule holds for NEGATIVE book_equity (distressed or buyback-heavy
+filers): present-but-adverse is signal and ranks lowest; only missing is
+neutral.
 
 No new tunable parameters: the walk-forward surface stays exactly
 entry_score_threshold x stop_atr_multiple.

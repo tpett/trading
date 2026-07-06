@@ -104,6 +104,26 @@ def test_missing_components_and_bad_market_cap_are_neutral():
     assert out.loc["DOWN", "earnings_yield"] == 0.5
     assert out.loc["DOWN", "book_to_market"] == pytest.approx(1.0)
 
+    # Mirror: NaN BOOK EQUITY only -> book-to-market neutral, earnings yield
+    # still real (DOWN's cheap price makes it the highest E/Y of the three).
+    fundamentals["DOWN"] = _fund({"2025-11-10": (20.0, float("nan"), 100.0)})
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    assert out.loc["DOWN", "book_to_market"] == 0.5
+    assert out.loc["DOWN", "earnings_yield"] == pytest.approx(1.0)
+
+
+def test_negative_book_equity_ranks_low_not_neutral():
+    # A distressed/buyback-heavy filer can report NEGATIVE book equity. That
+    # is a REAL (adverse) value -- signal, not missing data -- and must rank
+    # at the bottom rather than being neutralized to 0.5.
+    fundamentals = {
+        "UP": _fund({"2025-11-10": (10.0, -50.0, 100.0)}),
+        "FLAT": _fund({"2025-11-10": (30.0, 40.0, 100.0)}),
+        "DOWN": _fund({"2025-11-10": (20.0, 90.0, 100.0)}),
+    }
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    assert out.loc["UP", "book_to_market"] == pytest.approx(1 / 3)
+
 
 def test_negative_earnings_rank_low_not_neutral():
     # A loss-maker has a REAL (negative) earnings yield -- that is signal,
