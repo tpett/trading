@@ -158,3 +158,9 @@ def test_quality_experiment_config_loads():
     config = load_venue_config("equities", Path("config") / "experiments" / "quality")
     assert config.signals.ranker == "quality_momentum_v1"
     assert config.data.fundamentals_dir == "data/fundamentals/equities"
+
+
+def test_value_experiment_config_loads():
+    config = load_venue_config("equities", Path("config") / "experiments" / "value")
+    assert config.signals.ranker == "value_momentum_v1"
+    assert config.data.fundamentals_dir == "data/fundamentals/equities"

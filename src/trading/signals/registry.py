@@ -62,6 +62,7 @@ import pandas as pd
 from trading.config import SignalConfig
 from trading.signals.engine import compute_features
 from trading.signals.quality import quality_momentum_v1
+from trading.signals.value import value_momentum_v1
 
 RankerFn = Callable[
     [dict[str, pd.DataFrame], pd.Timestamp, SignalConfig, dict[str, pd.DataFrame] | None],
@@ -89,6 +90,7 @@ def _momentum_v1(
 RANKERS: dict[str, RankerSpec] = {
     "momentum_v1": RankerSpec(_momentum_v1, requires_fundamentals=False),
     "quality_momentum_v1": RankerSpec(quality_momentum_v1, requires_fundamentals=True),
+    "value_momentum_v1": RankerSpec(value_momentum_v1, requires_fundamentals=True),
 }
 
 
