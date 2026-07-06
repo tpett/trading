@@ -316,14 +316,21 @@ def run_venue(
                 days = config.data.fundamentals_refresh_days
                 if last is None or (now.date() - last).days >= days:
                     symbols = [i.symbol for i in adapter.universe(now.date())]
-                    _, degraded = refresh_fundamentals(
+                    appended, degraded = refresh_fundamentals(
                         store,
                         load_cik_map(),
                         symbols,
                         now.date(),
                         budget_s=config.data.fundamentals_refresh_budget_s,
                     )
-                    store.mark_refreshed(now.date())
+                    # appended == 0 AND degraded means EVERY symbol failed (or
+                    # the budget tripped before the first one even started):
+                    # a total-failure week, not the partial-progress case the
+                    # comment above promises the marker for. Skip the write so
+                    # the next run retries immediately instead of waiting out
+                    # the rest of the cadence on stale data.
+                    if not (appended == 0 and degraded):
+                        store.mark_refreshed(now.date())
                     if degraded:
                         extra_warnings.append(
                             "fundamentals refresh degraded: some symbols kept stale values"

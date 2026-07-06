@@ -607,7 +607,27 @@ def test_quality_run_refreshes_once_then_respects_the_weekly_gate(tmp_path, monk
     assert len(calls) == 1
 
 
-def test_degraded_refresh_journals_a_warning_and_run_proceeds(tmp_path, monkeypatch):
+def test_partially_degraded_refresh_with_progress_advances_marker(tmp_path, monkeypatch):
+    # Some symbols failed (degraded=True) but at least one appended rows: a
+    # PARTIAL degradation still advances the marker -- the weekly cadence
+    # stands, and the next scheduled refresh (not tomorrow) retries the rest.
+    outcome, _ = _run_quality(tmp_path, monkeypatch, lambda *a, **k: (2, True))
+    assert outcome.status == "ok"
+    warnings = _last_run_event(tmp_path)["warnings"]
+    assert any(w.startswith("fundamentals refresh degraded") for w in warnings)
+
+    from trading.fundamentals.store import FundamentalsStore
+
+    assert FundamentalsStore(tmp_path / "fund").last_refresh() == NOW.date()
+
+
+def test_total_failure_degraded_refresh_does_not_advance_marker(tmp_path, monkeypatch):
+    # Zero rows appended AND degraded == every symbol failed (or the budget
+    # tripped before the first one started): a total-failure week, load-
+    # bearing distinct from the partial case above -- the marker must NOT
+    # advance, so the next run retries immediately instead of waiting out
+    # the rest of the cadence on stale data (same rationale as a raised
+    # exception, exercised below).
     outcome, _ = _run_quality(tmp_path, monkeypatch, lambda *a, **k: (0, True))
     assert outcome.status == "ok"
     warnings = _last_run_event(tmp_path)["warnings"]
@@ -615,9 +635,7 @@ def test_degraded_refresh_journals_a_warning_and_run_proceeds(tmp_path, monkeypa
 
     from trading.fundamentals.store import FundamentalsStore
 
-    # The load-bearing distinction from total failure: a PARTIAL degradation
-    # still advances the marker -- the weekly cadence stands.
-    assert FundamentalsStore(tmp_path / "fund").last_refresh() == NOW.date()
+    assert FundamentalsStore(tmp_path / "fund").last_refresh() is None
 
 
 def test_failed_refresh_is_fail_open_with_journaled_warning(tmp_path, monkeypatch):
