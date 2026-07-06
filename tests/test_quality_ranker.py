@@ -4,7 +4,7 @@ import pytest
 
 from trading.config import SignalConfig
 from trading.signals.engine import FEATURE_COLUMNS, compute_features
-from trading.signals.quality import OUTPUT_COLUMNS, quality_momentum_v1
+from trading.signals.quality import OUTPUT_COLUMNS, latest_filed_row, quality_momentum_v1
 from trading.signals.registry import get_ranker
 
 CONFIG = SignalConfig(
@@ -113,6 +113,33 @@ def test_step_function_uses_latest_value_filed_at_or_before_as_of():
     fundamentals["UP"] = _fund({"2026-06-01": 0.9})
     out = quality_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
     assert out.loc["UP", "quality"] == 0.5
+
+
+def test_latest_filed_row_boundary_is_inclusive_of_as_of():
+    frame = _fund({"2025-11-10": 0.7})
+    # Filed exactly ON as_of -> visible (pins <=, not <).
+    row = latest_filed_row(frame, pd.Timestamp("2025-11-10", tz="UTC"))
+    assert row is not None
+    assert row["gross_profitability"] == 0.7
+    # Same row, as_of one day earlier -> invisible.
+    assert latest_filed_row(frame, pd.Timestamp("2025-11-09", tz="UTC")) is None
+
+
+def test_quality_percentile_unchanged_by_adding_nan_peer():
+    fundamentals = {
+        "UP": _fund({"2025-11-10": 0.6}),
+        "FLAT": _fund({"2025-11-10": 0.2}),
+        "DOWN": _fund({"2025-11-10": 0.4}),
+    }
+    before = quality_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    # A 4th symbol with no visible fundamentals joins the universe: the
+    # defined symbols' percentiles must not dilute (rank skips NaN; NaN
+    # slots land on the neutral 0.5 via fillna, outside the rank pool).
+    bars = {**BARS, "EXTRA": _trending_bars(0.005)}
+    after = quality_momentum_v1(bars, AS_OF, CONFIG, fundamentals)
+    for symbol in BARS:
+        assert after.loc[symbol, "quality"] == before.loc[symbol, "quality"]
+    assert after.loc["EXTRA", "quality"] == 0.5
 
 
 def test_nan_latest_never_reaches_back_to_an_older_value():
