@@ -48,6 +48,45 @@ def test_universe_is_point_in_time(tmp_path):
     assert all(i.status == "tradable" for i in adapter.universe(datetime.date(2021, 1, 4)))
 
 
+MEMBERSHIP_CSV_WITH_SP400 = """# test fixture
+symbol,index,start,end
+AAA,sp500,2018-01-01,
+BBB,sp500,2018-01-01,2020-06-01
+CCC,ndx,2020-06-01,
+DDD,sp400,2018-01-01,
+"""
+
+
+def test_universe_excludes_sp400_by_default(tmp_path):
+    # Live/paper invariant: sp400 rows exist in the CSV, but the default
+    # config.universe.indices is ("sp500", "ndx") -- unchanged behavior.
+    adapter = _adapter_with(tmp_path, MEMBERSHIP_CSV_WITH_SP400)
+    symbols = {i.symbol for i in adapter.universe(datetime.date(2021, 1, 4))}
+    assert symbols == {"AAA", "CCC"}
+    assert "DDD" not in symbols
+
+
+def test_universe_includes_sp400_when_config_opts_in(tmp_path):
+    from dataclasses import replace
+
+    path = tmp_path / "membership.csv"
+    path.write_text(MEMBERSHIP_CSV_WITH_SP400)
+    config = replace(CONFIG, universe=replace(CONFIG.universe, indices=("sp500", "ndx", "sp400")))
+    adapter = EquitiesAdapter(config, membership_csv=path)
+    symbols = {i.symbol for i in adapter.universe(datetime.date(2021, 1, 4))}
+    assert symbols == {"AAA", "CCC", "DDD"}
+
+
+def test_membership_intervals_returns_all_indices_unfiltered(tmp_path):
+    # membership_intervals is index-agnostic by design (the recycling guard
+    # cares whether a ticker is a current member of ANYTHING, not just the
+    # indices this particular backtest opted into).
+    adapter = _adapter_with(tmp_path, MEMBERSHIP_CSV_WITH_SP400)
+    assert adapter.membership_intervals("DDD") == [("2018-01-01", "")]
+    assert adapter.membership_intervals("BBB") == [("2018-01-01", "2020-06-01")]
+    assert adapter.membership_intervals("ZZZ") == []
+
+
 def test_membership_interval_boundaries_start_inclusive_end_exclusive(tmp_path):
     adapter = _adapter_with(tmp_path, MEMBERSHIP_CSV)
     on_start = {i.symbol for i in adapter.universe(datetime.date(2020, 6, 1))}
@@ -70,6 +109,32 @@ def test_committed_membership_file_sanity():
     today = {i.symbol for i in adapter.universe(datetime.date(2026, 7, 1))}
     assert early != today
     assert len(early - today) > 20  # real churn: many 2018 members are gone
+    # sp400 rows exist in the committed CSV but are excluded by the default
+    # config -- live/paper universe is untouched by their addition.
+    assert not {i.symbol for i in adapter.universe(datetime.date(2026, 7, 1))} & {"CDK", "MDP"}
+
+
+def test_committed_membership_file_sp400_opt_in():
+    from dataclasses import replace
+
+    base = load_venue_config("equities", Path("config"))
+    sp400_only = replace(base, universe=replace(base.universe, indices=("sp400",)))
+    adapter = EquitiesAdapter(sp400_only)
+    for day, low, high in [
+        (datetime.date(2019, 6, 1), 380, 420),
+        (datetime.date(2022, 6, 1), 380, 420),
+        (datetime.date(2026, 7, 1), 380, 420),
+    ]:
+        count = len(adapter.universe(day))
+        assert low <= count <= high, f"{day}: {count} sp400 members"
+    # Spot-check anchors (scout-verified against the Wikipedia changes table):
+    # exact known removal dates, not just a plausible count.
+    before_cdk = {i.symbol for i in adapter.universe(datetime.date(2022, 7, 5))}
+    after_cdk = {i.symbol for i in adapter.universe(datetime.date(2022, 7, 6))}
+    assert "CDK" in before_cdk and "CDK" not in after_cdk
+    before_mdp = {i.symbol for i in adapter.universe(datetime.date(2020, 4, 26))}
+    after_mdp = {i.symbol for i in adapter.universe(datetime.date(2020, 4, 27))}
+    assert "MDP" in before_mdp and "MDP" not in after_mdp
 
 
 def test_constraints_come_from_config():

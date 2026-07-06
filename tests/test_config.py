@@ -92,3 +92,22 @@ def test_backtest_config_loaded():
         assert bt.stress_segments[0] == (datetime.date(2022, 1, 1), datetime.date(2022, 12, 31))
     assert load_venue_config("equities", Path("config")).backtest.periods_per_year == 252
     assert load_venue_config("crypto", Path("config")).backtest.periods_per_year == 365
+
+
+def test_universe_indices_default_to_live_sp500_and_ndx():
+    # Live/paper invariant: sp400 is backtest opt-in, never a default-config
+    # change (equities_membership.csv now also carries sp400 rows).
+    for venue in ("equities", "crypto"):
+        config = load_venue_config(venue, Path("config"))
+        assert config.universe.indices == ("sp500", "ndx")
+
+
+def test_universe_indices_overridable_via_config(tmp_path):
+    raw = (Path("config") / "equities.toml").read_text()
+    patched = raw.replace(
+        "point_in_time = true", 'point_in_time = true\nindices = ["sp500", "ndx", "sp400"]'
+    )
+    assert patched != raw
+    (tmp_path / "equities.toml").write_text(patched)
+    config = load_venue_config("equities", tmp_path)
+    assert config.universe.indices == ("sp500", "ndx", "sp400")

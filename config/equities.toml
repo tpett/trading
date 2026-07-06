@@ -13,6 +13,12 @@ trades_24_7 = false
 min_dollar_volume = 20000000.0  # entry-filter floor (M2 applies it; spec: config)
 point_in_time = true            # PIT membership intervals: a member missing data
                                 # is a data outage and degrades backtest coverage
+# indices: which columns of equities_membership.csv count as "in the
+# universe"; defaults (unset here) to ("sp500", "ndx") -- today's live/paper
+# behavior. The CSV also carries sp400 (S&P MidCap 400) rows; a backtest
+# experiment opts in by pointing --config-dir at a copy of this file with
+# `indices = ["sp500", "ndx", "sp400"]` added here. Never set it here: that
+# would change the live/paper universe.
 
 [signals]
 momentum_windows = [5, 20, 60]  # trading days (spec)

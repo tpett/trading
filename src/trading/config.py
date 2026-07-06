@@ -31,6 +31,12 @@ class UniverseConfig:
     # degrades backtest coverage. False when the universe is a today-snapshot
     # (crypto): listing is inferred from data availability instead.
     point_in_time: bool
+    # Which index columns of the equities membership CSV count as "in the
+    # universe" (the CSV also carries sp400 rows). Defaults to today's live
+    # behavior (sp500+ndx); sp400 is opt-in, added by a backtest experiment's
+    # config, never a live/paper change. Ignored by venues (crypto) whose
+    # universe() doesn't read that CSV.
+    indices: tuple[str, ...] = ("sp500", "ndx")
 
 
 @dataclass(frozen=True)
@@ -147,11 +153,14 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         raise ValueError(
             f"portfolio.exit_style must be 'frozen' or 'trailing', got {portfolio['exit_style']!r}"
         )
+    universe = dict(raw["universe"])
+    if "indices" in universe:
+        universe["indices"] = tuple(universe["indices"])
     return VenueConfig(
         name=raw["venue"]["name"],
         benchmark=raw["venue"]["benchmark"],
         costs=CostsConfig(**raw["costs"]),
-        universe=UniverseConfig(**raw["universe"]),
+        universe=UniverseConfig(**universe),
         signals=SignalConfig(**signals),
         regime=RegimeConfig(**raw["regime"]),
         portfolio=PortfolioConfig(**portfolio),
