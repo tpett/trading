@@ -158,3 +158,50 @@ def test_refresh_is_fail_open_per_symbol(tmp_path):
     )
     assert degraded is True  # BOOM failed -> degraded, run continues
     assert added == 4  # AAPL still refreshed; UNMAPPED silently skipped
+
+
+def test_refresh_stops_cleanly_once_the_budget_elapses(tmp_path, monkeypatch):
+    # A fake slow fetcher: each fetch call "takes" far longer than the
+    # budget, simulated by advancing a fake clock instead of really sleeping.
+    clock = {"t": 0.0}
+    monkeypatch.setattr("trading.fundamentals.companyfacts.time.monotonic", lambda: clock["t"])
+
+    store = FundamentalsStore(tmp_path)
+    cik_map = pd.DataFrame(
+        {
+            "symbol": ["A", "B", "C"],
+            "cik": [1, 2, 3],
+            "start": ["2017-01-01"] * 3,
+            "end": [""] * 3,
+        }
+    )
+    calls: list[str] = []
+
+    def slow_fetch(url: str) -> dict:
+        calls.append(url)
+        clock["t"] += 1000.0  # each fetch blows through any reasonable budget
+        return _payload()
+
+    added, degraded = refresh_fundamentals(
+        store,
+        cik_map,
+        ["A", "B", "C"],
+        as_of=datetime.date(2024, 3, 1),
+        fetch_json=slow_fetch,
+        budget_s=500.0,
+    )
+    assert degraded is True
+    assert len(calls) == 1  # only the first symbol got processed before the budget tripped
+    assert added == 4  # that symbol's rows are still kept -- not a partial write
+    assert store.read("A").empty is False
+    assert store.read("B").empty  # deferred to the next scheduled refresh
+    assert store.read("C").empty
+
+
+def test_refresh_default_budget_is_unbounded(tmp_path):
+    # No budget_s passed: existing callers/behavior are unaffected.
+    store = FundamentalsStore(tmp_path)
+    added, degraded = refresh_fundamentals(
+        store, CIK_MAP, ["AAPL"], as_of=datetime.date(2024, 3, 1), fetch_json=lambda url: _payload()
+    )
+    assert (added, degraded) == (4, False)

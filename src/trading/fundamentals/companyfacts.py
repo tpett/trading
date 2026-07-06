@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import time
 import urllib.request
 from collections.abc import Callable, Iterable
@@ -142,14 +143,29 @@ def refresh_fundamentals(
     symbols: Iterable[str],
     as_of: datetime.date,
     fetch_json: Callable[[str], dict] = _http_get_json,
+    budget_s: float = math.inf,
 ) -> tuple[int, bool]:
     """Top up `symbols` from companyfacts. Returns (rows appended, degraded).
     Unmapped symbols are skipped silently (no EDGAR ticker -> neutral rank);
-    per-symbol failures set degraded and never raise."""
+    per-symbol failures set degraded and never raise.
+
+    `budget_s` bounds the wall-clock time this call may spend fetching (data
+    plumbing, see DataConfig.fundamentals_refresh_budget_s -- NOT a tunable
+    hyperparameter): once the deadline passes, the loop stops cleanly BEFORE
+    starting the next symbol. Symbols already processed keep their appended
+    rows; the remainder is simply deferred to the next scheduled refresh
+    (append-only semantics make that safe -- nothing here is a partial
+    write). The call returns degraded=True in that case, exactly like a
+    per-symbol fetch failure, so the runner's fail-open handling and marker
+    semantics apply unchanged."""
     appended = 0
     degraded = False
+    deadline = time.monotonic() + budget_s
     series_by_cik: dict[int, pd.DataFrame] = {}
     for symbol in symbols:
+        if time.monotonic() >= deadline:
+            degraded = True  # budget exceeded: remainder deferred to the next run
+            break
         cik = cik_for(cik_map, symbol, as_of)
         if cik is None:
             continue

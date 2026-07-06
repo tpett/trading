@@ -112,6 +112,13 @@ class DataConfig:
     # loading; both real venue TOMLs still set them explicitly.
     fundamentals_dir: str = ""
     fundamentals_refresh_days: int = 0
+    # Wall-clock ceiling (seconds) on one weekly refresh_fundamentals call:
+    # data plumbing, same non-tunable status as refresh_days. A ~1,100-cik
+    # companyfacts refresh over a slow/degraded network could otherwise run
+    # long enough to threaten the run's own cadence; refresh_fundamentals
+    # stops cleanly once this elapses, keeping symbols already processed and
+    # deferring the remainder to next run (see trading.runner).
+    fundamentals_refresh_budget_s: int = 900
 
 
 @dataclass(frozen=True)

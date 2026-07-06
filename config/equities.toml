@@ -99,6 +99,7 @@ seam_max_gap_days = 0
 # the default momentum_v1 never touches these). Weekly companyfacts top-up.
 fundamentals_dir = "data/fundamentals/equities"
 fundamentals_refresh_days = 7
+fundamentals_refresh_budget_s = 900  # 15 min ceiling on one weekly refresh call
 
 [backtest]  # spec: Backtesting & Validation
 start = 2018-01-01

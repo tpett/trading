@@ -99,6 +99,7 @@ seam_max_gap_days = 3
 # ranker then refuses to load for this venue).
 fundamentals_dir = ""
 fundamentals_refresh_days = 0
+fundamentals_refresh_budget_s = 0  # never exercised: no fundamentals-requiring ranker here
 
 [backtest]  # spec: Backtesting & Validation
 start = 2018-01-01

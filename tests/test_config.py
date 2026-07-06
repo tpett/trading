@@ -83,9 +83,11 @@ def test_fundamentals_data_keys_load_for_both_venues():
     eq = load_venue_config("equities", Path("config"))
     assert eq.data.fundamentals_dir == "data/fundamentals/equities"
     assert eq.data.fundamentals_refresh_days == 7
+    assert eq.data.fundamentals_refresh_budget_s == 900
     cr = load_venue_config("crypto", Path("config"))
     assert cr.data.fundamentals_dir == ""  # no fundamentals concept for crypto
     assert cr.data.fundamentals_refresh_days == 0
+    assert cr.data.fundamentals_refresh_budget_s == 0
 
 
 def test_ranker_loaded_as_momentum_v1_by_default_in_real_configs():

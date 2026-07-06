@@ -299,6 +299,15 @@ def run_venue(
         # separate from build_rankings' own (its signature owns that call);
         # sharing one fetch would mean restructuring build_rankings, not
         # worth it for a weekly, cached-cheap lookup.
+        #
+        # A symbol's FIRST refresh (empty store -- e.g. newly added to the
+        # universe) pulls its ENTIRE companyfacts history in one call, not
+        # just the past week: a one-time row surge relative to the steady-
+        # state weekly top-up, which only adds the latest filing per symbol.
+        # fundamentals_refresh_budget_s (data plumbing, not a tunable) caps
+        # how long the whole refresh_fundamentals call may run wall-clock;
+        # once exceeded it stops cleanly and reports degraded=True, same as
+        # a per-symbol fetch failure.
         extra_warnings: list[str] = []
         if get_ranker(config.signals.ranker).requires_fundamentals:
             try:
@@ -307,7 +316,13 @@ def run_venue(
                 days = config.data.fundamentals_refresh_days
                 if last is None or (now.date() - last).days >= days:
                     symbols = [i.symbol for i in adapter.universe(now.date())]
-                    _, degraded = refresh_fundamentals(store, load_cik_map(), symbols, now.date())
+                    _, degraded = refresh_fundamentals(
+                        store,
+                        load_cik_map(),
+                        symbols,
+                        now.date(),
+                        budget_s=config.data.fundamentals_refresh_budget_s,
+                    )
                     store.mark_refreshed(now.date())
                     if degraded:
                         extra_warnings.append(
