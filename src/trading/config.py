@@ -184,6 +184,14 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         raise ValueError(
             f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_days >= 1"
         )
+    if spec.requires_fundamentals and raw["data"].get("fundamentals_refresh_budget_s", 0) < 1:
+        # Same misconfiguration shape as refresh_days above: 0 (the field's
+        # own default) means "no wall-clock budget for a refresh", which for
+        # a fundamentals-requiring ranker would let refresh_fundamentals stop
+        # before doing any work -- fail at load, not silently at runtime.
+        raise ValueError(
+            f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_budget_s >= 1"
+        )
     backtest = dict(raw["backtest"])
     backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
     backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])

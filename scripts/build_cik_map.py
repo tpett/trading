@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trading.fundamentals.companyfacts import COMPANYFACTS_URL, _http_get_json
+from trading.fundamentals.companyfacts import COMPANYFACTS_URL, http_get_json
 
 ROOT = Path(__file__).resolve().parent.parent
 MEMBERSHIP = ROOT / "src" / "trading" / "venues" / "universes" / "equities_membership.csv"
@@ -179,7 +179,7 @@ def validate(rows: list[tuple[str, int, str, str]], current_members: set[str]) -
 def check_identity_mismatches(
     rows: list[tuple[str, int, str, str]],
     current_tickers_raw: dict[str, dict],
-    fetch_json: Callable[[str], dict] = _http_get_json,
+    fetch_json: Callable[[str], dict] = http_get_json,
 ) -> list[dict[str, object]]:
     """Heuristic, report-only identity audit (recycling defenses, part b):
     the zero-filing reconciliation audit (scripts/verify_fundamentals.py)

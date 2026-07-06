@@ -22,10 +22,20 @@ network round trip) but is no longer what `scripts/backfill_fundamentals.py`
 runs by default. All quarters are parsed together so TTM windows can span
 quarter boundaries; both paths write through the SAME append-only store, so
 reruns of either are idempotent (rows already visible are never rewritten) --
-which is also why a source-switching rebuild MUST start from an EMPTY store:
+which is also why a source-switching rebuild MUST never mix regimes:
 append-only semantics would otherwise silently keep whatever (possibly
 NaN-shares) rows a prior run already wrote for a given filed date instead of
-replacing them (see scripts/backfill_fundamentals.py's empty-store guard).
+replacing them. The guard is bidirectional but asymmetric, because only one
+direction has a natural trigger: companyfacts (the primary path) REFUSES to
+run against any non-empty store (scripts/backfill_fundamentals.py's
+empty-store guard), but zips is deliberately rerun-safe against whatever
+store already exists, so it has no emptiness condition of its own to check.
+The reverse direction -- `--source zips` appending NaN-shares rows on top of
+a companyfacts-built store, for any CIK the companyfacts run's per-cik fetch
+failed on -- is instead caught by a `.source` marker file written into the
+store root recording which source built it; `--source zips` reads that
+marker and refuses when it says "companyfacts" (see scripts/backfill_
+fundamentals.py's marker guard).
 """
 
 from __future__ import annotations

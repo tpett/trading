@@ -258,6 +258,48 @@ def test_ensure_empty_for_rebuild_passes_when_store_is_empty(tmp_path):
     backfill_script._ensure_empty_for_rebuild(tmp_path)  # still no raise: only *.parquet counts
 
 
+def test_ensure_zips_allowed_refuses_when_marker_says_companyfacts(tmp_path):
+    (tmp_path / backfill_script.SOURCE_MARKER).write_text("companyfacts")
+    with pytest.raises(SystemExit, match="companyfacts"):
+        backfill_script._ensure_zips_allowed(tmp_path)
+
+
+def test_ensure_zips_allowed_proceeds_with_no_marker_or_its_own_marker(tmp_path):
+    backfill_script._ensure_zips_allowed(tmp_path)  # no marker yet: no raise
+    (tmp_path / backfill_script.SOURCE_MARKER).write_text("zips")
+    backfill_script._ensure_zips_allowed(tmp_path)  # its own marker: still no raise
+
+
+def test_companyfacts_backfill_writes_source_marker(tmp_path):
+    # Same shape as scripts/backfill_fundamentals.py's companyfacts branch:
+    # empty-store guard, then the backfill itself, then the marker write --
+    # all against tmp store fixtures, no network.
+    store_root = tmp_path / "store"
+    backfill_script._ensure_empty_for_rebuild(store_root)
+    store = FundamentalsStore(store_root)
+    payloads = {
+        1326801: _cf_payload(10.0, 4.0, 90.0, adsh="a-01", filed="2023-05-10"),
+        555: _cf_payload(20.0, 8.0, 190.0, adsh="b-01", filed="2023-06-01"),
+    }
+
+    def fetch(url: str) -> dict:
+        cik = int(url.rsplit("CIK", 1)[1].split(".")[0])
+        return payloads[cik]
+
+    backfill_from_companyfacts(CIK_MAP, store, fetch_json=fetch)
+    backfill_script._write_source_marker(store_root, "companyfacts")
+    assert (store_root / backfill_script.SOURCE_MARKER).read_text() == "companyfacts"
+    # A stale marker from a prior source is overwritten, not left in place.
+    backfill_script._write_source_marker(store_root, "companyfacts")
+    assert (store_root / backfill_script.SOURCE_MARKER).read_text() == "companyfacts"
+
+
+def test_write_source_marker_overwrites_stale_marker(tmp_path):
+    (tmp_path / backfill_script.SOURCE_MARKER).write_text("zips")
+    backfill_script._write_source_marker(tmp_path, "companyfacts")
+    assert (tmp_path / backfill_script.SOURCE_MARKER).read_text() == "companyfacts"
+
+
 def test_quarter_range_and_last_complete_quarter():
     assert quarter_range("2018q1", "2018q4") == ["2018q1", "2018q2", "2018q3", "2018q4"]
     assert quarter_range("2018q3", "2019q2") == ["2018q3", "2018q4", "2019q1", "2019q2"]

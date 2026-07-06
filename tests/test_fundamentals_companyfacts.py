@@ -2,7 +2,12 @@ import datetime
 
 import pandas as pd
 
-from trading.fundamentals.companyfacts import facts_from_companyfacts, refresh_fundamentals
+from trading.fundamentals.companyfacts import (
+    _http_get_json,
+    facts_from_companyfacts,
+    http_get_json,
+    refresh_fundamentals,
+)
 from trading.fundamentals.store import FundamentalsStore
 
 CIK = 320193
@@ -80,6 +85,12 @@ def _payload():
             },
         }
     }
+
+
+def test_http_get_json_public_alias_is_the_same_function():
+    # scripts/build_cik_map.py imports the public name across the module
+    # boundary; it must stay the identical callable, not a copy.
+    assert http_get_json is _http_get_json
 
 
 def test_normalizes_to_own_period_facts_only():

@@ -62,6 +62,11 @@ def _http_get_json(url: str) -> dict:
     return payload
 
 
+# Public alias for callers outside this package (e.g. scripts/build_cik_map.py):
+# same function, just not underscore-private across a module boundary.
+http_get_json = _http_get_json
+
+
 def facts_from_companyfacts(payload: dict, cik: int) -> pd.DataFrame:
     """companyfacts JSON -> the normalized facts table (edgar.FACT_COLUMNS)."""
     taxonomies = payload.get("facts", {})

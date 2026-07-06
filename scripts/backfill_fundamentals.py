@@ -27,7 +27,13 @@ Two sources, selected by --source (default: companyfacts):
   incomplete backfill. Locked default span is 2018q1 (see plan); TTM needs
   4 trailing quarters, so most metrics stay NaN/neutral until the FY-2018
   10-K wave in early 2019. Pass --from-quarter 2017q1 to fill that warm-up
-  deliberately.
+  deliberately. Unlike companyfacts, this path has no empty-store trigger of
+  its own (it is deliberately rerun-safe against whatever store already
+  exists) -- so the reverse mixing direction (running --source zips on top
+  of a companyfacts-built store, silently appending NaN-shares rows for any
+  CIK the companyfacts run's per-cik fetch failed on) is instead guarded by
+  a [data] fundamentals_dir/.source marker file: it REFUSES (naming the
+  marker) when the marker says the store was built by companyfacts.
 
 Usage: uv run python scripts/build_cik_map.py                     (first, once)
        uv run python scripts/backfill_fundamentals.py              (companyfacts, default)
@@ -60,6 +66,7 @@ RAW_DIR = ROOT / "data" / "edgar-raw"
 ZIP_URL = "https://www.sec.gov/files/dera/data/financial-statement-data-sets/{quarter}.zip"
 REQUEST_SPACING_S = 0.11  # SEC ceiling is 10 req/s; stay under it
 PROGRESS_EVERY = 50  # print a progress line every N cik fetches (companyfacts source)
+SOURCE_MARKER = ".source"  # records which --source built [data] fundamentals_dir
 
 
 def download(quarter: str, allow_missing: bool = False) -> Path | None:
@@ -121,6 +128,49 @@ def _ensure_empty_for_rebuild(store_root: Path) -> None:
         )
 
 
+def _read_source_marker(store_root: Path) -> str | None:
+    """Which `--source` last (re)built `store_root`, if any run has recorded
+    one yet (older stores, or a store wiped before this guard existed, have
+    no marker)."""
+    path = store_root / SOURCE_MARKER
+    if not path.exists():
+        return None
+    return path.read_text().strip()
+
+
+def _write_source_marker(store_root: Path, source: str) -> None:
+    """Record which `--source` built `store_root`. Atomic tmp+os.replace,
+    same pattern as FundamentalsStore.mark_refreshed: always overwrite rather
+    than check-then-skip, so a companyfacts rebuild (which _ensure_empty_
+    for_rebuild has just guaranteed starts from a truly empty store) always
+    leaves the marker correctly saying "companyfacts", even if a stale marker
+    from a prior source happened to survive alongside deleted *.parquet
+    files."""
+    path = store_root / SOURCE_MARKER
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(source)
+    os.replace(tmp, path)
+
+
+def _ensure_zips_allowed(store_root: Path) -> None:
+    """The mirror image of _ensure_empty_for_rebuild: --source zips has no
+    empty-store trigger of its own (it is deliberately rerun-safe against
+    whatever store already exists), so it relies on the .source marker
+    instead -- refuse loudly if a companyfacts rebuild already owns this
+    store, rather than silently appending NaN shares_outstanding rows for
+    any CIK that rebuild's per-cik fetch failed on."""
+    marker = _read_source_marker(store_root)
+    if marker == "companyfacts":
+        raise SystemExit(
+            f"ERROR: {store_root} was built with --source companyfacts (its "
+            f"{SOURCE_MARKER} marker file says so). Running --source zips on top "
+            "would silently append NaN shares_outstanding rows for any CIK the "
+            "companyfacts run's per-cik fetch failed on, mixing source regimes. "
+            "Delete the directory's contents (including the marker) first, then "
+            "rerun with --source zips if that is really what you want."
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -150,18 +200,21 @@ def main() -> None:
                 print(f"  {done}/{total} CIKs fetched")
 
         stats = backfill_from_companyfacts(cik_map, store, on_progress=progress)
+        _write_source_marker(store_root, "companyfacts")
         print(
             f"done: {stats['filers']} filers -> {stats['symbols']} symbols, "
             f"{stats['rows']} rows appended ({stats['dropped']} rows outside every symbol "
             f"interval, {stats['failed']} CIK fetch failures)"
         )
     else:
+        _ensure_zips_allowed(store_root)
         store = FundamentalsStore(store_root)
         RAW_DIR.mkdir(parents=True, exist_ok=True)
         quarters = quarter_range(args.from_quarter, last_complete_quarter(datetime.date.today()))
         zips = download_range(quarters)
         print(f"parsing {len(zips)} quarterly ZIPs for {len(set(cik_map['cik']))} CIKs ...")
         stats = backfill_quarters(zips, cik_map, store)
+        _write_source_marker(store_root, "zips")
         print(
             f"done: {stats['filers']} filers -> {stats['symbols']} symbols, "
             f"{stats['rows']} rows appended ({stats['dropped']} rows outside every symbol interval)"

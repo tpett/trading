@@ -165,6 +165,15 @@ def test_fundamentals_requiring_ranker_with_zero_refresh_days_fails_at_load(tmp_
         load_venue_config("equities", tmp_path)
 
 
+def test_fundamentals_requiring_ranker_with_zero_refresh_budget_fails_at_load(tmp_path):
+    text = (Path("config") / "experiments" / "quality" / "equities.toml").read_text()
+    text = text.replace("fundamentals_refresh_budget_s = 900", "fundamentals_refresh_budget_s = 0")
+    assert "fundamentals_refresh_budget_s = 0" in text
+    (tmp_path / "equities.toml").write_text(text)
+    with pytest.raises(ValueError, match="fundamentals_refresh_budget_s"):
+        load_venue_config("equities", tmp_path)
+
+
 def test_quality_experiment_config_loads():
     config = load_venue_config("equities", Path("config") / "experiments" / "quality")
     assert config.signals.ranker == "quality_momentum_v1"
