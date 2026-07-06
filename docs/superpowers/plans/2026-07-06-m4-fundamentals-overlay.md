@@ -1,10 +1,10 @@
-# M4: Point-in-Time Fundamentals (Quality) Overlay Implementation Plan
+# M4: Point-in-Time Fundamentals (Quality + Value) Overlay Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A point-in-time gross-profitability overlay sourced from SEC EDGAR XBRL data (quarterly Financial Statement Data Set ZIPs for 2018q1→present backfill + the companyfacts API for current-quarter top-up), feeding a new opt-in `quality_momentum_v1` ranker: the six momentum_v1 features plus a 7th cross-sectional gross-profitability percentile, equal-weighted over 7 — with live defaults, the golden backtest, and the two-knob tunable surface all untouched.
+**Goal:** A point-in-time fundamentals overlay sourced from SEC EDGAR XBRL data (quarterly Financial Statement Data Set ZIPs for 2018q1→present backfill + the companyfacts API for current-quarter top-up), carrying QUALITY and VALUE primitives (gross profitability; TTM net income, book equity, shares outstanding) through one pipeline and feeding two new opt-in rankers — `quality_momentum_v1` (six momentum_v1 features + a gross-profitability percentile, equal weight over 7) and `value_momentum_v1` (six momentum_v1 features + earnings-yield and book-to-market percentiles, equal weight over 8) — with live defaults, the golden backtest, and the two-knob tunable surface all untouched.
 
-**Architecture:** A new `trading.fundamentals` package with a pure parsing/compute core (quarterly-ZIP facts parser + companyfacts normalizer → one shared normalized facts table → one shared PIT series computation) and an append-only per-symbol parquet store keyed by FILING date (fundamentals history is immutable — no trailing refetch, unlike `OhlcvCache`). A committed CIK↔symbol point-in-time interval map attaches per-CIK series to ticker symbols. The ranker registry moves to a v2 contract (`RankerSpec`: a 4-arg callable + a `requires_fundamentals` flag); the fundamentals dict threads through `assemble_rankings` and backtest `prepare()` with the same as-of discipline as bars, and the live runner refreshes the store weekly (fail-open, journaled warning, earnings pattern) only when the configured ranker requires it.
+**Architecture:** A new `trading.fundamentals` package with a pure parsing/compute core (quarterly-ZIP facts parser + companyfacts normalizer → one shared normalized facts table → one shared PIT series computation) and an append-only per-symbol parquet store keyed by FILING date (fundamentals history is immutable — no trailing refetch, unlike `OhlcvCache`). The store is deliberately PRICE-FREE: it holds primitives only (gross profitability, TTM net income, book equity, shares outstanding); price-dependent ratios (earnings yield, book-to-market) are computed inside the ranker at ranking time, so fundamentals parquets never rewrite when adjusted price history refreshes. A committed CIK↔symbol point-in-time interval map attaches per-CIK series to ticker symbols. The ranker registry moves to a v2 contract (`RankerSpec`: a 4-arg callable + a `requires_fundamentals` flag); the fundamentals dict threads through `assemble_rankings` and backtest `prepare()` with the same as-of discipline as bars, and the live runner refreshes the store weekly (fail-open, journaled warning, earnings pattern) only when the configured ranker requires it.
 
 **Tech Stack:** Python 3.12, uv, pandas + pyarrow (pinned), stdlib `urllib`/`zipfile`/`json` for SEC I/O — **no new runtime dependencies**. pytest (warnings-as-errors), ruff.
 
@@ -15,12 +15,12 @@ From the locked M4 decisions. Every task's requirements implicitly include this 
 - Repo root for all commands and relative paths: `/Users/travis/Source/personal/trading/worktrees/fundamentals` (git worktree, branch `tpett/ai/fundamentals`).
 - Python 3.12, uv (`uv sync`, `uv run ...`). Before every commit: `uv run ruff check . && uv run ruff format .` and the affected tests. pytest runs with warnings-as-errors.
 - Baseline before starting: 334 tests green (`uv run pytest -q`), ruff clean.
-- **PIT discipline (non-negotiable):** a value becomes visible at its FILING date, never its fiscal-period date; per (cik, fiscal period) only the ORIGINAL (earliest-filed, tie-break lowest accession) filing's values are used — later amendments/restatements never rewrite history; provenance columns (`adsh`, tags used, `period`, `form`) on every stored row; regression coverage against restatements (synthetic unit test + a real-data invariant check in Task 11).
+- **PIT discipline (non-negotiable):** a value becomes visible at its FILING date, never its fiscal-period date; per (cik, fiscal period) only the ORIGINAL (earliest-filed, tie-break lowest accession) filing's values are used — later amendments/restatements never rewrite history; provenance columns (`adsh`, tags used, `period`, `form`) on every stored row; regression coverage against restatements (synthetic unit test + a real-data invariant check in Task 12).
 - **SEC access policy (mandatory):** User-Agent `trading-system travis@launchsupply.com` on every request; stay under the 10 req/s ceiling. Raw ZIPs cached under `data/edgar-raw/` (already gitignored via `/data/`).
-- **Metric v1 (locked):** gross profitability = trailing-4-quarter (Revenue − COGS) / latest Assets. Tag fallback chains exactly: Revenue `RevenueFromContractWithCustomerExcludingAssessedTax` → `Revenues` → `RevenueFromContractWithCustomerIncludingAssessedTax`; COGS `CostOfGoodsAndServicesSold` → `CostOfRevenue` → `CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization`; Assets `Assets`. Consolidated rows only (empty `segments`/`coreg`). Incomplete TTM → NaN.
-- **Ranker (locked):** `quality_momentum_v1` = six momentum_v1 features + gross-profitability cross-sectional percentile (forward-filled step function as-of the session); NaN quality contributes a NEUTRAL 0.5 percentile; composite = equal weight over 7. **NO new tunable parameters** — the walk-forward tunable surface stays exactly `entry_score_threshold` × `stop_atr_multiple`.
-- **Live defaults unchanged:** both venue TOMLs keep `ranker = "momentum_v1"`; `quality_momentum_v1` is experiment-config opt-in (the sp400 `--config-dir` pattern). The golden backtest fixture and its expected output are untouched.
-- Storage: per-symbol parquet at `data/fundamentals/equities/SYMBOL.parquet`, UTC DatetimeIndex = FILED dates, metric + provenance columns, append-only semantics with atomic writes (tmp + `os.replace`).
+- **Metrics (locked):** gross profitability = trailing-4-quarter (Revenue − COGS) / latest Assets; TTM net income (same trailing-4-quarter mechanics); book equity and shares outstanding as latest-instant values. Tag fallback chains exactly: Revenue `RevenueFromContractWithCustomerExcludingAssessedTax` → `Revenues` → `RevenueFromContractWithCustomerIncludingAssessedTax`; COGS `CostOfGoodsAndServicesSold` → `CostOfRevenue` → `CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization`; Assets `Assets`; Net income `NetIncomeLoss`; Equity `StockholdersEquity` → `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest`; Shares `dei:EntityCommonStockSharesOutstanding` → `CommonStockSharesOutstanding`. Consolidated rows only (empty `segments`/`coreg`). Incomplete TTM → NaN.
+- **Rankers (locked):** `quality_momentum_v1` = six momentum_v1 features + gross-profitability cross-sectional percentile, composite equal weight over 7. `value_momentum_v1` = six momentum_v1 features + earnings-yield percentile + book-to-market percentile, composite equal weight over 8; both ratios computed AT RANKING TIME (`market_cap` = latest-filed shares × last close as-of; `earnings_yield` = TTM net income / market_cap; `book_to_market` = book equity / market_cap). Fundamentals values are forward-filled step functions on FILING dates as-of the session; NaN (missing component, or market_cap ≤ 0) contributes a NEUTRAL 0.5 percentile. **NO new tunable parameters** — the walk-forward tunable surface stays exactly `entry_score_threshold` × `stop_atr_multiple`.
+- **Live defaults unchanged:** both venue TOMLs keep `ranker = "momentum_v1"`; `quality_momentum_v1` and `value_momentum_v1` are experiment-config opt-in (the sp400 `--config-dir` pattern). The golden backtest fixture and its expected output are untouched.
+- Storage: per-symbol parquet at `data/fundamentals/equities/SYMBOL.parquet`, UTC DatetimeIndex = FILED dates, PRICE-FREE primitive columns (`gross_profitability`, `ttm_net_income`, `book_equity`, `shares_outstanding`) + provenance, append-only semantics with atomic writes (tmp + `os.replace`). Ratios never enter the store.
 - Pure modules stay pure: parsing/metrics/ranker code does no I/O and reads no clock. Network touchpoints are isolated single functions (monkeypatch pattern, like `_yf_download`).
 - All timestamps UTC. Every new number lives in TOML or a module constant with a rationale comment — never a magic literal.
 - Commit after every task, one logical change per commit, message tagged `[AI]`, with footer:
@@ -35,7 +35,7 @@ From the locked M4 decisions. Every task's requirements implicitly include this 
 ```
 src/trading/fundamentals/__init__.py       NEW: empty package marker
 src/trading/fundamentals/edgar.py          NEW: quarterly-ZIP sub/num parser -> normalized facts table; tag chains; USER_AGENT
-src/trading/fundamentals/metrics.py        NEW: PIT gross-profitability series (original-filing dedup, Q4 derivation, TTM)
+src/trading/fundamentals/metrics.py        NEW: PIT series — gross profitability + TTM net income + book equity + shares (original-filing dedup, Q4 derivation, TTM)
 src/trading/fundamentals/store.py          NEW: FundamentalsStore (append-only per-symbol parquet, refresh marker)
 src/trading/fundamentals/cik_map.py        NEW: loader/lookup for the committed CIK<->symbol interval map
 src/trading/fundamentals/cik_map.csv       NEW: committed artifact (generated by scripts/build_cik_map.py)
@@ -43,18 +43,20 @@ src/trading/fundamentals/backfill.py       NEW: quarter enumeration + ZIPs -> st
 src/trading/fundamentals/companyfacts.py   NEW: companyfacts JSON -> facts table; weekly refresh (fail-open)
 scripts/build_cik_map.py                   NEW: builds cik_map.csv (company_tickers.json + RENAMES + membership CSV)
 scripts/backfill_fundamentals.py           NEW: downloads 2018q1->present ZIPs to data/edgar-raw/, builds the store
-scripts/verify_fundamentals.py             NEW: AAPL TTM spot-check + real-restatement PIT invariant (Task 11)
+scripts/verify_fundamentals.py             NEW: AAPL quality + value spot-checks + real-restatement PIT invariant (Task 12)
 src/trading/signals/registry.py            MODIFY: v2 contract — RankerSpec(fn, requires_fundamentals)
-src/trading/signals/quality.py             NEW: quality_momentum_v1 ranker (pure)
+src/trading/signals/quality.py             NEW: quality_momentum_v1 ranker + shared latest_filed_row helper (pure)
+src/trading/signals/value.py               NEW: value_momentum_v1 ranker — ratios at ranking time (pure)
 src/trading/config.py                      MODIFY: DataConfig.fundamentals_dir / fundamentals_refresh_days + load-time check
 config/equities.toml                       MODIFY: [data] fundamentals keys
 config/crypto.toml                         MODIFY: [data] fundamentals keys (disabled)
 config/experiments/quality/equities.toml   NEW: opt-in experiment config (ranker = quality_momentum_v1)
+config/experiments/value/equities.toml     NEW: opt-in experiment config (ranker = value_momentum_v1)
 src/trading/pipeline.py                    MODIFY: fundamentals param through assemble_rankings; store load in build_rankings
 src/trading/backtest/engine.py             MODIFY: prepare() loads + as-of-slices fundamentals per session
 src/trading/runner.py                      MODIFY: weekly fundamentals refresh, fail-open journaled warning
 src/trading/venues/universes/sources/PROVENANCE.md  MODIFY: EDGAR + cik_map entries
-README.md                                  MODIFY: fundamentals overlay section (Task 11)
+README.md                                  MODIFY: fundamentals overlay section (Task 12)
 tests/fundamentals_helpers.py              NEW: fixture-ZIP + facts-row builders shared by fundamentals tests
 tests/test_fundamentals_edgar.py           NEW
 tests/test_fundamentals_metrics.py         NEW
@@ -63,6 +65,7 @@ tests/test_fundamentals_cik_map.py         NEW
 tests/test_fundamentals_backfill.py        NEW
 tests/test_fundamentals_companyfacts.py    NEW
 tests/test_quality_ranker.py               NEW  (test_quality.py already exists for data quality — do not touch it)
+tests/test_value_ranker.py                 NEW
 tests/test_registry.py                     MODIFY: v2 contract
 tests/test_config.py                       MODIFY: new keys + load-time validation
 tests/test_pipeline.py                     MODIFY: fundamentals threading
@@ -75,11 +78,12 @@ Locked design decisions for this plan (referenced by tasks):
 - **One normalized facts table.** Both sources (quarterly ZIP `sub.txt`+`num.txt`, companyfacts JSON) normalize to the same `FACT_COLUMNS` frame and flow through the same `compute_pit_series`, so backfill and top-up cannot diverge.
 - **Registry contract v2.** `RANKERS` maps name → `RankerSpec(fn, requires_fundamentals)`. Every registered `fn` takes `(bars, as_of, config, fundamentals)` where `fundamentals: dict[str, pd.DataFrame] | None`. `compute_features` keeps its 3-arg signature untouched; momentum_v1 registers through a one-line named adapter. `get_ranker(name)` returns the spec; the flag is how pipeline/runner/backtest know whether to load/refresh fundamentals at all.
 - **Original-filing dedup.** Forms accepted are exactly `10-K`/`10-Q` (amendments `10-K/A`/`10-Q/A` never parse); per (cik, fy, fp) the earliest-filed filing wins, tie-break lowest adsh. The scout's `prevrpt == 0` filter is deliberately NOT reused: `prevrpt` flags the superseded ORIGINAL, which is exactly the filing PIT must keep.
-- **Quarterly values.** 10-Q → qtrs=1 fact at the filing's own period end (`ddate == sub.period`). 10-K reports the full year (qtrs=4); Q4 is derived as FY − (Q1+Q2+Q3 of the same `fy`), NaN if any is missing. Assets: qtrs=0 instant at the filing's own period end, from that filing only.
-- **TTM window.** The 4 most recent known fiscal quarters as of each filing; NaN if fewer than 4, if any quarter value is NaN, or if the window is ragged (newest period end − oldest period end > 330 days; 4 consecutive quarter-ends span ~273 days, the slack absorbs 53-week fiscal years).
+- **Quarterly values.** Flows (revenue, COGS, net income): 10-Q → qtrs=1 fact at the filing's own period end (`ddate == sub.period`); 10-K reports the full year (qtrs=4) and Q4 is derived as FY − (Q1+Q2+Q3 of the same `fy`), NaN if any is missing. Instants (assets, equity): qtrs=0 at the filing's own period end, from that filing only. Shares outstanding is the one instant EXCEPTION: `dei:EntityCommonStockSharesOutstanding` is the cover-page count dated AFTER the period end (FSDS rounds it to month end), so the parser accepts the LATEST qtrs=0 share fact dated at-or-after the period end instead of requiring `ddate == period`.
+- **TTM window.** The 4 most recent known fiscal quarters as of each filing; NaN if fewer than 4, if any quarter value is NaN, or if the window is ragged (newest period end − oldest period end > 330 days; 4 consecutive quarter-ends span ~273 days, the slack absorbs 53-week fiscal years). Revenue−COGS and net income TTMs share the window but propagate NaN independently: a COGS-less financial still gets a real TTM net income.
+- **Price-free store.** Stored rows carry primitives only; earnings yield and book-to-market are computed inside `value_momentum_v1` from (latest-filed primitives × last close ≤ as_of). Prices rewrite on corporate actions; filings do not — keeping them apart means fundamentals parquets never need rewriting when the price cache refreshes.
 - **Rows are emitted even when the metric is NaN** (provenance shows a filing happened); the ranker reads the LAST row as-of the session — a step function on FILED dates, no interpolation, no dropna reach-back.
 - **CIK map intervals.** `cik_map.csv` rows are `(symbol, cik, start, end)`, start inclusive / end exclusive / empty end = current, floored at 2017-01-01 (same pad as membership). A fundamentals row attaches to the symbol whose interval contains its FILED date, so FB gets pre-rename filings and META post-rename ones while sharing one CIK's TTM continuity.
-- **Fail-open (earnings pattern).** Live refresh failures degrade to the last stored values with a journaled warning; they never crash or block a run. An empty/missing store yields NaN quality → all-neutral 0.5 → momentum-equivalent ordering.
+- **Fail-open (earnings pattern).** Live refresh failures degrade to the last stored values with a journaled warning; they never crash or block a run. An empty/missing store yields NaN quality/value features → all-neutral 0.5 → momentum-equivalent ordering.
 - **2018q1 backfill start is locked.** Consequence (documented, not a bug): TTM needs 4 trailing quarters, so most symbols' metric is NaN (neutral) until the FY-2018 10-K wave lands in early 2019. `scripts/backfill_fundamentals.py` accepts `--from-quarter` (e.g. `2017q1`) if the operator later decides to fill the warm-up; that is a deliberate operator action, not this plan's default.
 
 ---
@@ -94,7 +98,7 @@ Locked design decisions for this plan (referenced by tasks):
 
 **Interfaces:**
 - Consumes: nothing from this milestone (stdlib + pandas only).
-- Produces: `USER_AGENT: str`; `REVENUE_TAGS`, `COGS_TAGS`, `ASSETS_TAGS`, `TAG_PRIORITY: dict[str, list[str]]` (keys `"revenue" | "cogs" | "assets"`); `FACT_COLUMNS: list[str]`; `empty_facts() -> pd.DataFrame`; `load_quarter_facts(zip_path: Path, ciks: set[int] | None = None) -> pd.DataFrame`. Facts dtypes: `cik` int, `adsh/form/fy/fp/tag/concept` str, `period/filed` tz-naive `pd.Timestamp`, `qtrs` int, `value` float. Tasks 2, 5, 6 consume all of these.
+- Produces: `USER_AGENT: str`; `REVENUE_TAGS`, `COGS_TAGS`, `ASSETS_TAGS`, `NET_INCOME_TAGS`, `EQUITY_TAGS`, `SHARES_TAGS`, `TAG_PRIORITY: dict[str, list[str]]` (keys `"revenue" | "cogs" | "assets" | "net_income" | "equity" | "shares"`); `INSTANT_CONCEPTS: frozenset[str]`; `UOM_BY_CONCEPT: dict[str, str]`; `FACT_COLUMNS: list[str]`; `empty_facts() -> pd.DataFrame`; `load_quarter_facts(zip_path: Path, ciks: set[int] | None = None) -> pd.DataFrame`. Facts dtypes: `cik` int, `adsh/form/fy/fp/tag/concept` str, `period/filed` tz-naive `pd.Timestamp`, `qtrs` int, `value` float. Tasks 2, 5, 6 consume all of these.
 
 - [ ] **Step 1: Write the shared fixture helpers**
 
@@ -184,9 +188,13 @@ def filing_facts(
     revenue: float | None = None,
     cogs: float | None = None,
     assets: float | None = None,
+    net_income: float | None = None,
+    equity: float | None = None,
+    shares: float | None = None,
 ) -> list[dict]:
-    """One filing's normalized facts: revenue/cogs at the form's duration
-    (10-K = 4 quarters, 10-Q = 1), assets as an instant (qtrs=0)."""
+    """One filing's normalized facts: flows (revenue/cogs/net income) at the
+    form's duration (10-K = 4 quarters, 10-Q = 1), instants (assets/equity/
+    shares) at qtrs=0."""
     qtrs = 4 if form == "10-K" else 1
     rows = []
     if revenue is not None:
@@ -195,6 +203,21 @@ def filing_facts(
         rows.append(fact(cik, adsh, form, fy, fp, period, filed, "cogs", "CostOfRevenue", qtrs, cogs))
     if assets is not None:
         rows.append(fact(cik, adsh, form, fy, fp, period, filed, "assets", "Assets", 0, assets))
+    if net_income is not None:
+        rows.append(
+            fact(cik, adsh, form, fy, fp, period, filed, "net_income", "NetIncomeLoss", qtrs, net_income)
+        )
+    if equity is not None:
+        rows.append(
+            fact(cik, adsh, form, fy, fp, period, filed, "equity", "StockholdersEquity", 0, equity)
+        )
+    if shares is not None:
+        rows.append(
+            fact(
+                cik, adsh, form, fy, fp, period, filed,
+                "shares", "EntityCommonStockSharesOutstanding", 0, shares,
+            )
+        )
     return rows
 
 
@@ -230,6 +253,22 @@ NUMS = [
     num_line("0001-23-000001", "Assets", "20230331", 0, 1000.0),
     # 10-Q revenue at annual duration must NOT be picked for a 10-Q.
     num_line("0001-23-000001", "Revenues", "20230331", 4, 400.0),
+    # Value primitives: net income (flow), equity (instant; primary tag absent
+    # here so the fallback must win), shares (dei cover-page instant dated
+    # AFTER the period end -- month-end rounded -- beating the balance-sheet
+    # fallback; a second, earlier dei row and a stale pre-period row lose).
+    num_line("0001-23-000001", "NetIncomeLoss", "20230331", 1, 25.0),
+    num_line("0001-23-000001",
+             "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+             "20230331", 0, 500.0),
+    num_line("0001-23-000001", "EntityCommonStockSharesOutstanding", "20230430", 0, 1000.0,
+             uom="shares"),
+    num_line("0001-23-000001", "EntityCommonStockSharesOutstanding", "20230331", 0, 990.0,
+             uom="shares"),
+    num_line("0001-23-000001", "CommonStockSharesOutstanding", "20230331", 0, 985.0,
+             uom="shares"),
+    num_line("0001-23-000001", "EntityCommonStockSharesOutstanding", "20221231", 0, 900.0,
+             uom="shares"),
     # cik 200 10-K: full-year (qtrs=4) facts; a qtrs=1 stray must be ignored.
     num_line("0002-23-000001", "Revenues", "20221231", 4, 480.0),
     num_line("0002-23-000001", "Revenues", "20221231", 1, 120.0),
@@ -271,9 +310,27 @@ def test_amendments_and_other_forms_never_parse(tmp_path):
     assert 400 not in set(facts["cik"])
 
 
+def test_value_primitive_concepts(tmp_path):
+    facts = _facts(tmp_path)
+    ni = facts[(facts["cik"] == 100) & (facts["concept"] == "net_income")].iloc[0]
+    assert ni["tag"] == "NetIncomeLoss"
+    assert ni["value"] == 25.0
+    assert ni["qtrs"] == 1  # flow: 10-Q -> single quarter, like revenue
+    eq = facts[(facts["cik"] == 100) & (facts["concept"] == "equity")].iloc[0]
+    assert eq["tag"] == "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+    assert eq["value"] == 500.0
+    assert eq["qtrs"] == 0
+    sh = facts[(facts["cik"] == 100) & (facts["concept"] == "shares")].iloc[0]
+    assert sh["tag"] == "EntityCommonStockSharesOutstanding"  # dei beats the us-gaap fallback
+    assert sh["value"] == 1000.0  # LATEST cover-date instant wins; stale 900.0 dropped
+    assert sh["qtrs"] == 0
+
+
 def test_own_fiscal_period_only(tmp_path):
     facts = _facts(tmp_path)
     q = facts[facts["cik"] == 100]
+    # Every fact carries the FILING's fiscal period (sub.period), including
+    # the shares row whose underlying ddate is the later cover date.
     assert set(q["period"].dt.strftime("%Y%m%d")) == {"20230331"}
     assert 558.0 not in set(q["value"])
 
@@ -311,9 +368,11 @@ backfill and top-up cannot diverge.
 
 Tag fallback chains are LOCKED to the xbrl-scout findings (2023q1 census:
 the three revenue tags cover 76.5% of 10-K/10-Q filers, the three COGS tags
-~48.5%, Assets 99.5%). Consolidated rows only (empty segments + coreg).
-Roughly half of filers (banks, insurers) report no COGS concept at all ->
-their metric is NaN downstream and ranks neutral (0.5) by design.
+~48.5%, Assets 99.5%), extended with the value primitives (net income,
+stockholders' equity, shares outstanding). Consolidated rows only (empty
+segments + coreg). Roughly half of filers (banks, insurers) report no COGS
+concept at all -> their quality metric is NaN downstream and ranks neutral
+(0.5) by design, while their net income/equity/shares still resolve.
 
 Forms accepted are EXACTLY 10-K and 10-Q: amendments (10-K/A, 10-Q/A) never
 enter the facts table, which is half of the PIT original-filing discipline
@@ -341,11 +400,29 @@ COGS_TAGS = [
     "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
 ]
 ASSETS_TAGS = ["Assets"]
+NET_INCOME_TAGS = ["NetIncomeLoss"]
+EQUITY_TAGS = [
+    "StockholdersEquity",
+    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+]
+# dei:EntityCommonStockSharesOutstanding is the cover-page share count (dei
+# taxonomy); CommonStockSharesOutstanding is the us-gaap balance-sheet
+# fallback. num.txt keys facts by tag name only, so the taxonomy split
+# matters solely to the companyfacts path (_TAXONOMY_BY_TAG there).
+SHARES_TAGS = ["EntityCommonStockSharesOutstanding", "CommonStockSharesOutstanding"]
 TAG_PRIORITY: dict[str, list[str]] = {
     "revenue": REVENUE_TAGS,
     "cogs": COGS_TAGS,
     "assets": ASSETS_TAGS,
+    "net_income": NET_INCOME_TAGS,
+    "equity": EQUITY_TAGS,
+    "shares": SHARES_TAGS,
 }
+# Instant (balance-sheet / cover-page) concepts report qtrs=0; flows follow
+# the form's duration (10-K qtrs=4, 10-Q qtrs=1).
+INSTANT_CONCEPTS = frozenset({"assets", "equity", "shares"})
+# Facts are USD except share counts.
+UOM_BY_CONCEPT = {"shares": "shares"}
 
 FACT_COLUMNS = [
     "cik",
@@ -373,7 +450,10 @@ def load_quarter_facts(zip_path: Path, ciks: set[int] | None = None) -> pd.DataF
     """One quarterly ZIP -> normalized facts: per (filing, concept) the single
     best fact by tag priority, consolidated only, the filing's OWN fiscal
     period only (ddate == sub.period), duration matched to the form (10-K
-    qtrs=4 full year, 10-Q qtrs=1; balance-sheet Assets qtrs=0 instant)."""
+    qtrs=4 full year, 10-Q qtrs=1; instants qtrs=0). Exception: the shares
+    cover-page count is dated AFTER the period end, so it takes the latest
+    qtrs=0 share fact at-or-after the period instead. All output rows carry
+    the FILING's fiscal period in the `period` column regardless."""
     with zipfile.ZipFile(zip_path) as zf, zf.open("sub.txt") as fh:
         sub = pd.read_csv(fh, sep="\t", dtype=str, usecols=_SUB_COLS, encoding="latin-1")
     sub = sub[sub["form"].isin(["10-K", "10-Q"])]
@@ -402,27 +482,38 @@ def load_quarter_facts(zip_path: Path, ciks: set[int] | None = None) -> pd.DataF
     num = pd.concat(chunks, ignore_index=True)
     for col in ("segments", "coreg"):
         num[col] = num[col].fillna("")
-    num = num[
-        (num["segments"] == "") & (num["coreg"] == "") & (num["uom"] == "USD") & num["value"].notna()
-    ].copy()
+    num = num[(num["segments"] == "") & (num["coreg"] == "") & num["value"].notna()].copy()
     if num.empty:
         return empty_facts()
     num["qtrs"] = num["qtrs"].astype(int)
     num["value"] = num["value"].astype(float)
     num = num.merge(sub, on="adsh", how="inner")
-    num = num[num["ddate"] == num["period"]]  # the filing's own fiscal period only
 
     parts: list[pd.DataFrame] = []
     for concept, tags in TAG_PRIORITY.items():
-        sel = num[num["tag"].isin(tags)].copy()
-        if concept == "assets":
-            sel = sel[sel["qtrs"] == 0]
-        else:
+        uom = UOM_BY_CONCEPT.get(concept, "USD")
+        sel = num[num["tag"].isin(tags) & (num["uom"] == uom)].copy()
+        if concept == "shares":
+            # The dei cover-page share count is dated "as of" a day AFTER the
+            # fiscal period end (FSDS rounds it to month end), so requiring
+            # ddate == period would drop it: accept the LATEST instant dated
+            # at-or-after the period end instead (stale comparatives lose).
+            sel = sel[(sel["qtrs"] == 0) & (sel["ddate"] >= sel["period"])]
+        elif concept in INSTANT_CONCEPTS:
+            sel = sel[(sel["qtrs"] == 0) & (sel["ddate"] == sel["period"])]
+        else:  # flows: the filing's own fiscal period at the form's duration
+            sel = sel[sel["ddate"] == sel["period"]]
             sel = sel[sel["qtrs"] == np.where(sel["form"] == "10-K", 4, 1)]
         if sel.empty:
             continue
         sel["_priority"] = sel["tag"].map({t: i for i, t in enumerate(tags)})
-        sel = sel.sort_values(["adsh", "_priority"], kind="mergesort")
+        if concept == "shares":
+            # Highest-priority tag first, then the LATEST cover date wins.
+            sel = sel.sort_values(
+                ["adsh", "_priority", "ddate"], ascending=[True, True, False], kind="mergesort"
+            )
+        else:
+            sel = sel.sort_values(["adsh", "_priority"], kind="mergesort")
         sel = sel.drop_duplicates("adsh", keep="first")
         sel["concept"] = concept
         parts.append(sel)
@@ -437,7 +528,7 @@ def load_quarter_facts(zip_path: Path, ciks: set[int] | None = None) -> pd.DataF
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_fundamentals_edgar.py -v`
-Expected: 6 PASS.
+Expected: 7 PASS.
 
 - [ ] **Step 6: Full suite + lint, then commit**
 
@@ -447,18 +538,20 @@ uv run pytest -q
 git add src/trading/fundamentals tests/fundamentals_helpers.py tests/test_fundamentals_edgar.py
 git commit -m "Add EDGAR quarterly-ZIP facts parser for the fundamentals overlay [AI]
 
-Normalized facts table (locked tag fallback chains, consolidated rows only,
-forms exactly 10-K/10-Q so amendments never parse), streamed num.txt reads.
+Normalized facts table (locked tag fallback chains for quality + value
+primitives, consolidated rows only, forms exactly 10-K/10-Q so amendments
+never parse; cover-page share counts take the latest post-period instant),
+streamed num.txt reads.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 ```
 
-Expected: 334 + 6 = 340 tests green.
+Expected: 334 + 7 = 341 tests green.
 
 ---
 
-### Task 2: Point-in-time gross-profitability series
+### Task 2: Point-in-time fundamentals series (quality + value primitives)
 
 **Files:**
 - Create: `src/trading/fundamentals/metrics.py`
@@ -466,7 +559,7 @@ Expected: 334 + 6 = 340 tests green.
 
 **Interfaces:**
 - Consumes: `FACT_COLUMNS` facts frames (Task 1 helpers `filing_facts`/`facts_frame`).
-- Produces: `SERIES_COLUMNS: list[str]` = `["gross_profitability", "revenue_ttm", "cogs_ttm", "assets", "adsh", "form", "fy", "fp", "period", "revenue_tag", "cogs_tag", "assets_tag"]`; `PROVENANCE_COLUMNS`; `MAX_TTM_SPAN_DAYS = 330`; `empty_series() -> pd.DataFrame`; `compute_pit_series(facts: pd.DataFrame) -> dict[int, pd.DataFrame]` (per-cik frame indexed by tz-aware UTC FILED dates, name `"filed"`, sorted, unique). Tasks 3, 5, 6 consume these.
+- Produces: `PROVENANCE_COLUMNS = ["adsh", "form", "fy", "fp", "period", "revenue_tag", "cogs_tag", "assets_tag", "net_income_tag", "equity_tag", "shares_tag"]`; `SERIES_COLUMNS = ["gross_profitability", "ttm_net_income", "book_equity", "shares_outstanding", "revenue_ttm", "cogs_ttm", "assets", *PROVENANCE_COLUMNS]`; `MAX_TTM_SPAN_DAYS = 330`; `empty_series() -> pd.DataFrame`; `compute_pit_series(facts: pd.DataFrame) -> dict[int, pd.DataFrame]` (per-cik frame indexed by tz-aware UTC FILED dates, name `"filed"`, sorted, unique). Tasks 3, 5, 6, 9 consume these.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -488,15 +581,20 @@ def _year_of_filings() -> list[dict]:
     """Q1-Q3 2023 10-Qs, the FY2023 10-K, then Q1 2024 — a full TTM ramp."""
     rows = []
     rows += filing_facts(CIK, "a-01", "10-Q", "2023", "Q1", "2023-03-31", "2023-05-10",
-                         revenue=10.0, cogs=4.0, assets=90.0)
+                         revenue=10.0, cogs=4.0, assets=90.0,
+                         net_income=3.0, equity=50.0, shares=100.0)
     rows += filing_facts(CIK, "a-02", "10-Q", "2023", "Q2", "2023-06-30", "2023-08-09",
-                         revenue=12.0, cogs=5.0, assets=95.0)
+                         revenue=12.0, cogs=5.0, assets=95.0,
+                         net_income=4.0, equity=52.0, shares=100.0)
     rows += filing_facts(CIK, "a-03", "10-Q", "2023", "Q3", "2023-09-30", "2023-11-08",
-                         revenue=11.0, cogs=5.0, assets=98.0)
+                         revenue=11.0, cogs=5.0, assets=98.0,
+                         net_income=3.0, equity=54.0, shares=100.0)
     rows += filing_facts(CIK, "a-04", "10-K", "2023", "FY", "2023-12-31", "2024-02-20",
-                         revenue=48.0, cogs=20.0, assets=100.0)
+                         revenue=48.0, cogs=20.0, assets=100.0,
+                         net_income=14.0, equity=60.0, shares=101.0)
     rows += filing_facts(CIK, "a-05", "10-Q", "2024", "Q1", "2024-03-31", "2024-05-09",
-                         revenue=14.0, cogs=6.0, assets=110.0)
+                         revenue=14.0, cogs=6.0, assets=110.0,
+                         net_income=5.0, equity=62.0, shares=102.0)
     return rows
 
 
@@ -504,23 +602,57 @@ def test_ttm_incomplete_is_nan_then_completes_at_the_10k():
     series = compute_pit_series(facts_frame(_year_of_filings()))[CIK]
     assert list(series.columns) == SERIES_COLUMNS
     assert series.index.tz is not None and series.index.name == "filed"
-    # First three filings: fewer than 4 known quarters -> NaN metric, row still present.
+    # First three filings: fewer than 4 known quarters -> NaN TTMs, row still
+    # present; the instant primitives are already real.
     for filed in ("2023-05-10", "2023-08-09", "2023-11-08"):
-        assert math.isnan(series.loc[pd.Timestamp(filed, tz="UTC"), "gross_profitability"])
-    # 10-K: Q4 derived = FY - (Q1+Q2+Q3) -> rev 48-33=15, cogs 20-14=6; TTM = FY.
+        row = series.loc[pd.Timestamp(filed, tz="UTC")]
+        assert math.isnan(row["gross_profitability"])
+        assert math.isnan(row["ttm_net_income"])
+        assert row["shares_outstanding"] == 100.0
+    # 10-K: Q4 derived = FY - (Q1+Q2+Q3) -> rev 48-33=15, cogs 20-14=6,
+    # ni 14-10=4; TTM = the FY totals.
     at_10k = series.loc[pd.Timestamp("2024-02-20", tz="UTC")]
     assert at_10k["revenue_ttm"] == 48.0
     assert at_10k["cogs_ttm"] == 20.0
     assert at_10k["gross_profitability"] == pytest.approx((48.0 - 20.0) / 100.0)
+    assert at_10k["ttm_net_income"] == 14.0
+    assert at_10k["book_equity"] == 60.0
+    assert at_10k["shares_outstanding"] == 101.0
 
 
 def test_ttm_rolls_forward_at_the_next_quarter():
     series = compute_pit_series(facts_frame(_year_of_filings()))[CIK]
-    # Q2'23 + Q3'23 + derived Q4'23 + Q1'24: rev 12+11+15+14, cogs 5+5+6+6.
+    # Q2'23 + Q3'23 + derived Q4'23 + Q1'24: rev 12+11+15+14, cogs 5+5+6+6,
+    # ni 4+3+4+5; instants come from the latest filing.
     row = series.loc[pd.Timestamp("2024-05-09", tz="UTC")]
     assert row["revenue_ttm"] == pytest.approx(52.0)
     assert row["cogs_ttm"] == pytest.approx(22.0)
     assert row["gross_profitability"] == pytest.approx(30.0 / 110.0)
+    assert row["ttm_net_income"] == pytest.approx(16.0)
+    assert row["book_equity"] == 62.0
+    assert row["shares_outstanding"] == 102.0
+
+
+def test_net_income_ttm_computes_independently_of_missing_cogs():
+    # Financials shape: NetIncomeLoss present, no COGS concept anywhere ->
+    # gross profitability NaN forever, but the value primitives are real.
+    rows = []
+    rows += filing_facts(CIK, "e-01", "10-Q", "2023", "Q1", "2023-03-31", "2023-05-10",
+                         revenue=10.0, assets=90.0, net_income=3.0, equity=50.0, shares=100.0)
+    rows += filing_facts(CIK, "e-02", "10-Q", "2023", "Q2", "2023-06-30", "2023-08-09",
+                         revenue=12.0, assets=95.0, net_income=4.0, equity=52.0, shares=100.0)
+    rows += filing_facts(CIK, "e-03", "10-Q", "2023", "Q3", "2023-09-30", "2023-11-08",
+                         revenue=11.0, assets=98.0, net_income=3.0, equity=54.0, shares=100.0)
+    rows += filing_facts(CIK, "e-04", "10-K", "2023", "FY", "2023-12-31", "2024-02-20",
+                         revenue=48.0, assets=100.0, net_income=14.0, equity=60.0, shares=101.0)
+    series = compute_pit_series(facts_frame(rows))[CIK]
+    at_10k = series.loc[pd.Timestamp("2024-02-20", tz="UTC")]
+    assert math.isnan(at_10k["gross_profitability"])  # no COGS -> quality NaN
+    assert at_10k["ttm_net_income"] == 14.0            # value primitives still real
+    assert at_10k["book_equity"] == 60.0
+    assert at_10k["shares_outstanding"] == 101.0
+    assert at_10k["net_income_tag"] == "NetIncomeLoss"
+    assert at_10k["cogs_tag"] == ""
 
 
 def test_restatement_never_rewrites_history():
@@ -603,10 +735,16 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'trading.fundamentals.m
 Create `src/trading/fundamentals/metrics.py`:
 
 ```python
-"""Point-in-time gross-profitability series (spec: M4 fundamentals overlay).
+"""Point-in-time fundamentals series (spec: M4 fundamentals overlay).
 
-Metric v1: gross profitability = trailing-4-quarter (Revenue - COGS) / latest
-Assets (Novy-Marx). PIT discipline (non-negotiable):
+Quality metric: gross profitability = trailing-4-quarter (Revenue - COGS) /
+latest Assets (Novy-Marx). Value primitives: TTM net income (same
+trailing-4-quarter mechanics, NaN-independent of COGS), book equity and
+shares outstanding as latest-instant values from each filing. The series is
+PRICE-FREE by design: ratios (earnings yield, book-to-market) live in the
+ranker, so this store never rewrites when price data refreshes.
+
+PIT discipline (non-negotiable):
 
 - A value becomes VISIBLE at its FILING date, never its fiscal-period date
   (2023q1 census: filing lag min 19d / median 44d / max 59d -- a period-date
@@ -643,8 +781,20 @@ PROVENANCE_COLUMNS = [
     "revenue_tag",
     "cogs_tag",
     "assets_tag",
+    "net_income_tag",
+    "equity_tag",
+    "shares_tag",
 ]
-SERIES_COLUMNS = ["gross_profitability", "revenue_ttm", "cogs_ttm", "assets", *PROVENANCE_COLUMNS]
+SERIES_COLUMNS = [
+    "gross_profitability",
+    "ttm_net_income",
+    "book_equity",
+    "shares_outstanding",
+    "revenue_ttm",
+    "cogs_ttm",
+    "assets",
+    *PROVENANCE_COLUMNS,
+]
 
 
 def empty_series() -> pd.DataFrame:
@@ -689,15 +839,21 @@ def _derive_q4(fy_total: float, q123: list[dict | None], key: str) -> float:
     return fy_total - sum(q[key] for q in q123)
 
 
-def _ttm(quarters: dict[tuple[str, str], dict]) -> tuple[float, float]:
+def _ttm(quarters: dict[tuple[str, str], dict]) -> tuple[float, float, float]:
+    """(revenue_ttm, cogs_ttm, net_income_ttm). One shared 4-quarter window;
+    each metric's NaN quarters propagate through sum() INDEPENDENTLY, so a
+    COGS-less financial still gets a real TTM net income."""
     known = sorted(quarters.values(), key=lambda q: q["period"])
     last4 = known[-TTM_QUARTERS:]
     if len(last4) < TTM_QUARTERS:
-        return math.nan, math.nan
+        return math.nan, math.nan, math.nan
     if (last4[-1]["period"] - last4[0]["period"]).days > MAX_TTM_SPAN_DAYS:
-        return math.nan, math.nan  # ragged window: a quarter is missing inside
-    # NaN quarter values propagate through sum() -> NaN TTM by design.
-    return sum(q["revenue"] for q in last4), sum(q["cogs"] for q in last4)
+        return math.nan, math.nan, math.nan  # ragged window: a quarter is missing inside
+    return (
+        sum(q["revenue"] for q in last4),
+        sum(q["cogs"] for q in last4),
+        sum(q["net_income"] for q in last4),
+    )
 
 
 def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
@@ -715,9 +871,15 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
                 "revenue": math.nan,
                 "cogs": math.nan,
                 "assets": math.nan,
+                "net_income": math.nan,
+                "equity": math.nan,
+                "shares": math.nan,
                 "revenue_tag": "",
                 "cogs_tag": "",
                 "assets_tag": "",
+                "net_income_tag": "",
+                "equity_tag": "",
+                "shares_tag": "",
             },
         )
         filing[row.concept] = row.value
@@ -731,6 +893,7 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
                 "period": f["period"],
                 "revenue": f["revenue"],
                 "cogs": f["cogs"],
+                "net_income": f["net_income"],
             }
         else:  # 10-K reports the FULL year (qtrs=4): derive Q4 = FY - (Q1+Q2+Q3)
             q123 = [quarters.get((f["fy"], fp)) for fp in ("Q1", "Q2", "Q3")]
@@ -738,8 +901,9 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
                 "period": f["period"],
                 "revenue": _derive_q4(f["revenue"], q123, "revenue"),
                 "cogs": _derive_q4(f["cogs"], q123, "cogs"),
+                "net_income": _derive_q4(f["net_income"], q123, "net_income"),
             }
-        revenue_ttm, cogs_ttm = _ttm(quarters)
+        revenue_ttm, cogs_ttm, ttm_net_income = _ttm(quarters)
         assets = f["assets"]
         gp = math.nan
         if not math.isnan(revenue_ttm) and not math.isnan(cogs_ttm) and assets and not math.isnan(assets):
@@ -748,6 +912,9 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
             {
                 "filed": f["filed"],
                 "gross_profitability": gp,
+                "ttm_net_income": ttm_net_income,
+                "book_equity": f["equity"],
+                "shares_outstanding": f["shares"],
                 "revenue_ttm": revenue_ttm,
                 "cogs_ttm": cogs_ttm,
                 "assets": assets,
@@ -759,6 +926,9 @@ def _cik_series(group: pd.DataFrame) -> pd.DataFrame:
                 "revenue_tag": f["revenue_tag"],
                 "cogs_tag": f["cogs_tag"],
                 "assets_tag": f["assets_tag"],
+                "net_income_tag": f["net_income_tag"],
+                "equity_tag": f["equity_tag"],
+                "shares_tag": f["shares_tag"],
             }
         )
     frame = pd.DataFrame(rows).set_index("filed")
@@ -782,11 +952,12 @@ Expected: all PASS.
 uv run ruff check . && uv run ruff format .
 uv run pytest -q
 git add src/trading/fundamentals/metrics.py tests/test_fundamentals_metrics.py
-git commit -m "Add PIT gross-profitability TTM computation [AI]
+git commit -m "Add PIT fundamentals computation: gross profitability + value primitives [AI]
 
 Values visible at FILING date; original filing per (cik, fy, fp) frozen
-(earliest filed, adsh tie-break); 10-K Q4 derived by subtraction; incomplete
-or ragged TTM window -> NaN; provenance on every row.
+(earliest filed, adsh tie-break); 10-K Q4 derived by subtraction for revenue,
+COGS and net income; incomplete or ragged TTM window -> NaN (independently
+per metric); price-free primitives + provenance on every row.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
@@ -802,7 +973,7 @@ Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 
 **Interfaces:**
 - Consumes: `empty_series`, `SERIES_COLUMNS` from `trading.fundamentals.metrics` (Task 2).
-- Produces: `FundamentalsStore(root: Path)` with `path_for(symbol) -> Path`, `read(symbol) -> pd.DataFrame`, `append(symbol, rows: pd.DataFrame) -> int` (rows actually added), `load(symbols: Iterable[str]) -> dict[str, pd.DataFrame]` (non-empty frames only), `last_refresh() -> datetime.date | None`, `mark_refreshed(day: datetime.date) -> None`. Tasks 5, 6, 9, 10 consume these.
+- Produces: `FundamentalsStore(root: Path)` with `path_for(symbol) -> Path`, `read(symbol) -> pd.DataFrame`, `append(symbol, rows: pd.DataFrame) -> int` (rows actually added), `load(symbols: Iterable[str]) -> dict[str, pd.DataFrame]` (non-empty frames only), `last_refresh() -> datetime.date | None`, `mark_refreshed(day: datetime.date) -> None`. Tasks 5, 6, 10, 11 consume these.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -814,7 +985,7 @@ import datetime
 import pandas as pd
 import pytest
 
-from trading.fundamentals.metrics import SERIES_COLUMNS
+from trading.fundamentals.metrics import PROVENANCE_COLUMNS, SERIES_COLUMNS
 from trading.fundamentals.store import FundamentalsStore
 
 
@@ -823,8 +994,7 @@ def _rows(dated: dict[str, float]) -> pd.DataFrame:
     frame = pd.DataFrame({"gross_profitability": list(dated.values())}, index=idx)
     for col in SERIES_COLUMNS:
         if col not in frame.columns:
-            frame[col] = "" if col in ("adsh", "form", "fy", "fp", "period",
-                                       "revenue_tag", "cogs_tag", "assets_tag") else 0.0
+            frame[col] = "" if col in PROVENANCE_COLUMNS else 0.0
     return frame[SERIES_COLUMNS]
 
 
@@ -1015,7 +1185,7 @@ This task runs a network script once to generate a committed CSV (same pattern a
 
 **Interfaces:**
 - Consumes: `src/trading/venues/universes/equities_membership.csv` (committed, M3), `https://www.sec.gov/files/company_tickers.json` (network, once).
-- Produces: `DEFAULT_CIK_MAP_CSV: Path`; `load_cik_map(path: Path | None = None) -> pd.DataFrame` (columns `symbol` str, `cik` int, `start` str, `end` str; empty end = current); `cik_for(cik_map: pd.DataFrame, symbol: str, as_of: datetime.date) -> int | None`; `interval_slice(frame: pd.DataFrame, start: str, end: str) -> pd.DataFrame`. Tasks 5, 6, 10, 11 consume these.
+- Produces: `DEFAULT_CIK_MAP_CSV: Path`; `load_cik_map(path: Path | None = None) -> pd.DataFrame` (columns `symbol` str, `cik` int, `start` str, `end` str; empty end = current); `cik_for(cik_map: pd.DataFrame, symbol: str, as_of: datetime.date) -> int | None`; `interval_slice(frame: pd.DataFrame, start: str, end: str) -> pd.DataFrame`. Tasks 5, 6, 11, 12 consume these.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1272,7 +1442,7 @@ def main() -> None:
     lines += [f"{s},{cik},{start},{end}" for s, cik, start, end in rows]
     OUTPUT.write_text("\n".join(lines) + "\n")
     print(f"wrote {OUTPUT} ({len(rows)} intervals; {len(unmapped)} membership symbols unmapped)")
-    print("unmapped (no fundamentals -> neutral quality): " + ", ".join(unmapped))
+    print("unmapped (no fundamentals -> neutral rank): " + ", ".join(unmapped))
 
 
 if __name__ == "__main__":
@@ -1307,7 +1477,8 @@ Append to `src/trading/venues/universes/sources/PROVENANCE.md`:
   >= 95% of current members map.
 - Known limitation: acquired/delisted symbols absent from company_tickers.json
   and the RENAMES table are unmapped -> no fundamentals -> neutral (0.5)
-  quality percentile. The build prints the list; extend RENAMES deliberately.
+  fundamentals percentiles. The build prints the list; extend RENAMES
+  deliberately.
 ```
 
 Replace `<RUN DATE>` with the actual run date and record the validation line the script printed.
@@ -1341,7 +1512,7 @@ Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 
 **Interfaces:**
 - Consumes: `load_quarter_facts`, `empty_facts` (Task 1); `compute_pit_series` (Task 2); `FundamentalsStore` (Task 3); `load_cik_map`, `interval_slice` (Task 4).
-- Produces: `quarter_range(start: str, end: str) -> list[str]`; `last_complete_quarter(today: datetime.date) -> str`; `backfill_quarters(zip_paths: list[Path], cik_map: pd.DataFrame, store: FundamentalsStore) -> dict[str, int]` (keys `"filers"`, `"symbols"`, `"rows"`). Task 11 runs the script for real.
+- Produces: `quarter_range(start: str, end: str) -> list[str]`; `last_complete_quarter(today: datetime.date) -> str`; `backfill_quarters(zip_paths: list[Path], cik_map: pd.DataFrame, store: FundamentalsStore) -> dict[str, int]` (keys `"filers"`, `"symbols"`, `"rows"`). Task 12 runs the script for real.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1589,7 +1760,7 @@ if __name__ == "__main__":
     main()
 ```
 
-Note: the script reads `[data] fundamentals_dir` from `config/equities.toml`; that key lands in Task 7. Running the SCRIPT before Task 7 would `KeyError` — that is fine, it is not run until Task 11. The tests below do not touch the script.
+Note: the script reads `[data] fundamentals_dir` from `config/equities.toml`; that key lands in Task 7. Running the SCRIPT before Task 7 would `KeyError` — that is fine, it is not run until Task 12. The tests below do not touch the script.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -1622,8 +1793,8 @@ Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 - Test: `tests/test_fundamentals_companyfacts.py`
 
 **Interfaces:**
-- Consumes: `TAG_PRIORITY`, `FACT_COLUMNS`, `empty_facts`, `USER_AGENT` (Task 1); `compute_pit_series`, `empty_series` (Task 2); `FundamentalsStore` (Task 3); `cik_for`, `interval_slice` (Task 4).
-- Produces: `COMPANYFACTS_URL: str`; `facts_from_companyfacts(payload: dict, cik: int) -> pd.DataFrame`; `refresh_fundamentals(store, cik_map, symbols: Iterable[str], as_of: datetime.date, fetch_json: Callable[[str], dict] = _http_get_json) -> tuple[int, bool]` returning `(rows_appended, degraded)`. Task 10 (runner) consumes `refresh_fundamentals`.
+- Consumes: `TAG_PRIORITY`, `INSTANT_CONCEPTS`, `UOM_BY_CONCEPT`, `FACT_COLUMNS`, `empty_facts`, `USER_AGENT` (Task 1); `compute_pit_series`, `empty_series` (Task 2); `FundamentalsStore` (Task 3); `cik_for`, `interval_slice` (Task 4).
+- Produces: `COMPANYFACTS_URL: str`; `facts_from_companyfacts(payload: dict, cik: int) -> pd.DataFrame`; `refresh_fundamentals(store, cik_map, symbols: Iterable[str], as_of: datetime.date, fetch_json: Callable[[str], dict] = _http_get_json) -> tuple[int, bool]` returning `(rows_appended, degraded)`. Task 11 (runner) consumes `refresh_fundamentals`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1679,13 +1850,36 @@ def _payload():
         _entry("2023-09-30", 98.0, "a-03", 2023, "Q3", "10-Q", "2023-11-08"),
         _entry("2023-12-31", 100.0, "a-04", 2023, "FY", "10-K", "2024-02-20"),
     ]
+    net_income = [
+        _entry("2023-03-31", 3.0, "a-01", 2023, "Q1", "10-Q", "2023-05-10", start="2023-01-01"),
+        _entry("2023-06-30", 4.0, "a-02", 2023, "Q2", "10-Q", "2023-08-09", start="2023-04-01"),
+        _entry("2023-09-30", 3.0, "a-03", 2023, "Q3", "10-Q", "2023-11-08", start="2023-07-01"),
+        _entry("2023-12-31", 14.0, "a-04", 2023, "FY", "10-K", "2024-02-20", start="2023-01-01"),
+    ]
+    equity = [
+        _entry("2023-03-31", 50.0, "a-01", 2023, "Q1", "10-Q", "2023-05-10"),
+        _entry("2023-06-30", 52.0, "a-02", 2023, "Q2", "10-Q", "2023-08-09"),
+        _entry("2023-09-30", 54.0, "a-03", 2023, "Q3", "10-Q", "2023-11-08"),
+        _entry("2023-12-31", 60.0, "a-04", 2023, "FY", "10-K", "2024-02-20"),
+    ]
+    shares = [  # dei cover-page counts: dated AFTER each fiscal period end
+        _entry("2023-04-30", 100.0, "a-01", 2023, "Q1", "10-Q", "2023-05-10"),
+        _entry("2023-07-31", 100.0, "a-02", 2023, "Q2", "10-Q", "2023-08-09"),
+        _entry("2023-10-31", 100.0, "a-03", 2023, "Q3", "10-Q", "2023-11-08"),
+        _entry("2024-01-31", 101.0, "a-04", 2023, "FY", "10-K", "2024-02-20"),
+    ]
     return {
         "facts": {
             "us-gaap": {
                 "Revenues": {"units": {"USD": rev}},
                 "CostOfRevenue": {"units": {"USD": cogs}},
                 "Assets": {"units": {"USD": assets}},
-            }
+                "NetIncomeLoss": {"units": {"USD": net_income}},
+                "StockholdersEquity": {"units": {"USD": equity}},
+            },
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {"units": {"shares": shares}},
+            },
         }
     }
 
@@ -1698,6 +1892,19 @@ def test_normalizes_to_own_period_facts_only():
     assert list(fy["qtrs"]) == [4]
     q2 = facts[(facts["adsh"] == "a-02") & (facts["concept"] == "revenue")]
     assert list(q2["value"]) == [12.0]  # the qtrs=2 YTD duration was dropped
+
+
+def test_shares_cover_date_maps_to_the_filing_period():
+    facts = facts_from_companyfacts(_payload(), CIK)
+    sh = facts[(facts["adsh"] == "a-04") & (facts["concept"] == "shares")].iloc[0]
+    assert sh["value"] == 101.0
+    assert sh["qtrs"] == 0
+    # The dei cover date (2024-01-31) must neither define the filing's own
+    # period nor survive in the period column: it is re-dated to 2023-12-31.
+    assert sh["period"] == pd.Timestamp("2023-12-31")
+    ni = facts[(facts["adsh"] == "a-04") & (facts["concept"] == "net_income")].iloc[0]
+    assert ni["value"] == 14.0
+    assert ni["qtrs"] == 4
 
 
 def test_refresh_appends_only_new_filed_dates(tmp_path):
@@ -1715,6 +1922,9 @@ def test_refresh_appends_only_new_filed_dates(tmp_path):
     assert calls == [f"https://data.sec.gov/api/xbrl/companyfacts/CIK{CIK:010d}.json"]
     at_10k = store.read("AAPL").loc[pd.Timestamp("2024-02-20", tz="UTC")]
     assert at_10k["gross_profitability"] == (48.0 - 20.0) / 100.0
+    assert at_10k["ttm_net_income"] == 14.0  # derived Q4 = 14 - (3+4+3) = 4; TTM = FY
+    assert at_10k["book_equity"] == 60.0
+    assert at_10k["shares_outstanding"] == 101.0
 
     added, degraded = refresh_fundamentals(
         store, CIK_MAP, ["AAPL"], as_of=datetime.date(2024, 3, 8), fetch_json=fetch
@@ -1783,7 +1993,14 @@ from collections.abc import Callable, Iterable
 import pandas as pd
 
 from trading.fundamentals.cik_map import cik_for, interval_slice
-from trading.fundamentals.edgar import FACT_COLUMNS, TAG_PRIORITY, USER_AGENT, empty_facts
+from trading.fundamentals.edgar import (
+    FACT_COLUMNS,
+    INSTANT_CONCEPTS,
+    TAG_PRIORITY,
+    UOM_BY_CONCEPT,
+    USER_AGENT,
+    empty_facts,
+)
 from trading.fundamentals.metrics import compute_pit_series, empty_series
 from trading.fundamentals.store import FundamentalsStore
 
@@ -1793,6 +2010,9 @@ _MIN_REQUEST_INTERVAL_S = 0.11  # SEC ceiling is 10 req/s; stay under it
 # a fiscal quarter is ~90-98 days, a fiscal year 357-371 (53-week years).
 _QUARTER_DAYS = (80, 100)
 _YEAR_DAYS = (350, 380)
+# companyfacts nests facts by taxonomy: the cover-page share count lives
+# under "dei", everything else under "us-gaap".
+_TAXONOMY_BY_TAG = {"EntityCommonStockSharesOutstanding": "dei"}
 
 _last_request_monotonic = 0.0
 
@@ -1812,19 +2032,21 @@ def _http_get_json(url: str) -> dict:
 
 def facts_from_companyfacts(payload: dict, cik: int) -> pd.DataFrame:
     """companyfacts JSON -> the normalized facts table (edgar.FACT_COLUMNS)."""
-    gaap = payload.get("facts", {}).get("us-gaap", {})
+    taxonomies = payload.get("facts", {})
     records: list[dict] = []
     for concept, tags in TAG_PRIORITY.items():
+        unit = UOM_BY_CONCEPT.get(concept, "USD")
         for priority, tag in enumerate(tags):
-            for entry in gaap.get(tag, {}).get("units", {}).get("USD", []):
+            taxonomy = taxonomies.get(_TAXONOMY_BY_TAG.get(tag, "us-gaap"), {})
+            for entry in taxonomy.get(tag, {}).get("units", {}).get(unit, []):
                 if entry.get("form") not in ("10-K", "10-Q"):
                     continue  # amendments and other forms never parse (PIT)
                 if entry.get("fy") is None or not entry.get("fp"):
                     continue
                 end = pd.Timestamp(entry["end"])
-                if concept == "assets":
+                if concept in INSTANT_CONCEPTS:
                     qtrs = 0
-                else:
+                else:  # flows: revenue, cogs, net income
                     if "start" not in entry:
                         continue
                     days = (end - pd.Timestamp(entry["start"])).days + 1
@@ -1857,11 +2079,29 @@ def facts_from_companyfacts(payload: dict, cik: int) -> pd.DataFrame:
     facts = pd.DataFrame.from_records(records)
     # companyfacts carries COMPARATIVE periods (a 10-K re-reports prior
     # years); keep only each filing's OWN fiscal period -- the latest period
-    # end that accession reports (the ZIP path's ddate == sub.period twin).
-    own_period = facts.groupby("adsh")["period"].transform("max")
-    facts = facts[facts["period"] == own_period]
-    facts = facts.sort_values(["adsh", "concept", "_priority"], kind="mergesort")
-    facts = facts.drop_duplicates(["adsh", "concept"], keep="first")
+    # end among its NON-shares facts (the ZIP path's ddate == sub.period
+    # twin). The cover-page share count is dated AFTER the period end, so it
+    # must neither define the filing's own period nor be dropped by it.
+    core = facts[facts["concept"] != "shares"].copy()
+    if core.empty:
+        return empty_facts()
+    own_period = core.groupby("adsh")["period"].max()
+    core = core[core["period"] == core["adsh"].map(own_period)]
+    core = core.sort_values(["adsh", "concept", "_priority"], kind="mergesort")
+    core = core.drop_duplicates(["adsh", "concept"], keep="first")
+    shares = facts[facts["concept"] == "shares"].copy()
+    shares = shares[shares["adsh"].isin(own_period.index)]
+    shares = shares[shares["period"] >= shares["adsh"].map(own_period)]
+    if shares.empty:
+        facts = core
+    else:
+        # Highest-priority tag, then the LATEST cover date wins; the row is
+        # re-dated to the filing's own period so the schema matches the ZIP path.
+        shares = shares.sort_values(
+            ["adsh", "_priority", "period"], ascending=[True, True, False], kind="mergesort"
+        ).drop_duplicates("adsh", keep="first")
+        shares["period"] = shares["adsh"].map(own_period)
+        facts = pd.concat([core, shares], ignore_index=True)
     return facts[FACT_COLUMNS].reset_index(drop=True)
 
 
@@ -1900,7 +2140,7 @@ def refresh_fundamentals(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_fundamentals_companyfacts.py -v`
-Expected: 3 PASS.
+Expected: 4 PASS.
 
 - [ ] **Step 5: Full suite + lint, then commit**
 
@@ -1910,9 +2150,10 @@ uv run pytest -q
 git add src/trading/fundamentals/companyfacts.py tests/test_fundamentals_companyfacts.py
 git commit -m "Add companyfacts current-quarter fundamentals top-up [AI]
 
-Normalizes to the same facts table + PIT computation as the ZIP backfill;
-own-period filter drops comparatives; throttled + UA per SEC policy;
-fail-open per symbol like the earnings fetch.
+Normalizes to the same facts table + PIT computation as the ZIP backfill
+(quality + value primitives, dei cover-page share counts re-dated to the
+filing period); own-period filter drops comparatives; throttled + UA per
+SEC policy; fail-open per symbol like the earnings fetch.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
@@ -1933,7 +2174,7 @@ The registry contract gains an optional fundamentals input without touching `com
 
 **Interfaces:**
 - Consumes: `compute_features` (unchanged, 3-arg).
-- Produces: `RankerFn = Callable[[dict[str, pd.DataFrame], pd.Timestamp, SignalConfig, dict[str, pd.DataFrame] | None], pd.DataFrame]`; `RankerSpec(fn: RankerFn, requires_fundamentals: bool)` (frozen dataclass); `RANKERS: dict[str, RankerSpec]`; `get_ranker(name) -> RankerSpec`; `DataConfig.fundamentals_dir: str` ("" = venue has no fundamentals), `DataConfig.fundamentals_refresh_days: int`. Tasks 8–10 consume all of these.
+- Produces: `RankerFn = Callable[[dict[str, pd.DataFrame], pd.Timestamp, SignalConfig, dict[str, pd.DataFrame] | None], pd.DataFrame]`; `RankerSpec(fn: RankerFn, requires_fundamentals: bool)` (frozen dataclass); `RANKERS: dict[str, RankerSpec]`; `get_ranker(name) -> RankerSpec`; `DataConfig.fundamentals_dir: str` ("" = venue has no fundamentals), `DataConfig.fundamentals_refresh_days: int`. Tasks 8–11 consume all of these.
 
 - [ ] **Step 1: Rewrite `tests/test_registry.py` (failing against the current registry)**
 
@@ -2032,12 +2273,14 @@ Input contract (what a ranker receives):
   caller does not pre-cut them.
 - `as_of` is a tz-aware UTC pd.Timestamp; momentum_v1 rejects a naive one.
 - `fundamentals` maps symbol -> per-symbol fundamentals frame indexed by
-  tz-aware UTC FILING dates (trading.fundamentals.store schema, at minimum a
-  "gross_profitability" column). None (or a missing symbol) means "no
-  fundamentals known" -- a ranker must treat that as neutral, never crash.
-  Like bars, frames may extend past as_of; cutting to rows FILED at or
-  before as_of is the RANKER's responsibility (same structural
-  no-lookahead rule as bars).
+  tz-aware UTC FILING dates (trading.fundamentals.store schema: price-free
+  primitives such as "gross_profitability", "ttm_net_income", "book_equity",
+  "shares_outstanding" -- a ranker reads only the columns it needs).
+  Price-dependent ratios are computed INSIDE the ranker from these
+  primitives plus bars. None (or a missing symbol) means "no fundamentals
+  known" -- a ranker must treat that as neutral, never crash. Like bars,
+  frames may extend past as_of; cutting to rows FILED at or before as_of is
+  the RANKER's responsibility (same structural no-lookahead rule as bars).
 
 Contract a registered ranker MUST guarantee (identical to the signal
 engine's existing guarantees -- see trading.signals.engine):
@@ -2047,8 +2290,10 @@ engine's existing guarantees -- see trading.signals.engine):
 - Column contract: the returned DataFrame is indexed by symbol and contains
   the ranker's feature-percentile columns plus "composite" and
   "raw_return_30d" (momentum_v1: trading.signals.engine.OUTPUT_COLUMNS;
-  quality_momentum_v1 adds "quality"). Symbols without enough PRICE history
-  are omitted; missing FUNDAMENTALS never drop a symbol (neutral instead).
+  quality_momentum_v1 adds "quality"; value_momentum_v1 adds
+  "earnings_yield" and "book_to_market"). Symbols without enough PRICE
+  history are omitted; missing FUNDAMENTALS never drop a symbol (neutral
+  instead).
 - NaN semantics: an individual NaN feature yields a NaN composite for that
   symbol, which sorts last in rank().
 
@@ -2127,7 +2372,7 @@ with:
     features = spec.fn(clean, as_of_ts, config.signals, None)
 ```
 
-(The `None` becomes the threaded fundamentals dict in Task 9.)
+(The `None` becomes the threaded fundamentals dict in Task 10.)
 
 - [ ] **Step 5: Add the config fields and TOML keys**
 
@@ -2231,7 +2476,7 @@ Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 
 **Interfaces:**
 - Consumes: `compute_features`, `FEATURE_COLUMNS` from `trading.signals.engine`; `RankerSpec` (Task 7).
-- Produces: `quality_momentum_v1(bars, as_of, config, fundamentals) -> pd.DataFrame` with columns `[*FEATURE_COLUMNS, "quality", "composite", "raw_return_30d"]` (`OUTPUT_COLUMNS` in the module); `QUALITY_NEUTRAL = 0.5`; registry key `"quality_momentum_v1"` with `requires_fundamentals=True`. Tasks 9–11 consume these.
+- Produces: `quality_momentum_v1(bars, as_of, config, fundamentals) -> pd.DataFrame` with columns `[*FEATURE_COLUMNS, "quality", "composite", "raw_return_30d"]` (`OUTPUT_COLUMNS` in the module); `QUALITY_NEUTRAL = 0.5`; `latest_filed_row(frame: pd.DataFrame | None, as_of: pd.Timestamp) -> pd.Series | None` (shared step-function helper — Task 9's value ranker reuses it); registry key `"quality_momentum_v1"` with `requires_fundamentals=True`. Tasks 9–12 consume these.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2418,6 +2663,17 @@ QUALITY_NEUTRAL = 0.5
 OUTPUT_COLUMNS = [*FEATURE_COLUMNS, "quality", "composite", "raw_return_30d"]
 
 
+def latest_filed_row(frame: pd.DataFrame | None, as_of: pd.Timestamp) -> pd.Series | None:
+    """The LAST fundamentals row FILED at or before as_of (the step function
+    on FILING dates -- the structural no-lookahead cut for fundamentals), or
+    None when nothing is visible yet. Shared by the fundamentals rankers
+    (quality here, value in trading.signals.value)."""
+    if frame is None or frame.empty:
+        return None
+    window = frame.loc[:as_of]
+    return None if window.empty else window.iloc[-1]
+
+
 def quality_momentum_v1(
     bars: dict[str, pd.DataFrame],
     as_of: pd.Timestamp,
@@ -2430,13 +2686,8 @@ def quality_momentum_v1(
     known = fundamentals or {}
     raw: dict[str, float] = {}
     for symbol in base.index:
-        frame = known.get(symbol)
-        value = math.nan
-        if frame is not None and not frame.empty:
-            window = frame.loc[:as_of]  # structural no-lookahead cut (FILED dates)
-            if not window.empty:
-                value = float(window["gross_profitability"].iloc[-1])
-        raw[symbol] = value
+        row = latest_filed_row(known.get(symbol), as_of)
+        raw[symbol] = math.nan if row is None else float(row["gross_profitability"])
     quality = pd.Series(raw, dtype="float64").rank(pct=True).fillna(QUALITY_NEUTRAL)
     out = base.copy()
     out["quality"] = quality
@@ -2531,7 +2782,340 @@ Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 
 ---
 
-### Task 9: Thread fundamentals through the pipeline and the backtest
+### Task 9: `value_momentum_v1` ranker (ratios at ranking time)
+
+**Files:**
+- Create: `src/trading/signals/value.py`
+- Modify: `src/trading/signals/registry.py` (register the new spec)
+- Create: `config/experiments/value/equities.toml` (opt-in experiment config)
+- Test: `tests/test_value_ranker.py`, `tests/test_config.py` (append)
+
+**Interfaces:**
+- Consumes: `compute_features`, `FEATURE_COLUMNS` from `trading.signals.engine`; `latest_filed_row`, `QUALITY_NEUTRAL` from `trading.signals.quality` (Task 8); `RankerSpec` (Task 7); store columns `ttm_net_income`/`book_equity`/`shares_outstanding` (Task 2).
+- Produces: `value_momentum_v1(bars, as_of, config, fundamentals) -> pd.DataFrame` with columns `[*FEATURE_COLUMNS, "earnings_yield", "book_to_market", "composite", "raw_return_30d"]` (`OUTPUT_COLUMNS` in the module); `VALUE_NEUTRAL = 0.5`; registry key `"value_momentum_v1"` with `requires_fundamentals=True`. Tasks 10–12 consume these.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_value_ranker.py`:
+
+```python
+import numpy as np
+import pandas as pd
+import pytest
+
+from trading.config import SignalConfig
+from trading.signals.engine import FEATURE_COLUMNS, compute_features
+from trading.signals.registry import get_ranker
+from trading.signals.value import OUTPUT_COLUMNS, value_momentum_v1
+
+CONFIG = SignalConfig(
+    momentum_windows=(5, 10, 20),
+    calendar_days=False,
+    vol_window=5,
+    volume_week=5,
+    volume_baseline=20,
+    breakout_windows=(10, 20),
+    rsi_window=14,
+    mean_window=20,
+    raw_return_days=30,
+    ranker="value_momentum_v1",
+)
+
+
+def _trending_bars(drift: float, periods: int = 80) -> pd.DataFrame:
+    idx = pd.date_range("2025-11-03", periods=periods, freq="B", tz="UTC")
+    jitter = np.where(np.arange(periods) % 2 == 0, 0.002, -0.002)
+    close = 100 * np.cumprod(1 + drift + jitter)
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": np.full(periods, 1e6),
+        },
+        index=idx,
+    )
+
+
+def _fund(dated: dict[str, tuple[float, float, float]]) -> pd.DataFrame:
+    """date -> (ttm_net_income, book_equity, shares_outstanding)."""
+    idx = pd.DatetimeIndex([pd.Timestamp(d, tz="UTC") for d in dated], name="filed")
+    ni, be, sh = zip(*dated.values(), strict=True)
+    return pd.DataFrame(
+        {"ttm_net_income": ni, "book_equity": be, "shares_outstanding": sh}, index=idx
+    )
+
+
+BARS = {
+    "UP": _trending_bars(0.01),
+    "FLAT": _trending_bars(0.0),
+    "DOWN": _trending_bars(-0.01),
+}
+AS_OF = BARS["UP"].index[-1]
+
+
+def test_registered_and_requires_fundamentals():
+    spec = get_ranker("value_momentum_v1")
+    assert spec.fn is value_momentum_v1
+    assert spec.requires_fundamentals is True
+
+
+def test_ratios_computed_at_ranking_time_and_composite_over_eight():
+    fundamentals = {
+        "UP": _fund({"2025-11-10": (10.0, 50.0, 100.0)}),
+        "FLAT": _fund({"2025-11-10": (30.0, 40.0, 100.0)}),
+        "DOWN": _fund({"2025-11-10": (20.0, 90.0, 100.0)}),
+    }
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    base = compute_features(BARS, AS_OF, CONFIG)
+    assert list(out.columns) == OUTPUT_COLUMNS
+    # Recompute the expected ratios by hand: market cap uses the LAST close
+    # <= as_of from bars (ratios are NOT stored -- the store is price-free).
+    closes = {s: float(BARS[s].loc[:AS_OF, "close"].iloc[-1]) for s in BARS}
+    ey = {s: fundamentals[s]["ttm_net_income"].iloc[-1] / (100.0 * closes[s]) for s in BARS}
+    bm = {s: fundamentals[s]["book_equity"].iloc[-1] / (100.0 * closes[s]) for s in BARS}
+    ey_rank = pd.Series(ey).rank(pct=True)
+    bm_rank = pd.Series(bm).rank(pct=True)
+    for s in BARS:
+        assert out.loc[s, "earnings_yield"] == pytest.approx(ey_rank[s])
+        assert out.loc[s, "book_to_market"] == pytest.approx(bm_rank[s])
+        expected = (
+            base.loc[s, "composite"] * len(FEATURE_COLUMNS) + ey_rank[s] + bm_rank[s]
+        ) / (len(FEATURE_COLUMNS) + 2)
+        assert out.loc[s, "composite"] == pytest.approx(expected)
+        for col in [*FEATURE_COLUMNS, "raw_return_30d"]:
+            assert out.loc[s, col] == base.loc[s, col]
+
+
+def test_missing_components_and_bad_market_cap_are_neutral():
+    fundamentals = {
+        "UP": _fund({"2025-11-10": (10.0, 50.0, 100.0)}),
+        "FLAT": _fund({"2025-11-10": (30.0, 40.0, 100.0)}),
+        "DOWN": _fund({"2025-11-10": (20.0, 90.0, 0.0)}),  # zero shares -> no market cap
+    }
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    assert out.loc["DOWN", "earnings_yield"] == 0.5
+    assert out.loc["DOWN", "book_to_market"] == 0.5
+
+    # NaN NET INCOME only: earnings yield neutral, book-to-market still real
+    # (DOWN's cheap price makes it the highest B/M of the three).
+    fundamentals["DOWN"] = _fund({"2025-11-10": (float("nan"), 90.0, 100.0)})
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    assert out.loc["DOWN", "earnings_yield"] == 0.5
+    assert out.loc["DOWN", "book_to_market"] == pytest.approx(1.0)
+
+
+def test_negative_earnings_rank_low_not_neutral():
+    # A loss-maker has a REAL (negative) earnings yield -- that is signal,
+    # not missing data, and must rank at the bottom rather than 0.5.
+    fundamentals = {
+        "UP": _fund({"2025-11-10": (-10.0, 50.0, 100.0)}),
+        "FLAT": _fund({"2025-11-10": (30.0, 40.0, 100.0)}),
+        "DOWN": _fund({"2025-11-10": (20.0, 90.0, 100.0)}),
+    }
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    assert out.loc["UP", "earnings_yield"] == pytest.approx(1 / 3)
+
+
+def test_no_fundamentals_all_neutral_and_step_function_as_of():
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, None)
+    assert set(out["earnings_yield"]) == {0.5}
+    assert set(out["book_to_market"]) == {0.5}
+    base = compute_features(BARS, AS_OF, CONFIG)
+    assert list(out.sort_values("composite").index) == list(base.sort_values("composite").index)
+
+    fundamentals = {
+        "UP": _fund({"2026-06-01": (10.0, 50.0, 100.0)}),  # filed AFTER as_of: invisible
+        "FLAT": _fund({"2025-11-10": (30.0, 40.0, 100.0)}),
+        "DOWN": _fund({"2025-11-10": (20.0, 90.0, 100.0)}),
+    }
+    out = value_momentum_v1(BARS, AS_OF, CONFIG, fundamentals)
+    assert out.loc["UP", "earnings_yield"] == 0.5
+    assert out.loc["UP", "book_to_market"] == 0.5
+
+
+def test_empty_universe_returns_empty_frame_with_columns():
+    out = value_momentum_v1({}, AS_OF, CONFIG, None)
+    assert out.empty
+    assert list(out.columns) == OUTPUT_COLUMNS
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `uv run pytest tests/test_value_ranker.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'trading.signals.value'`.
+
+- [ ] **Step 3: Implement the ranker**
+
+Create `src/trading/signals/value.py`:
+
+```python
+"""value_momentum_v1: the six momentum_v1 features + earnings-yield and
+book-to-market cross-sectional percentiles (spec: M4 fundamentals overlay,
+value extension). Composite = equal weight over 8.
+
+Ratios are computed AT RANKING TIME from price-free stored primitives:
+
+    market_cap     = shares_outstanding (latest row FILED <= as_of) x last close <= as_of
+    earnings_yield = ttm_net_income / market_cap
+    book_to_market = book_equity     / market_cap
+
+The store carries NO prices by design, so fundamentals parquets never
+rewrite when price history refreshes (adjusted closes rewrite on corporate
+actions; filings do not). A missing component (no filing yet, NaN primitive)
+or a non-positive market cap contributes the NEUTRAL 0.5 percentile -- the
+same policy as quality. A NEGATIVE ttm_net_income is a real (low) earnings
+yield, not missing data: loss-makers rank at the bottom, deliberately.
+
+No new tunable parameters: the walk-forward surface stays exactly
+entry_score_threshold x stop_atr_multiple.
+
+Pure: no I/O, no clock. Bars and fundamentals frames may extend past as_of;
+both cuts happen here (bars via compute_features / the close lookup,
+fundamentals via latest_filed_row).
+"""
+
+from __future__ import annotations
+
+import math
+
+import pandas as pd
+
+from trading.config import SignalConfig
+from trading.signals.engine import FEATURE_COLUMNS, compute_features
+from trading.signals.quality import QUALITY_NEUTRAL, latest_filed_row
+
+VALUE_NEUTRAL = QUALITY_NEUTRAL  # one neutral policy across fundamentals rankers
+OUTPUT_COLUMNS = [
+    *FEATURE_COLUMNS,
+    "earnings_yield",
+    "book_to_market",
+    "composite",
+    "raw_return_30d",
+]
+
+
+def _component(row: pd.Series | None, key: str) -> float:
+    if row is None or key not in row.index:
+        return math.nan
+    return float(row[key])
+
+
+def value_momentum_v1(
+    bars: dict[str, pd.DataFrame],
+    as_of: pd.Timestamp,
+    config: SignalConfig,
+    fundamentals: dict[str, pd.DataFrame] | None,
+) -> pd.DataFrame:
+    base = compute_features(bars, as_of, config)
+    if base.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS, dtype="float64")
+    known = fundamentals or {}
+    ey_raw: dict[str, float] = {}
+    bm_raw: dict[str, float] = {}
+    for symbol in base.index:
+        row = latest_filed_row(known.get(symbol), as_of)
+        shares = _component(row, "shares_outstanding")
+        # base.index symbols passed compute_features' history gate, so a
+        # last close <= as_of always exists.
+        close = float(bars[symbol].loc[:as_of, "close"].iloc[-1])
+        ey = bm = math.nan
+        if not math.isnan(shares) and shares > 0:
+            market_cap = shares * close
+            if market_cap > 0:
+                net_income = _component(row, "ttm_net_income")
+                equity = _component(row, "book_equity")
+                if not math.isnan(net_income):
+                    ey = net_income / market_cap
+                if not math.isnan(equity):
+                    bm = equity / market_cap
+        ey_raw[symbol] = ey
+        bm_raw[symbol] = bm
+    ey_pct = pd.Series(ey_raw, dtype="float64").rank(pct=True).fillna(VALUE_NEUTRAL)
+    bm_pct = pd.Series(bm_raw, dtype="float64").rank(pct=True).fillna(VALUE_NEUTRAL)
+    out = base.copy()
+    out["earnings_yield"] = ey_pct
+    out["book_to_market"] = bm_pct
+    out["composite"] = (base["composite"] * len(FEATURE_COLUMNS) + ey_pct + bm_pct) / (
+        len(FEATURE_COLUMNS) + 2
+    )
+    return out[OUTPUT_COLUMNS]
+```
+
+Register it — in `src/trading/signals/registry.py` add the import and entry:
+
+```python
+from trading.signals.value import value_momentum_v1
+```
+
+```python
+RANKERS: dict[str, RankerSpec] = {
+    "momentum_v1": RankerSpec(_momentum_v1, requires_fundamentals=False),
+    "quality_momentum_v1": RankerSpec(quality_momentum_v1, requires_fundamentals=True),
+    "value_momentum_v1": RankerSpec(value_momentum_v1, requires_fundamentals=True),
+}
+```
+
+- [ ] **Step 4: Create the opt-in experiment config**
+
+```bash
+mkdir -p config/experiments/value
+cp config/equities.toml config/experiments/value/equities.toml
+```
+
+Then edit `config/experiments/value/equities.toml`:
+- Change the `[signals]` ranker line to `ranker = "value_momentum_v1"  # M4 experiment: momentum + earnings-yield + book-to-market percentiles`.
+- Add at the very top of the file:
+
+```toml
+# EXPERIMENT CONFIG (M4): identical to config/equities.toml except
+# [signals] ranker = value_momentum_v1. Use via:
+#   trading rankings --venue equities --config-dir config/experiments/value
+#   trading backtest --venue equities --config-dir config/experiments/value
+# Never point the live/paper scheduler at this directory.
+```
+
+- [ ] **Step 5: Append the config test**
+
+Append to `tests/test_config.py`:
+
+```python
+def test_value_experiment_config_loads():
+    config = load_venue_config("equities", Path("config") / "experiments" / "value")
+    assert config.signals.ranker == "value_momentum_v1"
+    assert config.data.fundamentals_dir == "data/fundamentals/equities"
+```
+
+- [ ] **Step 6: Run the affected tests, then the full suite**
+
+Run: `uv run pytest tests/test_value_ranker.py tests/test_quality_ranker.py tests/test_config.py tests/test_registry.py -v`
+Expected: all PASS.
+Run: `uv run pytest -q`
+Expected: all green.
+
+- [ ] **Step 7: Lint + commit**
+
+```bash
+uv run ruff check . && uv run ruff format .
+git add src/trading/signals/value.py src/trading/signals/registry.py \
+        config/experiments/value/equities.toml \
+        tests/test_value_ranker.py tests/test_config.py
+git commit -m "Add value_momentum_v1 ranker: earnings yield + book-to-market at ranking time [AI]
+
+Eighth-weight composite over six momentum features + two value percentiles;
+market cap from latest-filed shares x last close as-of (store stays
+price-free); NaN components and non-positive market caps neutral at 0.5;
+negative earnings rank low by design. Opt-in experiment config; live
+defaults and tunable surface unchanged.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
+```
+
+---
+
+### Task 10: Thread fundamentals through the pipeline and the backtest
 
 Same as-of discipline as bars: live `build_rankings` loads the store when (and only when) the configured ranker requires it; backtest `prepare()` loads once and slices each session to rows FILED ≤ that session (the ranker re-cuts as defense in depth).
 
@@ -2541,8 +3125,8 @@ Same as-of discipline as bars: live `build_rankings` loads the store when (and o
 - Test: `tests/test_pipeline.py` (append), `tests/test_backtest_engine.py` (append)
 
 **Interfaces:**
-- Consumes: `RankerSpec`/`get_ranker` (Task 7), `quality_momentum_v1` registration (Task 8), `FundamentalsStore` (Task 3).
-- Produces: `assemble_rankings(config, infos, bars, benchmark_bars, as_of, fetch_failures=(), fundamentals=None)` — new keyword-only-by-position last param `fundamentals: dict[str, pd.DataFrame] | None`. `build_rankings` and `prepare` signatures unchanged. Task 10 and the CLI (no changes needed there) rely on this.
+- Consumes: `RankerSpec`/`get_ranker` (Task 7), `quality_momentum_v1`/`value_momentum_v1` registrations (Tasks 8–9), `FundamentalsStore` (Task 3).
+- Produces: `assemble_rankings(config, infos, bars, benchmark_bars, as_of, fetch_failures=(), fundamentals=None)` — new keyword-only-by-position last param `fundamentals: dict[str, pd.DataFrame] | None`. `build_rankings` and `prepare` signatures unchanged. Task 11 and the CLI (no changes needed there) rely on this. The threading is ranker-agnostic: `value_momentum_v1` flows through the same `requires_fundamentals` gate with zero extra plumbing (its ratios are computed inside the ranker), so the tests here exercise the quality ranker only.
 
 - [ ] **Step 1: Append the failing pipeline tests**
 
@@ -2814,7 +3398,7 @@ Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 
 ---
 
-### Task 10: Live runner weekly refresh (fail-open, journaled)
+### Task 11: Live runner weekly refresh (fail-open, journaled)
 
 The runner refreshes the fundamentals store from companyfacts BEFORE building rankings, only when the configured ranker requires it and at most every `fundamentals_refresh_days` (marker file). Failures degrade with a journaled warning — exactly the earnings pattern — and never block the run.
 
@@ -2991,7 +3575,7 @@ Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 
 ---
 
-### Task 11: Full backfill run + live verification + docs
+### Task 12: Full backfill run + live verification + docs
 
 Network task, run on this machine. Everything before this task is offline-tested; this task proves the pipeline against real EDGAR data and journals the evidence in docs.
 
@@ -3001,7 +3585,7 @@ Network task, run on this machine. Everything before this task is offline-tested
 - Modify: `src/trading/venues/universes/sources/PROVENANCE.md` (EDGAR entry)
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–10; `data/edgar-raw/*.zip` (downloaded here).
+- Consumes: everything from Tasks 1–11; `data/edgar-raw/*.zip` (downloaded here).
 - Produces: a populated `data/fundamentals/equities/` store (local, gitignored), verification evidence recorded in PROVENANCE.md.
 
 - [ ] **Step 1: Run the full 2018q1→present backfill (network, ~35 ZIPs / ~2 GB)**
@@ -3037,6 +3621,21 @@ recomputes as (all $M, all from ORIGINAL filings):
     TTM cogs    = 54,719 + 47,074 + 52,051 +  66,822 = 220,666
     gross profitability = (387,537 - 220,666) / 346,747 = 0.4813
 
+Check 1b -- AAPL value primitives at the same 2023-02-03 filing:
+
+    shares outstanding: 15,842,407,000 (10-Q cover page, as of 2023-01-20)
+    book equity: $56,727M (condensed balance sheet, total shareholders'
+    equity at 2022-12-31)
+    TTM net income ($M): Q1 FY23 29,998 + derived Q4 FY22
+    (99,803 - 34,630 - 25,010 - 19,442 = 20,721) + Q3 FY22 19,442
+    + Q2 FY22 25,010 = 95,171
+
+    Earnings-yield composition sanity at the PINNED raw close of $154.50
+    (2023-02-03): market cap = 15,842,407,000 x 154.50 = $2.448T ->
+    earnings yield = 95.171e9 / 2.448e12 = 0.0389. This is pure arithmetic
+    over store primitives -- the live ranker uses adjusted closes from bars,
+    so the pinned-close number validates the primitives, not yfinance.
+
 Check 2 -- restatement regression against REAL data: every (cik, fy, fp)
 filed more than once as a plain 10-K/10-Q across 2018+ must appear in the
 store ONLY via its earliest accession; later re-filings never leak
@@ -3062,6 +3661,15 @@ RAW_DIR = ROOT / "data" / "edgar-raw"
 
 AAPL_EXPECTED_GP = (387_537e6 - 220_666e6) / 346_747e6  # 0.4813, derivation above
 AAPL_TOLERANCE = 0.002
+AAPL_EXPECTED_VALUE = {  # derivations in the module docstring (Check 1b)
+    "shares_outstanding": 15_842_407_000.0,
+    "book_equity": 56_727e6,
+    "ttm_net_income": 95_171e6,
+}
+VALUE_REL_TOLERANCE = 1e-3
+AAPL_CLOSE_2023_02_03 = 154.50  # pinned raw close for the composition check
+AAPL_EXPECTED_EARNINGS_YIELD = 0.0389
+EARNINGS_YIELD_TOLERANCE = 0.001
 
 
 def check_aapl(store: FundamentalsStore) -> None:
@@ -3079,6 +3687,23 @@ def check_aapl(store: FundamentalsStore) -> None:
     )
     if abs(gp - AAPL_EXPECTED_GP) > AAPL_TOLERANCE:
         sys.exit(f"FATAL: AAPL TTM gross profitability {gp:.4f} != {AAPL_EXPECTED_GP:.4f}")
+    for key, expected in AAPL_EXPECTED_VALUE.items():
+        got = float(row[key])
+        print(f"AAPL @ 2023-02-03: {key}={got:.0f} (expected {expected:.0f})")
+        if abs(got - expected) > abs(expected) * VALUE_REL_TOLERANCE:
+            sys.exit(f"FATAL: AAPL {key} {got:.0f} != {expected:.0f}")
+    market_cap = float(row["shares_outstanding"]) * AAPL_CLOSE_2023_02_03
+    earnings_yield = float(row["ttm_net_income"]) / market_cap
+    print(
+        f"AAPL @ 2023-02-03: earnings yield at pinned close "
+        f"${AAPL_CLOSE_2023_02_03:.2f} = {earnings_yield:.4f} "
+        f"(expected ~{AAPL_EXPECTED_EARNINGS_YIELD})"
+    )
+    if abs(earnings_yield - AAPL_EXPECTED_EARNINGS_YIELD) > EARNINGS_YIELD_TOLERANCE:
+        sys.exit(
+            f"FATAL: AAPL earnings yield {earnings_yield:.4f} != "
+            f"{AAPL_EXPECTED_EARNINGS_YIELD}"
+        )
 
 
 def check_restatements(store_root: Path, cik_map: pd.DataFrame) -> None:
@@ -3131,20 +3756,28 @@ Expected output (values close to):
 
 ```
 AAPL @ 2023-02-03: gp=0.4813 (expected ~0.4813), revenue_ttm=387537000000, ...
+AAPL @ 2023-02-03: shares_outstanding=15842407000 (expected 15842407000)
+AAPL @ 2023-02-03: book_equity=56727000000 (expected 56727000000)
+AAPL @ 2023-02-03: ttm_net_income=95171000000 (expected 95171000000)
+AAPL @ 2023-02-03: earnings yield at pinned close $154.50 = 0.0389 (expected ~0.0389)
 restatement invariant OK: N re-filed fiscal periods found in the raw data; zero later accessions present in the store
 store coverage: ~800 symbols with fundamentals under .../data/fundamentals/equities
 ```
 
 If the AAPL check fails, debug with the provenance columns before touching code: read `data/fundamentals/equities/AAPL.parquet` rows around 2022-2023 and compare each quarter's revenue/cogs/tags against the docstring table — a wrong tag pick or a missing 10-Q will be visible per-row. Do not widen the tolerance.
 
-- [ ] **Step 4: One real quality_momentum_v1 ranking**
+- [ ] **Step 4: One real ranking per fundamentals ranker**
 
 ```bash
 uv run trading rankings --venue equities --config-dir config/experiments/quality --top 25 \
-    2>&1 | tee /tmp/claude-m4-ranking.log
+    2>&1 | tee /tmp/claude-m4-ranking-quality.log
+uv run trading rankings --venue equities --config-dir config/experiments/value --top 25 \
+    2>&1 | tee /tmp/claude-m4-ranking-value.log
 ```
 
-Expected: a ranked table containing the `quality` column; values in [0, 1]; financials (JPM-like COGS-less filers) showing 0.500; no crash, coverage line normal. Sanity: also run the default config (`uv run trading rankings --venue equities --top 5`) and confirm its table has NO quality column and momentum ordering unchanged from before this milestone.
+Expected (quality): a ranked table containing the `quality` column; values in [0, 1]; financials (JPM-like COGS-less filers) showing 0.500; no crash, coverage line normal.
+Expected (value): `earnings_yield` and `book_to_market` columns in [0, 1]; unmapped/unfiled names showing 0.500 in both; a known loss-maker near the bottom of `earnings_yield` and a known expensive-growth name (e.g. NVDA) near the bottom of `book_to_market` — eyeball two or three rows against public figures.
+Sanity: also run the default config (`uv run trading rankings --venue equities --top 5`) and confirm its table has NO fundamentals columns and momentum ordering unchanged from before this milestone.
 
 - [ ] **Step 5: Document — README + PROVENANCE**
 
@@ -3153,12 +3786,18 @@ Append to `README.md` (new top-level section, after the existing backtest/data s
 ```markdown
 ## Fundamentals overlay (M4)
 
-Point-in-time gross profitability (trailing-4-quarter (Revenue − COGS) / latest
-Assets) from SEC EDGAR XBRL, feeding the opt-in `quality_momentum_v1` ranker
-(six momentum features + a quality percentile, equal weight over 7; NaN
-quality — e.g. financials without a COGS concept — is neutral 0.5). Live and
-paper stay on `momentum_v1`; opt in per run with
-`--config-dir config/experiments/quality`.
+Point-in-time fundamentals from SEC EDGAR XBRL — quality (gross profitability
+= trailing-4-quarter (Revenue − COGS) / latest Assets) and value primitives
+(TTM net income, book equity, shares outstanding) — feeding two opt-in
+rankers: `quality_momentum_v1` (six momentum features + a quality percentile,
+equal weight over 7) and `value_momentum_v1` (six momentum features +
+earnings-yield and book-to-market percentiles, equal weight over 8; both
+ratios computed at ranking time from latest-filed primitives × the last
+close as-of — the stored data is price-free and never rewrites when price
+history refreshes). Missing data — e.g. financials without a COGS concept,
+unmapped delisted symbols — is neutral 0.5, never a penalty. Live and paper
+stay on `momentum_v1`; opt in per run with
+`--config-dir config/experiments/quality` or `config/experiments/value`.
 
 PIT discipline: a value becomes visible at its FILING date; per fiscal period
 only the original (earliest-accession) filing counts — amendments and
@@ -3191,9 +3830,11 @@ Append to `src/trading/venues/universes/sources/PROVENANCE.md`:
   spaced under the 10 req/s ceiling.
 - Verification (run <DATE>): AAPL 2023-02-03 TTM gross profitability <VALUE>
   (expected 0.4813; single-quarter scout basis was 0.1452 — see
-  scripts/verify_fundamentals.py for the recomputation arithmetic);
-  restatement invariant passed with <N> re-filed fiscal periods, zero later
-  accessions in the store; <M> symbols with fundamentals.
+  scripts/verify_fundamentals.py for the recomputation arithmetic); AAPL value
+  primitives matched the 2023-02-03 10-Q (15,842,407,000 shares; $56,727M
+  book equity; $95,171M TTM net income; earnings yield 0.0389 at the pinned
+  $154.50 close); restatement invariant passed with <N> re-filed fiscal
+  periods, zero later accessions in the store; <M> symbols with fundamentals.
 ```
 
 Fill `<DATE>/<VALUE>/<N>/<M>` from the Step 3/4 logs.
@@ -3207,13 +3848,15 @@ git add scripts/verify_fundamentals.py README.md \
         src/trading/venues/universes/sources/PROVENANCE.md
 git commit -m "Verify fundamentals backfill against real EDGAR data; document M4 [AI]
 
-Full 2018q1->present backfill run; AAPL 2023-02-03 TTM gross profitability
-spot-checked at 0.4813 (scout's 0.1452 was single-quarter basis); real
-restatement invariant: no later accession ever enters the store.
+Full 2018q1->present backfill run; AAPL 2023-02-03 spot-checked: TTM gross
+profitability 0.4813 (scout's 0.1452 was single-quarter basis), shares
+15,842,407,000, book equity 56,727M, TTM net income 95,171M, earnings yield
+0.0389 at the pinned close; real restatement invariant: no later accession
+ever enters the store.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01WuC8FbGLPEZUjYmdPSMMdv"
 ```
 
-Milestone complete: `momentum_v1` behavior bit-identical everywhere (golden green), `quality_momentum_v1` available to `rankings`/`backtest`/`run` via the experiment config, tunable surface unchanged.
+Milestone complete: `momentum_v1` behavior bit-identical everywhere (golden green), `quality_momentum_v1` and `value_momentum_v1` available to `rankings`/`backtest`/`run` via their experiment configs, stored fundamentals price-free, tunable surface unchanged.
 
