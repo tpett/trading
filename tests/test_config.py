@@ -111,3 +111,9 @@ def test_universe_indices_overridable_via_config(tmp_path):
     (tmp_path / "equities.toml").write_text(patched)
     config = load_venue_config("equities", tmp_path)
     assert config.universe.indices == ("sp500", "ndx", "sp400")
+
+
+def test_membership_exit_buffer_days_defaults_to_30_days():
+    for venue in ("equities", "crypto"):
+        config = load_venue_config(venue, Path("config"))
+        assert config.backtest.membership_exit_buffer_days == 30

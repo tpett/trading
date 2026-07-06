@@ -56,3 +56,13 @@
   force-exits on the rename date. Conservative, and rare enough to accept.
 - Residual survivorship: delisted tickers absent from yfinance are counted per
   session and reported as the coverage ratio on every equities result.
+- Ticker recycling: a delisted symbol's letters can later be reassigned to an
+  unrelated live company (yfinance then serves that new company's prices
+  under the old ticker -- e.g. CNR, flagged during scouting for this work).
+  Any symbol here with a closed (non-empty end) interval is at risk: the
+  backtest cache would otherwise fetch that ticker's full history and hand
+  the simulator prices from whatever company holds the symbol today. The
+  backtest engine truncates such a symbol's bars at (last closed membership
+  interval end + `membership_exit_buffer_days`), so post-exit prices --
+  recycled or not -- can never leak into a result (see prepare() in
+  src/trading/backtest/engine.py).

@@ -118,6 +118,13 @@ class BacktestConfig:
     min_session_coverage: float  # skip a session when fewer members have data
     periods_per_year: int  # Sharpe annualization: 252 sessions / 365 UTC days
     stress_segments: tuple[tuple[datetime.date, datetime.date], ...]
+    # Ticker-recycling guard (spec: survivorship): a symbol with no open-ended
+    # membership interval has its cached bars truncated at (last interval end
+    # + this many days) before prepare() hands them to the simulator, so a
+    # delisted ticker later reused by an unrelated live company can never
+    # contribute post-exit prices. Symbols still a current member (an
+    # open-ended interval) are untouched.
+    membership_exit_buffer_days: int = 30
 
 
 @dataclass(frozen=True)
