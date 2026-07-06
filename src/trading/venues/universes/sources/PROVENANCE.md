@@ -95,6 +95,16 @@
   and the RENAMES table are unmapped -> no fundamentals -> neutral (0.5)
   fundamentals percentiles. The build prints the list; extend RENAMES
   deliberately.
+- Structural assumption (ticker recycling): a ticker present in today's
+  `company_tickers.json` is assumed to have denoted the SAME company for its
+  whole interval back to 2017 unless a RENAMES row says otherwise. A ticker
+  that was vacated by one membership company and later reassigned to an
+  unrelated live company would silently attach the new company's CIK to the
+  old company's membership window (the same recycling hazard the membership
+  section flags for prices, e.g. CNR). No such case is known among current
+  intervals, but the assumption is unverified in bulk; automated
+  reconciliation of interval-vs-filing identity against the backfilled
+  fundamentals store lands in the M4 verification task.
 - Known limitation (out-and-back rename): Fiserv renamed FISV->FI in 2023 then
   reverted FI->FISV in 2025 (confirmed live against SEC's current listing,
   which now shows CIK 798354 under ticker FISV again). The one-row-per-symbol
@@ -109,6 +119,14 @@
   filings from that window get no fundamentals. Left as a documented gap
   rather than extending the CSV schema to support multiple intervals per
   symbol string, which is beyond this task's scope.
+- Upstream membership artifact (Fiserv, M3): the membership CSV's NDX rows
+  label Fiserv "FI" all the way back to 2017 (`FI,ndx,2017-01-01,2023-06-07`)
+  because the Wikipedia NDX source backcasts a constituent's
+  current-at-retrieval ticker, while the sp500 source correctly carries
+  "FISV" for the same period. Harmless today: "FI" is unmapped here so those
+  rows fail open to neutral fundamentals (no misjoin), and "FI" is not a
+  current member so the coverage gate is unaffected. Flagged for a future
+  membership rebuild with rename-aware historical labeling.
 - Deliberately NOT added: multi-company mergers where the surviving CIK is
   ambiguous without further research (e.g. Cimarex Energy (XEC) + Cabot Oil &
   Gas (COG) -> Coterra Energy (CTRA), 2021). Guessing a successor CIK here
