@@ -120,6 +120,13 @@ class DataConfig:
     # bound to one source via a .source marker -- switching sources means
     # pointing cache_dir somewhere fresh.
     bar_source: str = "yfinance"
+    # Frozen/offline cache mode: when True the OHLCV cache serves every request
+    # purely from its parquets and NEVER calls the fetch function -- a fully
+    # backfilled cache can then drive experiments with zero network (enabling
+    # e.g. a Tiingo cancellation). A request the cache does not cover raises
+    # rather than silently returning a partial. Data plumbing, NOT a tunable
+    # hyperparameter; defaulted so existing TOMLs keep loading (like bar_source).
+    cache_offline: bool = False
     # Wall-clock ceiling (seconds) on one weekly refresh_fundamentals call:
     # data plumbing, same non-tunable status as refresh_days. A ~1,100-cik
     # companyfacts refresh over a slow/degraded network could otherwise run

@@ -51,7 +51,12 @@ def _utcnow() -> datetime.datetime:
 
 def _make_cache(config) -> OhlcvCache:
     data = config.data
-    return OhlcvCache(Path(data.cache_dir), data.refetch_days, data.bar_source)
+    return OhlcvCache(
+        Path(data.cache_dir),
+        data.refetch_days,
+        data.bar_source,
+        offline=data.cache_offline,
+    )
 
 
 def _add_store_dirs(parser: argparse.ArgumentParser) -> None:
