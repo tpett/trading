@@ -14,13 +14,24 @@ from pathlib import Path
 
 import pandas as pd
 
-from trading.venues.base import DataFetchError
+from trading.venues.base import EXTENDED_OHLCV_COLUMNS, DataFetchError
 
 FetchFn = Callable[[str, datetime.date, datetime.date], pd.DataFrame]
+
+# Neutral defaults used to widen a legacy narrow cache to the current schema
+# (M2 migration): a dividend/split of "none" and a raw close equal to the
+# already-cached (adjusted) close for rows that predate the extended fields.
+_EXTENDED_CONSTANT_DEFAULTS = {"div_cash": 0.0, "split_factor": 1.0}
 
 # First cached bar may legitimately start after the requested date (weekends,
 # holidays, listing date); tolerate this gap before declaring history missing.
 _START_TOLERANCE = pd.Timedelta(5, unit="D")
+
+# Largest gap between consecutive cached bars tolerated in offline mode before
+# calling it a truncated backfill. Generous: the longest routine market closure
+# (holiday + weekend) is ~4 days; a rare multi-week trading halt should not trip
+# it, but a months-long hole from a died-mid-window backfill must.
+_MAX_INTERIOR_GAP = pd.Timedelta(30, unit="D")
 
 
 class CacheSourceError(RuntimeError):
@@ -39,9 +50,35 @@ class CacheSchemaError(RuntimeError):
 
 class OfflineCacheError(RuntimeError):
     """Offline mode was asked for bars the frozen cache does not cover (missing
-    file, or a range that starts before / ends after the cached span beyond the
-    weekend/holiday tolerance). Serving a silent partial would reintroduce the
-    coverage bias offline mode exists to avoid, so it fails loudly instead."""
+    file, a range starting before the cached span beyond tolerance, or a gross
+    interior hole from a truncated backfill). Serving a silent partial would
+    reintroduce the coverage bias offline mode exists to avoid, so it fails
+    loudly instead. A trailing gap is NOT a miss -- it is a delisting."""
+
+
+def _migrate_cached_schema(
+    cached: pd.DataFrame, target_columns: list[str], path: Path
+) -> pd.DataFrame:
+    """Widen a legacy narrow cache to the current (wide) schema in memory, so a
+    live dir written before the corporate-action columns existed upgrades on the
+    next fetch instead of raising. ONLY the known extended columns may be added
+    (with neutral defaults); a missing CANONICAL column, or any column the cache
+    has that the fetch does not, is real corruption and raises."""
+    cached_cols = list(cached.columns)
+    missing = [c for c in target_columns if c not in cached_cols]
+    extra = [c for c in cached_cols if c not in target_columns]
+    if extra or any(c not in EXTENDED_OHLCV_COLUMNS for c in missing):
+        raise CacheSchemaError(
+            f"{path} has columns {cached_cols} but the fetch returned {target_columns}; "
+            "rebuild this cache dir from empty after a schema change instead of mixing widths"
+        )
+    widened = cached.copy()
+    for col in missing:
+        if col in _EXTENDED_CONSTANT_DEFAULTS:
+            widened[col] = _EXTENDED_CONSTANT_DEFAULTS[col]
+        else:  # close_raw: best available for pre-migration rows is the cached close
+            widened[col] = widened["close"]
+    return widened[target_columns]
 
 
 class OhlcvCache:
@@ -136,16 +173,19 @@ class OhlcvCache:
             return cached.loc[start_ts:end_ts]
 
         if cached is not None and not cached.empty and list(cached.columns) != list(fresh.columns):
-            # An OLD narrow parquet meeting a NEW wide fetch (or vice versa):
-            # concat would NaN-fill the missing columns and silently corrupt the
-            # file. The schema-widening backfill is expected to start from a
-            # cleared dir, so this never fires in normal use -- but if it does,
-            # stop rather than persist half-populated corporate-action columns.
-            raise CacheSchemaError(
-                f"{path} has columns {list(cached.columns)} but the fetch returned "
-                f"{list(fresh.columns)}; rebuild this cache dir from empty after a "
-                "schema change instead of mixing widths"
-            )
+            # An OLD narrow parquet meeting a NEW wide fetch: a plain concat
+            # would NaN-fill the missing columns and silently corrupt the file.
+            # If the ONLY difference is that the cache lacks the known extended
+            # corporate-action columns (the live yfinance cache predates them),
+            # migrate it in place -- widen the old rows with neutral defaults --
+            # so the live nightly run upgrades seamlessly instead of breaking.
+            # Any other mismatch (a canonical column gone, an unknown column) is
+            # real corruption and still fails loudly.
+            cached = _migrate_cached_schema(cached, list(fresh.columns), path)
+            # `keep` was sliced from the pre-migration (narrow) frame; re-slice it
+            # from the widened one so the concat below doesn't NaN-fill the extras.
+            if keep is not None:
+                keep = cached[cached.index < pd.Timestamp(cutoff, tz="UTC")]
 
         parts: list[pd.DataFrame] = []
         if keep is not None and not keep.empty:
@@ -180,25 +220,38 @@ class OhlcvCache:
         end_ts: pd.Timestamp,
     ) -> pd.DataFrame:
         """Offline mode: serve [start, end] purely from the parquet, NEVER
-        touching the network. A missing file or a range the cache does not
-        cover is a hard error (naming the symbol and gap), because a silent
-        partial would reintroduce exactly the coverage bias a frozen cache is
-        meant to eliminate. Weekend/holiday gaps within the span are fine --
-        coverage is judged only at the two ends, with _START_TOLERANCE slack."""
+        touching the network. Coverage is judged SYMMETRICALLY with the online
+        path: online serves a symbol whenever its cached history STARTS early
+        enough (index.min() <= start + tolerance) and treats a trailing gap as a
+        legitimate delisting -- a delisted name's bars simply stop at delisting,
+        years before the uniform backtest `end`. Offline must do the same, or it
+        would raise on every delisted symbol, drop them, and silently reintroduce
+        the exact survivorship bias a frozen cache exists to eliminate. So we
+        require only that the START is covered; a trailing gap is fine. A GROSS
+        interior hole (a backfill that died mid-window) is still caught, since
+        that is real corruption, not a delisting."""
         if not path.exists():
             raise OfflineCacheError(f"offline cache miss for {symbol}: no parquet at {path}")
         cached = pd.read_parquet(path)
         if cached.empty:
             raise OfflineCacheError(f"offline cache for {symbol} is empty at {path}")
-        first, last = cached.index.min(), cached.index.max()
+        first = cached.index.min()
         if first > start_ts + _START_TOLERANCE:
             raise OfflineCacheError(
                 f"offline cache for {symbol} starts {first.date()}, after requested "
                 f"start {start} (beyond the {_START_TOLERANCE.days}-day tolerance)"
             )
-        if last < end_ts - _START_TOLERANCE:
-            raise OfflineCacheError(
-                f"offline cache for {symbol} ends {last.date()}, before requested "
-                f"end {end} (beyond the {_START_TOLERANCE.days}-day tolerance)"
-            )
-        return cached.loc[start_ts:end_ts]
+        # Interior-hole guard (NOT a trailing-delisting check): within the served
+        # span, no gap between consecutive bars should exceed _MAX_INTERIOR_GAP.
+        # Normal weekend/holiday stretches are a few days; a hole this large means
+        # a truncated backfill, which must fail loudly rather than serve partial.
+        served = cached.loc[start_ts:end_ts]
+        if len(served) >= 2:
+            max_gap = served.index.to_series().diff().max()
+            if max_gap > _MAX_INTERIOR_GAP:
+                raise OfflineCacheError(
+                    f"offline cache for {symbol} has a {max_gap.days}-day interior gap "
+                    f"within [{start}, {end}] (> {_MAX_INTERIOR_GAP.days}d): the backfill "
+                    "for this dir is incomplete; rebuild it before running offline"
+                )
+        return served

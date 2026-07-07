@@ -400,3 +400,93 @@ def test_tiingo_persistent_429_raises_ratelimiterror(monkeypatch):
     adapter = EquitiesAdapter(_tiingo_config())
     with pytest.raises(RateLimitError):  # distinct from a plain DataFetchError 404-miss
         adapter.fetch_ohlcv("AAPL", datetime.date(2022, 1, 1), datetime.date(2022, 2, 1))
+
+
+def _yf_adjusted_frame(symbol="AAPL"):
+    idx = pd.date_range("2026-01-05", periods=3, freq="B")
+    return pd.DataFrame(
+        {
+            ("Open", symbol): [10.0, 10.5, 10.2],
+            ("High", symbol): [10.6, 10.9, 10.7],
+            ("Low", symbol): [9.8, 10.1, 9.9],
+            ("Close", symbol): [10.5, 10.2, 10.6],
+            ("Volume", symbol): [1e6, 1.1e6, 9e5],
+        },
+        index=idx,
+    )
+
+
+def _yf_raw_actions_frame(symbol="AAPL"):
+    # Raw (unadjusted) close differs from adjusted; a dividend and a 2:1 split.
+    idx = pd.date_range("2026-01-05", periods=3, freq="B")
+    return pd.DataFrame(
+        {
+            ("Open", symbol): [20.0, 21.0, 10.2],
+            ("Close", symbol): [21.0, 20.4, 10.6],
+            ("Dividends", symbol): [0.0, 0.22, 0.0],
+            ("Stock Splits", symbol): [0.0, 0.0, 2.0],
+        },
+        index=idx,
+    )
+
+
+def test_merge_yf_extended_reads_raw_and_normalizes_splits():
+    from trading.venues.equities import _merge_yf_extended
+
+    # _merge_yf_extended runs BEFORE fetch_ohlcv's str.lower rename, so canonical
+    # columns are still yfinance-capitalized here; extras are already lowercase.
+    out = _merge_yf_extended(_yf_adjusted_frame(), _yf_raw_actions_frame())
+    assert out["Close"].tolist() == [10.5, 10.2, 10.6]  # canonical untouched (adjusted)
+    # Extended come from the RAW/actions frame, not the adjusted one.
+    assert out["close_raw"].tolist() == [21.0, 20.4, 10.6]
+    assert out["div_cash"].tolist() == [0.0, 0.22, 0.0]
+    # 0.0 (no split) normalized to 1.0; a real 2.0 split preserved.
+    assert out["split_factor"].tolist() == [1.0, 1.0, 2.0]
+
+
+def test_merge_yf_extended_defaults_when_actions_call_failed():
+    from trading.venues.equities import _merge_yf_extended
+
+    # Second call raised -> raw is None. Canonical bars must still flow with
+    # neutral extended defaults (close_raw falls back to the adjusted close).
+    out = _merge_yf_extended(_yf_adjusted_frame(), None)
+    assert out["Close"].tolist() == [10.5, 10.2, 10.6]
+    assert out["close_raw"].tolist() == [10.5, 10.2, 10.6]
+    assert (out["div_cash"] == 0.0).all()
+    assert (out["split_factor"] == 1.0).all()
+
+
+def test_merge_yf_extended_misaligned_dates_never_leave_nan():
+    from trading.venues.equities import _merge_yf_extended
+
+    adjusted = _yf_adjusted_frame()
+    raw = _yf_raw_actions_frame().iloc[:2]  # raw missing the last trading day
+    out = _merge_yf_extended(adjusted, raw)
+    assert not out[["close_raw", "div_cash", "split_factor"]].isna().any().any()
+    # The unmatched row defaults: close_raw<-adjusted close, div 0, split 1.
+    assert out["close_raw"].iloc[-1] == 10.6
+    assert out["div_cash"].iloc[-1] == 0.0
+    assert out["split_factor"].iloc[-1] == 1.0
+
+
+def test_yf_download_isolates_actions_call_failure(monkeypatch):
+    # The nightly-run risk: the second (actions) yf.download raises. The first
+    # call's canonical bars must survive with defaulted extras.
+    import trading.venues.equities as eq
+
+    calls = {"n": 0}
+
+    def fake_download(symbol, **kwargs):
+        calls["n"] += 1
+        if kwargs.get("actions"):  # the second call
+            raise RuntimeError("yahoo hiccup")
+        return _yf_adjusted_frame(symbol)
+
+    monkeypatch.setattr("yfinance.download", fake_download, raising=False)
+    import yfinance  # noqa: F401  (ensure the module exists to patch)
+
+    out = eq._yf_download("AAPL", datetime.date(2026, 1, 5), datetime.date(2026, 1, 8))
+    assert list(out.columns[:5]) == ["Open", "High", "Low", "Close", "Volume"]
+    assert (out["div_cash"] == 0.0).all()
+    assert (out["split_factor"] == 1.0).all()
+    assert calls["n"] == 2  # both calls attempted; the failing one was absorbed

@@ -62,20 +62,47 @@ def _yf_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.Da
     )
     if adjusted is None or adjusted.empty:
         return adjusted
-    raw = yf.download(
-        symbol, start=start_s, end=end_s, auto_adjust=False, actions=True, progress=False
-    )
+    # The second (actions) call only supplies the extended fields. It now runs
+    # on EVERY live nightly fetch, so its failure must never discard the
+    # canonical bars the first call already produced: on any error the extras
+    # fall back to neutral defaults (see _merge_yf_extended).
+    try:
+        raw = yf.download(
+            symbol, start=start_s, end=end_s, auto_adjust=False, actions=True, progress=False
+        )
+    except Exception:  # noqa: BLE001 - a flaky actions call must not lose the bars
+        raw = None
+    return _merge_yf_extended(adjusted, raw)
+
+
+def _merge_yf_extended(adjusted: pd.DataFrame, raw: pd.DataFrame | None) -> pd.DataFrame:
+    """Attach close_raw/div_cash/split_factor from the raw+actions frame onto
+    the canonical adjusted frame. The five canonical columns come SOLELY from
+    `adjusted` and are never touched. If `raw` is missing/empty/malformed, the
+    extras default (close_raw<-adjusted close, div_cash 0.0, split_factor 1.0)
+    so a survivorship-free backtest still gets its bars; and any label
+    misalignment (a date in adjusted absent from raw) is filled with those same
+    neutral defaults rather than left NaN (validate_ohlcv has no NaN check)."""
     if isinstance(adjusted.columns, pd.MultiIndex):
         adjusted.columns = adjusted.columns.get_level_values(0)
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
     out = adjusted[["Open", "High", "Low", "Close", "Volume"]].copy()
-    # Align the extras onto the adjusted index (same trading days by construction).
-    out["close_raw"] = raw["Close"]
-    out["div_cash"] = raw["Dividends"] if "Dividends" in raw.columns else 0.0
+    if raw is not None and not raw.empty and isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    if raw is None or raw.empty or "Close" not in raw.columns:
+        out["close_raw"] = out["Close"]
+        out["div_cash"] = 0.0
+        out["split_factor"] = 1.0
+        return out
+    out["close_raw"] = raw["Close"].reindex(out.index).fillna(out["Close"])
+    dividends = raw["Dividends"] if "Dividends" in raw.columns else None
+    out["div_cash"] = dividends.reindex(out.index).fillna(0.0) if dividends is not None else 0.0
     # yfinance encodes "no split" as 0.0; normalize to our 1.0-when-none convention.
     splits = raw["Stock Splits"] if "Stock Splits" in raw.columns else None
-    out["split_factor"] = splits.where(splits != 0.0, 1.0) if splits is not None else 1.0
+    if splits is not None:
+        splits = splits.reindex(out.index)
+        out["split_factor"] = splits.where(splits.notna() & (splits != 0.0), 1.0)
+    else:
+        out["split_factor"] = 1.0
     return out
 
 
