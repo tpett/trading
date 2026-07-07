@@ -52,6 +52,24 @@ def test_crypto_plist_runs_daily_0100_local():
     assert payload["SoftResourceLimits"] == {"NumberOfFiles": 4096}
 
 
+def test_earnings_plist_runs_weekdays_before_equities():
+    payload = plistlib.loads(build_plist("earnings", Path("/repo"), "/usr/local/bin/uv"))
+    assert payload["ProgramArguments"] == [
+        "/usr/local/bin/uv",
+        "run",
+        "--project",
+        "/repo",
+        "python",
+        "scripts/dump_earnings_calendar.py",
+    ]
+    # 17:30 local, an hour before the 18:30 equities run, so a reinstated
+    # earnings blackout would see the same-day calendar.
+    assert payload["StartCalendarInterval"] == [
+        {"Weekday": w, "Hour": 17, "Minute": 30} for w in (1, 2, 3, 4, 5)
+    ]
+    assert payload["StandardErrorPath"].endswith("state/earnings/launchd.log")
+
+
 def _ok(*args, **kwargs):
     return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
@@ -61,12 +79,12 @@ def test_install_writes_plists_and_bootstraps(tmp_path, monkeypatch):
     monkeypatch.setattr(schedule, "_launchctl", lambda *a: calls.append(a) or _ok())
     monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/local/bin/uv")
     messages = install(tmp_path / "repo", tmp_path)
-    for venue in ("equities", "crypto"):
-        assert plist_path(tmp_path, venue).exists()
+    for job in ("equities", "crypto", "earnings"):
+        assert plist_path(tmp_path, job).exists()
     actions = [c[0] for c in calls]
-    assert actions.count("bootout") == 2  # idempotent reinstall
-    assert actions.count("bootstrap") == 2
-    assert len(messages) == 2
+    assert actions.count("bootout") == 3  # idempotent reinstall
+    assert actions.count("bootstrap") == 3
+    assert len(messages) == 3
 
 
 def test_install_creates_log_dirs_for_fresh_repo(tmp_path, monkeypatch):
@@ -77,9 +95,9 @@ def test_install_creates_log_dirs_for_fresh_repo(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     assert not (repo_root / "state").exists()
     install(repo_root, tmp_path / "agents")
-    for venue in ("equities", "crypto"):
-        assert plist_path(tmp_path / "agents", venue).exists()
-        assert (repo_root / "state" / venue).is_dir()
+    for job in ("equities", "crypto", "earnings"):
+        assert plist_path(tmp_path / "agents", job).exists()
+        assert (repo_root / "state" / job).is_dir()
 
 
 def test_install_requires_uv_on_path(tmp_path, monkeypatch):
@@ -103,6 +121,7 @@ def test_status_reports_installed_and_loaded(tmp_path, monkeypatch):
     result = status(tmp_path)
     assert result["equities"] == {"installed": True, "loaded": True}
     assert result["crypto"] == {"installed": True, "loaded": False}
+    assert result["earnings"] == {"installed": True, "loaded": False}
 
 
 def test_remove_boots_out_and_deletes(tmp_path, monkeypatch):
@@ -111,6 +130,6 @@ def test_remove_boots_out_and_deletes(tmp_path, monkeypatch):
     monkeypatch.setattr(schedule, "_launchctl", lambda *a: calls.append(a) or _ok())
     install(tmp_path / "repo", tmp_path)
     remove(tmp_path)
-    assert [c[0] for c in calls].count("bootout") == 4  # 2 install + 2 remove
-    assert not plist_path(tmp_path, "equities").exists()
-    assert not plist_path(tmp_path, "crypto").exists()
+    assert [c[0] for c in calls].count("bootout") == 6  # 3 install + 3 remove
+    for job in ("equities", "crypto", "earnings"):
+        assert not plist_path(tmp_path, job).exists()

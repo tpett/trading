@@ -571,4 +571,5 @@ def test_schedule_status_cli_json(tmp_path, monkeypatch, capsys):
     assert payload == {
         "equities": {"installed": False, "loaded": False},
         "crypto": {"installed": False, "loaded": False},
+        "earnings": {"installed": False, "loaded": False},
     }

@@ -17,12 +17,24 @@ import subprocess
 from pathlib import Path
 
 VENUES = ("equities", "crypto")
+# Every scheduled job: the two venue runs plus the earnings-calendar dump.
+JOBS = (*VENUES, "earnings")
 
 _SCHEDULES: dict[str, list[dict[str, int]]] = {
     # Weekday evenings after NYSE close (local time; 1 = Monday ... 5 = Friday).
     "equities": [{"Weekday": w, "Hour": 18, "Minute": 30} for w in (1, 2, 3, 4, 5)],
     # Daily, after the 00:00 UTC crypto bar close (for US-negative offsets).
     "crypto": [{"Hour": 1, "Minute": 0}],
+    # Weekdays before the equities run, so a reinstated earnings blackout
+    # would see today's calendar. Reports land on weekdays; the trailing
+    # window on Monday still covers anything journaled over a weekend gap.
+    "earnings": [{"Weekday": w, "Hour": 17, "Minute": 30} for w in (1, 2, 3, 4, 5)],
+}
+
+_PROGRAM_ARGS: dict[str, list[str]] = {
+    "equities": ["trading", "run", "--venue", "equities"],
+    "crypto": ["trading", "run", "--venue", "crypto"],
+    "earnings": ["python", "scripts/dump_earnings_calendar.py"],
 }
 
 
@@ -30,12 +42,12 @@ class ScheduleError(RuntimeError):
     pass
 
 
-def label(venue: str) -> str:
-    return f"com.travis.trading.{venue}"
+def label(job: str) -> str:
+    return f"com.travis.trading.{job}"
 
 
-def plist_path(agents_dir: Path, venue: str) -> Path:
-    return agents_dir / f"{label(venue)}.plist"
+def plist_path(agents_dir: Path, job: str) -> Path:
+    return agents_dir / f"{label(job)}.plist"
 
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess:
@@ -43,23 +55,20 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["launchctl", *args], capture_output=True, text=True, check=False)
 
 
-def build_plist(venue: str, repo_root: Path, uv_path: str) -> bytes:
-    log = repo_root / "state" / venue / "launchd.log"
+def build_plist(job: str, repo_root: Path, uv_path: str) -> bytes:
+    log = repo_root / "state" / job / "launchd.log"
     return plistlib.dumps(
         {
-            "Label": label(venue),
+            "Label": label(job),
             "ProgramArguments": [
                 uv_path,
                 "run",
                 "--project",
                 str(repo_root),
-                "trading",
-                "run",
-                "--venue",
-                venue,
+                *_PROGRAM_ARGS[job],
             ],
             "WorkingDirectory": str(repo_root),
-            "StartCalendarInterval": _SCHEDULES[venue],
+            "StartCalendarInterval": _SCHEDULES[job],
             "StandardOutPath": str(log),
             "StandardErrorPath": str(log),
             # launchd defaults the soft file limit to 256; a cold-cache fetch
@@ -80,33 +89,33 @@ def install(repo_root: Path, agents_dir: Path) -> list[str]:
         raise ScheduleError("uv not found on PATH; cannot build LaunchAgents")
     agents_dir.mkdir(parents=True, exist_ok=True)
     messages: list[str] = []
-    for venue in VENUES:
+    for job in JOBS:
         # launchd cannot open StandardOut/ErrorPath if the parent directory is
         # missing — on a fresh machine every scheduled run would silently fail
-        # to spawn until the venue is run manually. Pre-create the log dir.
-        (repo_root / "state" / venue).mkdir(parents=True, exist_ok=True)
-        path = plist_path(agents_dir, venue)
-        path.write_bytes(build_plist(venue, repo_root, uv_path))
-        _launchctl("bootout", f"{_domain()}/{label(venue)}")  # idempotent reinstall
+        # to spawn until the job is run manually. Pre-create the log dir.
+        (repo_root / "state" / job).mkdir(parents=True, exist_ok=True)
+        path = plist_path(agents_dir, job)
+        path.write_bytes(build_plist(job, repo_root, uv_path))
+        _launchctl("bootout", f"{_domain()}/{label(job)}")  # idempotent reinstall
         result = _launchctl("bootstrap", _domain(), str(path))
         if result.returncode != 0:
-            raise ScheduleError(f"launchctl bootstrap failed for {venue}: {result.stderr}")
-        messages.append(f"{venue}: installed {path}")
+            raise ScheduleError(f"launchctl bootstrap failed for {job}: {result.stderr}")
+        messages.append(f"{job}: installed {path}")
     return messages
 
 
 def status(agents_dir: Path) -> dict[str, dict]:
     report: dict[str, dict] = {}
-    for venue in VENUES:
-        loaded = _launchctl("print", f"{_domain()}/{label(venue)}").returncode == 0
-        report[venue] = {"installed": plist_path(agents_dir, venue).exists(), "loaded": loaded}
+    for job in JOBS:
+        loaded = _launchctl("print", f"{_domain()}/{label(job)}").returncode == 0
+        report[job] = {"installed": plist_path(agents_dir, job).exists(), "loaded": loaded}
     return report
 
 
 def remove(agents_dir: Path) -> list[str]:
     messages: list[str] = []
-    for venue in VENUES:
-        _launchctl("bootout", f"{_domain()}/{label(venue)}")
-        plist_path(agents_dir, venue).unlink(missing_ok=True)
-        messages.append(f"{venue}: removed")
+    for job in JOBS:
+        _launchctl("bootout", f"{_domain()}/{label(job)}")
+        plist_path(agents_dir, job).unlink(missing_ok=True)
+        messages.append(f"{job}: removed")
     return messages

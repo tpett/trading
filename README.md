@@ -109,8 +109,9 @@ flag rather than being turned on by default.
 
 ## Scheduling
 
-`trading schedule install` creates two LaunchAgents in ~/Library/LaunchAgents:
-equities weekdays 18:30 and crypto daily 01:00. **launchd uses machine-local
+`trading schedule install` creates three LaunchAgents in ~/Library/LaunchAgents:
+equities weekdays 18:30, crypto daily 01:00, and the earnings-calendar dump
+weekdays 17:30 (see Earnings blackout below). **launchd uses machine-local
 time; the schedule assumes this Mac runs in America/New_York.** Crypto at
 01:00 ET lands after the 00:00 UTC daily bar close. Runs missed while asleep
 coalesce into one late run on wake, bounded by the staleness rule above.
@@ -155,6 +156,24 @@ Dropped: yfinance earnings dates proved unreliable at implementation time
 filter that exists live but not in backtest is worse than no filter. The
 code path remains behind `earnings_blackout_enabled` in
 `config/equities.toml` should a reliable source appear.
+
+A replacement source is being accumulated: the scheduled earnings job runs
+`scripts/dump_earnings_calendar.py`, which journals Robinhood's earnings
+calendar (report date, am/pm timing, verified flag, EPS estimate/actual)
+to `journal/earnings-calendar.jsonl` — append-only and idempotent per
+(day, window), so it is point-in-time by construction. Two windows per
+run: forward 14 days (the future blackout input) and trailing 7 days
+(captures actuals). One-time setup on the machine that runs it:
+
+    uv run python scripts/dump_earnings_calendar.py --auth
+
+which walks Robinhood's OAuth consent in a browser and stores tokens at
+`~/.config/trading/robinhood-mcp.json` (0600 — the token carries FULL
+trading scope, treat it like a password; over SSH, port-forward first:
+`ssh -L 8763:127.0.0.1:8763 mac-m1`). The blackout itself stays off until
+enough journaled history exists to validate it — reinstating it live
+without backtest evidence would recreate the live/backtest asymmetry that
+got it dropped.
 
 ## Rankings output
 
