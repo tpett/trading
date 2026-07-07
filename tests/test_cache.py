@@ -18,6 +18,15 @@ def _frame(start: datetime.date, end: datetime.date, value: float) -> pd.DataFra
     )
 
 
+def _wide_frame(start: datetime.date, end: datetime.date, value: float) -> pd.DataFrame:
+    """OHLCV plus the extended corporate-action columns."""
+    df = _frame(start, end, value)
+    df["div_cash"] = 0.0
+    df["split_factor"] = 1.0
+    df["close_raw"] = value * 2
+    return df
+
+
 class RecordingFetcher:
     def __init__(self, value: float):
         self.value = value
@@ -241,6 +250,165 @@ def test_datafetcherror_on_cold_miss_propagates(tmp_path):
 
     with pytest.raises(DataFetchError):
         cache.fetch("NEVER", START, END, raiser)
+
+
+def test_extended_columns_survive_cache_round_trip(tmp_path):
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+
+    class WideFetcher:
+        def __init__(self, value):
+            self.value = value
+
+        def __call__(self, symbol, start, end):
+            return _wide_frame(start, end, self.value)
+
+    df = cache.fetch("AAPL", START, END, WideFetcher(3.0))
+    assert list(df.columns) == [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "div_cash",
+        "split_factor",
+        "close_raw",
+    ]
+    assert (df["close_raw"] == 6.0).all()
+
+    # Reopen and read straight from the parquet: the extra columns persisted.
+    on_disk = pd.read_parquet(cache.path_for("AAPL"))
+    assert list(on_disk.columns) == list(df.columns)
+    assert (on_disk["split_factor"] == 1.0).all()
+
+    # A warm refetch keeps the wide schema through the concat/dedup merge.
+    warm = cache.fetch("AAPL", START, END, WideFetcher(4.0))
+    assert list(warm.columns) == list(df.columns)
+    assert warm.loc[pd.Timestamp("2026-02-15", tz="UTC"), "close_raw"] == 8.0
+
+
+def test_narrow_cache_migrates_to_wide_on_next_fetch(tmp_path):
+    # M2: a legacy narrow (pre-corporate-action) cache must UPGRADE seamlessly
+    # when the widened code returns wide frames -- the live yfinance cache dir
+    # holds real narrow parquets and its nightly run must not break.
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+    cache.fetch("AAPL", START, END, RecordingFetcher(1.0))  # narrow parquet on disk
+
+    def wide(symbol, start, end):
+        return _wide_frame(start, end, 2.0)
+
+    merged = cache.fetch("AAPL", START, END, wide)
+    assert set(merged.columns) == {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "div_cash",
+        "split_factor",
+        "close_raw",
+    }
+    # Old rows (pre-migration) get neutral defaults; close_raw falls back to close.
+    old = merged.loc[: pd.Timestamp("2026-01-20", tz="UTC")]
+    assert (old["div_cash"] == 0.0).all()
+    assert (old["split_factor"] == 1.0).all()
+    assert (old["close_raw"] == old["close"]).all()
+
+
+def test_real_schema_corruption_still_raises(tmp_path):
+    from trading.data.cache import CacheSchemaError
+
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+    cache.fetch("AAPL", START, END, lambda s, a, b: _wide_frame(a, b, 1.0))  # wide on disk
+
+    def narrower(symbol, start, end):  # fetch DROPS a canonical column -> real corruption
+        return _frame(start, end, 2.0).drop(columns=["volume"])
+
+    with pytest.raises(CacheSchemaError, match="rebuild this cache dir"):
+        cache.fetch("AAPL", START, END, narrower)
+
+
+def test_offline_serves_covered_range_without_fetching(tmp_path):
+    # Seed a full cache online, then reopen offline and confirm no fetch fires.
+    OhlcvCache(tmp_path / "c", refetch_days=30).fetch("AAPL", START, END, RecordingFetcher(1.0))
+
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+
+    def boom(symbol, start, end):
+        raise AssertionError("offline mode must never call fetch_fn")
+
+    df = offline.fetch("AAPL", datetime.date(2026, 1, 15), datetime.date(2026, 2, 15), boom)
+    assert df.index.min() == pd.Timestamp("2026-01-15", tz="UTC")
+    assert df.index.max() == pd.Timestamp("2026-02-15", tz="UTC")
+    assert (df["close"] == 1.0).all()
+
+
+def test_offline_missing_file_raises(tmp_path):
+    from trading.data.cache import OfflineCacheError
+
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+    with pytest.raises(OfflineCacheError, match="no parquet"):
+        offline.fetch("AAPL", START, END, RecordingFetcher(1.0))
+
+
+def test_offline_uncovered_start_raises(tmp_path):
+    from trading.data.cache import OfflineCacheError
+
+    # A request STARTING well before the cached span is a real miss.
+    OhlcvCache(tmp_path / "c", refetch_days=30).fetch("AAPL", START, END, RecordingFetcher(1.0))
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+    with pytest.raises(OfflineCacheError, match="after requested start"):
+        offline.fetch("AAPL", datetime.date(2025, 6, 1), END, RecordingFetcher(1.0))
+
+
+def test_offline_serves_delisted_trailing_gap_without_raising(tmp_path):
+    # C1 regression: a delisted name's bars stop at its delisting date, years
+    # before the uniform backtest `end`. prepare() still requests [start, end]
+    # for every symbol. Offline mode MUST serve the cached history (matching the
+    # online path) rather than raise -- raising would drop every delisted name
+    # and silently reintroduce the survivorship bias the frozen cache removes.
+    delisting = datetime.date(2026, 2, 1)
+    OhlcvCache(tmp_path / "c", refetch_days=30).fetch(
+        "XLNX", START, delisting, RecordingFetcher(1.0)
+    )
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+
+    def boom(symbol, start, end):
+        raise AssertionError("offline mode must never call fetch_fn")
+
+    # Ask for the full window even though bars end at delisting -- must be served.
+    df = offline.fetch("XLNX", START, datetime.date(2026, 6, 1), boom)
+    assert not df.empty
+    assert df.index.max().date() == delisting
+
+
+def test_offline_gross_interior_gap_raises(tmp_path):
+    from trading.data.cache import OfflineCacheError
+
+    # A backfill that died mid-window leaves a months-long interior hole. That is
+    # corruption, not a delisting, and offline mode must fail loudly.
+    idx = pd.DatetimeIndex(
+        list(pd.date_range("2026-01-01", "2026-01-31", freq="D", tz="UTC"))
+        + list(pd.date_range("2026-05-01", "2026-05-31", freq="D", tz="UTC"))  # ~3-month hole
+    )
+    holed = pd.DataFrame({c: 1.0 for c in ["open", "high", "low", "close", "volume"]}, index=idx)
+    path = tmp_path / "c"
+    path.mkdir()
+    (path / ".source").write_text("yfinance")
+    holed.to_parquet(path / "HOLE.parquet")
+    offline = OhlcvCache(path, refetch_days=30, offline=True)
+    with pytest.raises(OfflineCacheError, match="interior gap"):
+        offline.fetch("HOLE", datetime.date(2026, 1, 1), datetime.date(2026, 5, 31), None)
+
+
+def test_offline_tolerates_weekend_gap_at_edges(tmp_path):
+    # Cached span starts a few days after the requested start (weekend/holiday);
+    # within _START_TOLERANCE this must be served, not rejected.
+    OhlcvCache(tmp_path / "c", refetch_days=30).fetch(
+        "AAPL", datetime.date(2026, 1, 3), END, RecordingFetcher(1.0)
+    )
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+    df = offline.fetch("AAPL", START, END, RecordingFetcher(1.0))  # asks from Jan 1
+    assert not df.empty
 
 
 def test_backfill_waits_on_ratelimit_then_succeeds(tmp_path, monkeypatch):

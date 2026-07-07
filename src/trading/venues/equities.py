@@ -25,6 +25,7 @@ import pandas as pd
 
 from trading.config import VenueConfig
 from trading.venues.base import (
+    EXTENDED_OHLCV_COLUMNS,
     OHLCV_COLUMNS,
     DataFetchError,
     RateLimitError,
@@ -37,17 +38,72 @@ DEFAULT_MEMBERSHIP_CSV = Path(__file__).parent / "universes" / "equities_members
 
 
 def _yf_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
-    """Network touchpoint, isolated for monkeypatching. yfinance `end` is exclusive."""
+    """Network touchpoint, isolated for monkeypatching. yfinance `end` is exclusive.
+
+    Approach (b): the FIRST call is byte-for-byte the frozen live call
+    (auto_adjust=True, actions=False) -- its five columns are the canonical
+    adjusted basis the golden fixtures and live system depend on, and they are
+    returned untouched. A SECOND call (auto_adjust=False, actions=True) supplies
+    ONLY the extended corporate-action fields (raw close, dividends, splits),
+    merged by date. Reconstructing the adjusted basis from the raw call (the
+    Adj-Close/Close ratio, approach a) would risk drifting those five values by
+    a rounding ULP; keeping the original call guarantees they cannot move. The
+    extra request per symbol is acceptable for a one-off backfill.
+
+    Extended columns are returned pre-named (close_raw/div_cash/split_factor) so
+    the str.lower() rename in fetch_ohlcv leaves them unchanged.
+    """
     import yfinance as yf
 
-    return yf.download(
-        symbol,
-        start=start.isoformat(),
-        end=(end + datetime.timedelta(days=1)).isoformat(),
-        auto_adjust=True,
-        actions=False,
-        progress=False,
+    start_s = start.isoformat()
+    end_s = (end + datetime.timedelta(days=1)).isoformat()
+    adjusted = yf.download(
+        symbol, start=start_s, end=end_s, auto_adjust=True, actions=False, progress=False
     )
+    if adjusted is None or adjusted.empty:
+        return adjusted
+    # The second (actions) call only supplies the extended fields. It now runs
+    # on EVERY live nightly fetch, so its failure must never discard the
+    # canonical bars the first call already produced: on any error the extras
+    # fall back to neutral defaults (see _merge_yf_extended).
+    try:
+        raw = yf.download(
+            symbol, start=start_s, end=end_s, auto_adjust=False, actions=True, progress=False
+        )
+    except Exception:  # noqa: BLE001 - a flaky actions call must not lose the bars
+        raw = None
+    return _merge_yf_extended(adjusted, raw)
+
+
+def _merge_yf_extended(adjusted: pd.DataFrame, raw: pd.DataFrame | None) -> pd.DataFrame:
+    """Attach close_raw/div_cash/split_factor from the raw+actions frame onto
+    the canonical adjusted frame. The five canonical columns come SOLELY from
+    `adjusted` and are never touched. If `raw` is missing/empty/malformed, the
+    extras default (close_raw<-adjusted close, div_cash 0.0, split_factor 1.0)
+    so a survivorship-free backtest still gets its bars; and any label
+    misalignment (a date in adjusted absent from raw) is filled with those same
+    neutral defaults rather than left NaN (validate_ohlcv has no NaN check)."""
+    if isinstance(adjusted.columns, pd.MultiIndex):
+        adjusted.columns = adjusted.columns.get_level_values(0)
+    out = adjusted[["Open", "High", "Low", "Close", "Volume"]].copy()
+    if raw is not None and not raw.empty and isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    if raw is None or raw.empty or "Close" not in raw.columns:
+        out["close_raw"] = out["Close"]
+        out["div_cash"] = 0.0
+        out["split_factor"] = 1.0
+        return out
+    out["close_raw"] = raw["Close"].reindex(out.index).fillna(out["Close"])
+    dividends = raw["Dividends"] if "Dividends" in raw.columns else None
+    out["div_cash"] = dividends.reindex(out.index).fillna(0.0) if dividends is not None else 0.0
+    # yfinance encodes "no split" as 0.0; normalize to our 1.0-when-none convention.
+    splits = raw["Stock Splits"] if "Stock Splits" in raw.columns else None
+    if splits is not None:
+        splits = splits.reindex(out.index)
+        out["split_factor"] = splits.where(splits.notna() & (splits != 0.0), 1.0)
+    else:
+        out["split_factor"] = 1.0
+    return out
 
 
 TIINGO_CONFIG_PATH = Path.home() / ".config" / "trading" / "config.toml"
@@ -61,6 +117,15 @@ _TIINGO_COLUMNS = {
     "adjLow": "low",
     "adjClose": "close",
     "adjVolume": "volume",
+}
+# Extended corporate-action fields carried alongside the adjusted OHLCV. Tiingo
+# already ships them on every row: divCash (0.0 when none), splitFactor (1.0
+# when none -- Tiingo's own convention matches ours), and the RAW (unadjusted)
+# close. Cached now so future dividend/split experiments need no re-pull.
+_TIINGO_EXTENDED_COLUMNS = {
+    "divCash": "div_cash",
+    "splitFactor": "split_factor",
+    "close": "close_raw",
 }
 
 
@@ -166,7 +231,8 @@ def _tiingo_download(symbol: str, start: datetime.date, end: datetime.date) -> p
     df = pd.DataFrame(rows)
     df.index = pd.to_datetime(df["date"], utc=True).dt.normalize()
     df.index.name = "Date"
-    return df[list(_TIINGO_COLUMNS)].rename(columns=_TIINGO_COLUMNS)
+    mapping = {**_TIINGO_COLUMNS, **_TIINGO_EXTENDED_COLUMNS}
+    return df[list(mapping)].rename(columns=mapping)
 
 
 # Dispatch by source NAME resolved at call time (not a dict of function
@@ -238,7 +304,12 @@ class EquitiesAdapter:
             raise DataFetchError(f"no equities data for {symbol}")
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
-        df = raw.rename(columns=str.lower)[OHLCV_COLUMNS].astype("float64")
+        renamed = raw.rename(columns=str.lower)
+        # Canonical OHLCV is required; the extended corporate-action columns
+        # ride along when the source provides them (both do now) and are
+        # tolerated-absent so nothing breaks if a source ever omits them.
+        extras = [c for c in EXTENDED_OHLCV_COLUMNS if c in renamed.columns]
+        df = renamed[OHLCV_COLUMNS + extras].astype("float64")
         if df.index.tz is None:
             df.index = df.index.tz_localize("UTC")
         else:
