@@ -15,19 +15,24 @@ Two distinct hazards this module resolves, both discovered live against Tiingo:
    1995); CTL now resolves to Qwest while CenturyLink's history is under LUMN.
 
 2. NAMESPACE_OVERRIDES -- NOT a rename: a CURRENT US ticker whose bare form
-   collides with a foreign listing the vendor happens to rank first. The
-   entity never changed name or ticker; the vendor just needs a different
-   identifier string. Kept separate from RENAMES because the semantics
-   differ (no point-in-time boundary, no chain) and because the override is
-   vendor-specific (see resolve_current's tiingo gating in the equities
-   adapter -- applying an override to a vendor that already resolves the
-   bare ticker correctly would BREAK it).
+   collides with a foreign listing the vendor happens to rank first, with no
+   point-in-time boundary and no chain. Vendor-specific (gated to tiingo in
+   the equities adapter). Empty today -- the one candidate (MMC) turned out
+   to be a genuine ticker change and moved to RENAMES -- but kept as the seam
+   for a future genuine collision.
+
+resolution_collisions() surfaces where the same company can enter the ranking
+twice -- from cross-index membership double-listing (a few names even in the
+default sp500+ndx universe) or ticker recycling (more under sp400). See that
+function; it is a detector, not yet an auto-fix.
 
 build_cik_map.py imports RENAMES from here so the fundamentals/CIK overlay
 and the price-fetch path share one reviewed table.
 """
 
 from __future__ import annotations
+
+import pandas as pd
 
 # (old_symbol, new_symbol, change_date). Reviewed ticker renames among 2017+
 # membership symbols. change_date is the membership CSV's remove/add
@@ -50,6 +55,7 @@ RENAMES = [
     ("RE", "EG", "2023-07-10"),
     ("ABC", "COR", "2023-08-30"),
     ("PEAK", "DOC", "2024-03-04"),
+    ("MMC", "MRSH", "2026-01-14"),  # Marsh & McLennan ticker change; see MMC note below
     # --- Verified additions (2026-07-07): each successor was confirmed to
     # carry the OLD ticker's FULL continuous history on Tiingo (metadata
     # startDate well before the membership window), so resolving the old
@@ -64,29 +70,34 @@ RENAMES = [
     ("HFC", "DINO", "2021-06-04"),  # HollyFrontier -> HF Sinclair (DINO back to 1992)
     ("TMK", "GL", "2019-08-08"),  # Torchmark -> Globe Life (GL back to 1987)
     # CBS chain note: Paramount (PARA) merged with Skydance on 2025-08-06 and
-    # the CURRENT ticker is PSKY -- but this is deliberately NOT chained
+    # the current ticker is PSKY -- but this is deliberately NOT chained
     # CBS->PARA->PSKY. Unlike the ABC->COR pattern, Tiingo did NOT carry the
-    # continuous history forward under PSKY: PSKY is a FRESH listing
-    # (startDate 2025-08-06) that returns EMPTY for every historical date,
-    # whereas PARA carries the full 2006..2025-08-07 lineage covering BOTH
-    # the CBS (2017..2019) and PARA (2022..2025) membership windows. Adding
-    # the PSKY hop would redirect those fetches to an empty series and zero
-    # out coverage. PARA remains fetchable post-delisting, and PSKY is not a
-    # membership symbol, so terminating the chain at PARA is correct.
+    # continuous history forward under PSKY: PSKY is a FRESH listing that
+    # returns EMPTY for every date before 2025-08-06, whereas PARA carries the
+    # full 2006..2025-08-07 lineage covering BOTH the CBS (2017..2019) and PARA
+    # (2022..2025) membership windows. Chaining to PSKY would redirect those
+    # fetches to an empty series and zero out coverage. PSKY IS its own current
+    # membership row (sp500 from 2025-08-08) and self-covers via Tiingo from
+    # its listing date, so terminating the CBS chain at PARA -- and leaving
+    # PSKY to resolve to itself -- covers every window correctly.
 ]
 
+# MMC note: Marsh & McLennan is a genuine ticker change, MMC -> MRSH on
+# 2026-01-14 (membership CSV: MMC ends and MRSH begins that day), and Tiingo
+# serves Marsh's full history back to 1987 under MRSH -- the ABC->COR pattern,
+# NOT a bare-symbol collision. It therefore lives in RENAMES above (so the
+# fundamentals/CIK overlay chains it too, not just the price path) rather than
+# here. Bare "MMC" on Tiingo does resolve to Mitre Mining Corp (ASX), but the
+# rename entry supersedes that for the whole membership window.
+#
 # Vendor namespace collisions (NOT renames): a current US ticker whose bare
-# form the vendor maps to a foreign listing with no US daily bars. Applied by
-# resolve_current() AFTER the rename chain. Vendor-specific -- gated to the
-# tiingo bar_source in the equities adapter (see fetch_ohlcv); on a vendor
-# that resolves the bare ticker correctly this map must NOT be applied.
-NAMESPACE_OVERRIDES: dict[str, str] = {
-    # Tiingo's bare "MMC" resolves to Mitre Mining Corporation Ltd (ASX, no US
-    # daily bars); US Marsh & McLennan is served under "MRSH" (NYSE, back to
-    # 1987, verified 2026-07-07). Not a rename -- the real MMC never changed
-    # ticker; Tiingo just ranks the ASX listing first for the bare symbol.
-    "MMC": "MRSH",
-}
+# form the vendor maps to a foreign listing with no US daily bars, with no
+# point-in-time boundary or chain. Applied by resolve_current() AFTER the
+# rename chain, and gated to the tiingo bar_source in the equities adapter --
+# on a vendor that resolves the bare ticker correctly this map must NOT be
+# applied. Empty today (MMC turned out to be a real rename); kept as the seam
+# for a future genuine collision.
+NAMESPACE_OVERRIDES: dict[str, str] = {}
 
 
 def normalize(symbol: str) -> str:
@@ -114,3 +125,46 @@ def resolve_current(symbol: str) -> str:
         seen.add(cursor)
         cursor = new_by_old[cursor]
     return NAMESPACE_OVERRIDES.get(cursor, cursor)
+
+
+def resolution_collisions(membership: pd.DataFrame, indices: tuple[str, ...]) -> list[dict]:
+    """Old tickers whose successor is ALSO an independent member (in `indices`)
+    during an interval that OVERLAPS the old ticker's tenure.
+
+    Two causes, both surfaced here:
+    - Membership double-listing (affects the default sp500+ndx universe): a
+      company in BOTH indices is labeled with the OLD ticker in one index and
+      the CURRENT ticker in the other across a rename (e.g. FB in sp500, META
+      in ndx), so universe() -- which dedups by ticker string -- returns it
+      twice. Both resolve to the same successor and rank as two identical
+      symbols. Pre-existing in the CSV, independent of resolution.
+    - Ticker recycling (adds more under sp400-inclusive configs): an old
+      ticker (ABC, sp500) and a mid-cap recycler of its successor's symbol
+      (COR, independently sp400 2019..2021) are both members at once and both
+      fetch the same successor series.
+    Either way the same price stream enters the ranking twice. A proper fix is
+    resolution-aware universe dedup (collapse symbols sharing a resolved
+    identity) and/or reconciling the CSV's cross-index labeling; until then
+    this surfaces the affected pairs so no run double-counts silently.
+    """
+    rows = membership[membership["index"].isin(indices)]
+    intervals: dict[str, list[tuple[str, str]]] = {}
+    for _, r in rows.iterrows():
+        intervals.setdefault(normalize(r["symbol"]), []).append((r["start"], r["end"] or "9999"))
+    out: list[dict] = []
+    for old, new, _ in RENAMES:
+        old_n, new_n = normalize(old), normalize(new)
+        if old_n not in intervals or new_n not in intervals:
+            continue
+        for os_, oe in intervals[old_n]:
+            for ns, ne in intervals[new_n]:
+                if os_ < ne and ns < oe:  # half-open interval overlap
+                    out.append(
+                        {
+                            "old": old_n,
+                            "new": new_n,
+                            "old_window": (os_, oe),
+                            "new_window": (ns, ne),
+                        }
+                    )
+    return out

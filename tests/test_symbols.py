@@ -54,13 +54,6 @@ def test_namespace_override_applied_after_chain(monkeypatch):
     assert resolve_current("mmc") == "MRSH"  # normalized first
 
 
-def test_mmc_namespace_override_is_live():
-    # The real committed override: Tiingo's bare MMC is the ASX Mitre Mining
-    # squatter; US Marsh & McLennan is served under MRSH.
-    assert NAMESPACE_OVERRIDES["MMC"] == "MRSH"
-    assert resolve_current("MMC") == "MRSH"
-
-
 def test_every_rename_old_ticker_redirects_away_from_its_literal():
     # Contamination guard: fetching the LITERAL old ticker risks a recycled,
     # different-identity company's bars. resolve_current MUST redirect every
@@ -101,3 +94,71 @@ def test_known_renames_reach_expected_successors():
     }
     for old, new in expected.items():
         assert resolve_current(old) == new
+
+
+def test_mmc_is_a_rename_not_a_namespace_override():
+    from trading.symbols import NAMESPACE_OVERRIDES, resolve_current
+
+    # MMC->MRSH is a genuine 2026-01-14 ticker change (so build_cik_map chains
+    # it for fundamentals too), not a bare-symbol collision.
+    assert resolve_current("MMC") == "MRSH"
+    assert "MMC" not in NAMESPACE_OVERRIDES
+
+
+def test_resolution_collisions_surfaces_default_universe_double_listings():
+    import pandas as pd
+
+    from trading.symbols import resolution_collisions
+    from trading.venues.equities import DEFAULT_MEMBERSHIP_CSV
+
+    membership = pd.read_csv(DEFAULT_MEMBERSHIP_CSV, comment="#", dtype=str).fillna("")
+    pairs = {(c["old"], c["new"]) for c in resolution_collisions(membership, ("sp500", "ndx"))}
+    # PRE-EXISTING membership-data issue the detector surfaces (not caused by
+    # resolution): three companies dual-listed in sp500 AND ndx are labeled
+    # with the OLD ticker in one index and the CURRENT ticker in the other
+    # across a rename, so the same company appears twice in the universe. This
+    # affects every sp500+ndx backtest equally (the running Tiingo re-run and
+    # the yfinance baseline alike), so it does not distort their COMPARISON --
+    # but the CSV labeling should be reconciled. Pinned here so it stays visible.
+    assert pairs == {("FB", "META"), ("FISV", "FI"), ("WLTW", "WTW")}
+
+
+def test_resolution_collisions_flags_sp400_overlaps():
+    import pandas as pd
+
+    from trading.symbols import resolution_collisions
+    from trading.venues.equities import DEFAULT_MEMBERSHIP_CSV
+
+    membership = pd.read_csv(DEFAULT_MEMBERSHIP_CSV, comment="#", dtype=str).fillna("")
+    collisions = resolution_collisions(membership, ("sp500", "ndx", "sp400"))
+    pairs = {(c["old"], c["new"]) for c in collisions}
+    # The four verified overlaps (old in sp500, successor independently sp400).
+    assert {("ABC", "COR"), ("ADS", "BFH"), ("GPS", "GAP"), ("HFC", "DINO")} <= pairs
+
+
+def test_resolution_collisions_synthetic_overlap_and_clean_handoff():
+    import pandas as pd
+
+    from trading.symbols import RENAMES, resolution_collisions
+
+    old, new, _ = RENAMES[0]  # any real rename pair
+    # Overlapping intervals -> collision.
+    overlap = pd.DataFrame(
+        {
+            "symbol": [old, new],
+            "index": ["sp500", "sp400"],
+            "start": ["2019-01-01", "2019-06-01"],
+            "end": ["2021-01-01", "2022-01-01"],
+        }
+    )
+    assert resolution_collisions(overlap, ("sp500", "sp400"))
+    # Clean handoff (old ends exactly when new begins) -> no collision.
+    handoff = pd.DataFrame(
+        {
+            "symbol": [old, new],
+            "index": ["sp500", "sp500"],
+            "start": ["2019-01-01", "2021-01-01"],
+            "end": ["2021-01-01", ""],
+        }
+    )
+    assert resolution_collisions(handoff, ("sp500",)) == []
