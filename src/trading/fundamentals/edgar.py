@@ -7,9 +7,14 @@ top-up (trading.fundamentals.companyfacts) normalizes to this SAME table so
 backfill and top-up cannot diverge.
 
 Tag fallback chains are LOCKED to the xbrl-scout findings (2023q1 census:
-the three revenue tags cover 76.5% of 10-K/10-Q filers, the three COGS tags
-~48.5%, Assets 99.5%), extended with the value primitives (net income,
-stockholders' equity, shares outstanding). Consolidated rows only (empty
+the modern revenue tags cover 76.5% of 10-K/10-Q filers, the modern COGS
+tags ~48.5%, Assets 99.5%), extended with the value primitives (net income,
+stockholders' equity, shares outstanding) and, LAST in each chain, the
+pre-ASC-606 single-value fallbacks SalesRevenueNet / CostOfGoodsSold that
+dominate 2018-and-earlier filings (2018q1 FSDS census: SalesRevenueNet ~34k
+filers, CostOfGoodsSold ~6k) -- these recover early-history quality coverage
+without disturbing any post-606 value (see the REVENUE_TAGS/COGS_TAGS
+comments for the exact ordering justification). Consolidated rows only (empty
 segments + coreg). Roughly half of filers (banks, insurers) report no COGS
 concept at all -> their quality metric is NaN downstream and ranks neutral
 (0.5) by design, while their net income/equity still resolve via this
@@ -45,15 +50,31 @@ import pandas as pd
 
 USER_AGENT = "trading-system travis@launchsupply.com"  # mandatory on every SEC request
 
+# Post-ASC-606 tags stay FIRST so a 2018-2019 transition filing that reports
+# both a modern tag AND a legacy fallback resolves to the modern tag and every
+# currently-covered value is preserved bit-for-bit (TAG_PRIORITY picks the
+# first PRESENT tag per filing). SalesRevenueNet is the pre-606 single-value
+# total (net of returns/allowances/discounts) that ~34k of the 2018q1 filers
+# used; it goes AFTER Revenues -- both are period totals, but Revenues is the
+# current us-gaap total-revenue concept, so when a transition filing carries
+# both the modern total wins. IncludingAssessedTax stays last (it is the
+# gross-of-tax variant, only used when nothing cleaner is reported).
 REVENUE_TAGS = [
     "RevenueFromContractWithCustomerExcludingAssessedTax",
     "Revenues",
     "RevenueFromContractWithCustomerIncludingAssessedTax",
+    "SalesRevenueNet",
 ]
+# CostOfGoodsSold is the classic pre-606 single-value COGS tag (~6k of the
+# 2018q1 filers). It goes AFTER the modern tags for the same transition-filing
+# reason: CostOfGoodsAndServicesSold / CostOfRevenue are the current concepts,
+# and the ...ExcludingDepreciation... variant is a more specific modern tag; a
+# legacy filing that reports none of those falls through to CostOfGoodsSold.
 COGS_TAGS = [
     "CostOfGoodsAndServicesSold",
     "CostOfRevenue",
     "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization",
+    "CostOfGoodsSold",
 ]
 ASSETS_TAGS = ["Assets"]
 NET_INCOME_TAGS = ["NetIncomeLoss"]

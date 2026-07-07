@@ -185,6 +185,49 @@ def test_dimensional_rows_neither_win_nor_block(tmp_path):
     assert facts[(facts["cik"] == 600) & (facts["concept"] == "revenue")].empty
 
 
+def test_pre_asc606_revenue_and_cogs_fallbacks(tmp_path):
+    # Pre-ASC-606 filings (before ~2018) used SalesRevenueNet / CostOfGoodsSold.
+    # When NONE of the modern tags are present, these legacy fallbacks resolve;
+    # when a modern tag IS present alongside the legacy one, the modern tag
+    # must still win (post-606 tags stay first in TAG_PRIORITY).
+    subs = [
+        # cik 900: legacy-only filing -> the pre-606 fallbacks resolve.
+        sub_line("0030-18-000001", 900, "10-K", "20171231", "2017", "FY", "20180215"),
+        # cik 910: transition filing carrying BOTH a modern tag and the legacy
+        # fallback -> the modern tag must win, value unchanged.
+        sub_line("0031-18-000001", 910, "10-K", "20171231", "2017", "FY", "20180215"),
+    ]
+    nums = [
+        num_line("0030-18-000001", "SalesRevenueNet", "20171231", 4, 300.0),
+        num_line("0030-18-000001", "CostOfGoodsSold", "20171231", 4, 180.0),
+        num_line("0030-18-000001", "Assets", "20171231", 0, 1000.0),
+        # cik 910: modern + legacy both present for each concept.
+        num_line("0031-18-000001", "Revenues", "20171231", 4, 500.0),
+        num_line("0031-18-000001", "SalesRevenueNet", "20171231", 4, 499.0),
+        num_line("0031-18-000001", "CostOfRevenue", "20171231", 4, 250.0),
+        num_line("0031-18-000001", "CostOfGoodsSold", "20171231", 4, 249.0),
+        num_line("0031-18-000001", "Assets", "20171231", 0, 2000.0),
+    ]
+    facts = load_quarter_facts(write_quarter_zip(tmp_path / "pre606.zip", subs, nums))
+
+    rev = facts[(facts["cik"] == 900) & (facts["concept"] == "revenue")]
+    assert len(rev) == 1
+    assert rev.iloc[0]["tag"] == "SalesRevenueNet"
+    assert rev.iloc[0]["value"] == 300.0
+    cogs = facts[(facts["cik"] == 900) & (facts["concept"] == "cogs")]
+    assert len(cogs) == 1
+    assert cogs.iloc[0]["tag"] == "CostOfGoodsSold"
+    assert cogs.iloc[0]["value"] == 180.0
+
+    # cik 910: modern tags win over the legacy fallbacks.
+    rev2 = facts[(facts["cik"] == 910) & (facts["concept"] == "revenue")]
+    assert rev2.iloc[0]["tag"] == "Revenues"
+    assert rev2.iloc[0]["value"] == 500.0
+    cogs2 = facts[(facts["cik"] == 910) & (facts["concept"] == "cogs")]
+    assert cogs2.iloc[0]["tag"] == "CostOfRevenue"
+    assert cogs2.iloc[0]["value"] == 250.0
+
+
 def test_shares_fallback_tag_requires_period_end_date(tmp_path):
     # The cover-date relaxation (ddate >= period) is dei-only: the us-gaap
     # CommonStockSharesOutstanding fallback is a normal balance-sheet instant
