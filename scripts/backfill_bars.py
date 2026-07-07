@@ -23,9 +23,29 @@ from pathlib import Path
 from trading.config import load_venue_config
 from trading.data.cache import OhlcvCache
 from trading.venues import make_adapter
-from trading.venues.base import DataFetchError
+from trading.venues.base import DataFetchError, RateLimitError
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _sleep(seconds: float) -> None:
+    """Sleep touchpoint, isolated for tests."""
+    import time
+
+    time.sleep(seconds)
+
+
+def _fetch_waiting_on_rate_limit(cache, adapter, symbol, start, end, wait_s):
+    """cache.fetch, but a rate-limit rejection waits and retries the SAME
+    symbol instead of surfacing -- so a metered plan slows the backfill
+    rather than punching coverage holes. A genuine miss (404 -> empty ->
+    DataFetchError, which is NOT a RateLimitError) propagates immediately."""
+    while True:
+        try:
+            return cache.fetch(symbol, start, end, adapter.fetch_ohlcv)
+        except RateLimitError:
+            print(f"  rate-limited on {symbol}; waiting {wait_s:.0f}s", flush=True)
+            _sleep(wait_s)
 
 
 def historical_symbols(adapter, start: datetime.date, end: datetime.date) -> list[str]:
@@ -52,6 +72,20 @@ def main() -> int:
         default=0.95,
         help="fail if fewer than this fraction of symbols returned bars",
     )
+    parser.add_argument(
+        "--throttle-s",
+        type=float,
+        default=0.0,
+        help="min seconds between symbol fetches; set ~75 to stay under a "
+        "50 req/hour free-tier cap (0 = full speed for an unmetered plan)",
+    )
+    parser.add_argument(
+        "--rate-limit-wait-s",
+        type=float,
+        default=300.0,
+        help="on a 429 (hourly cap hit), wait this long and RETRY the same "
+        "symbol rather than dropping it into a silent coverage gap",
+    )
     args = parser.parse_args()
 
     config = load_venue_config(args.venue, Path(args.config_dir))
@@ -76,18 +110,23 @@ def main() -> int:
     missing: list[str] = []
     errors: list[str] = []
     for i, symbol in enumerate(symbols, 1):
+        if args.throttle_s and i > 1:
+            _sleep(args.throttle_s)
         try:
-            df = cache.fetch(symbol, fetch_start, end, adapter.fetch_ohlcv)
+            df = _fetch_waiting_on_rate_limit(
+                cache, adapter, symbol, fetch_start, end, args.rate_limit_wait_s
+            )
+            fetched += 1 if not df.empty else 0
             if df.empty:
                 missing.append(symbol)
-            else:
-                fetched += 1
         except DataFetchError:
-            missing.append(symbol)  # source has no such ticker
+            # NOT a RateLimitError (those wait+retry inside): a genuine
+            # "no such ticker" (404 -> empty -> raised by the adapter).
+            missing.append(symbol)
         except Exception as exc:  # noqa: BLE001 - report, don't abort the whole pass
             errors.append(f"{symbol}: {type(exc).__name__}: {exc}")
-        if i % 50 == 0:
-            print(f"  {i}/{len(symbols)} ({fetched} ok, {len(missing)} missing)")
+        if i % 25 == 0:
+            print(f"  {i}/{len(symbols)} ({fetched} ok, {len(missing)} missing)", flush=True)
 
     coverage = fetched / len(symbols) if symbols else 0.0
     print(f"\ncoverage: {fetched}/{len(symbols)} = {coverage:.1%}")

@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import datetime
 
 import pandas as pd
@@ -237,3 +241,26 @@ def test_datafetcherror_on_cold_miss_propagates(tmp_path):
 
     with pytest.raises(DataFetchError):
         cache.fetch("NEVER", START, END, raiser)
+
+
+def test_backfill_waits_on_ratelimit_then_succeeds(tmp_path, monkeypatch):
+    import scripts.backfill_bars as bf
+
+    from trading.venues.base import RateLimitError
+
+    waits = []
+    monkeypatch.setattr(bf, "_sleep", lambda s: waits.append(s))
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+    calls = {"n": 0}
+
+    class Adapter:
+        def fetch_ohlcv(self, symbol, start, end):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RateLimitError("429")
+            return _frame(START, END, 50.0)
+
+    df = bf._fetch_waiting_on_rate_limit(cache, Adapter(), "X", START, END, wait_s=42)
+    assert not df.empty
+    assert calls["n"] == 3  # waited through two 429s, then got bars
+    assert waits == [42, 42]

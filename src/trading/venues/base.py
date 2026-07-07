@@ -22,6 +22,14 @@ class DataFetchError(RuntimeError):
     """A symbol's bars could not be fetched or were empty."""
 
 
+class RateLimitError(DataFetchError):
+    """The bar source rejected the request for rate-limiting reasons (e.g.
+    an hourly request cap). Distinct from a genuine "no such ticker" so a
+    backfill can WAIT and retry rather than record the symbol as missing --
+    dropping a rate-limited symbol would silently bias coverage. Subclasses
+    DataFetchError so the cache's cold/warm handling treats it identically."""
+
+
 @dataclass(frozen=True)
 class SymbolInfo:
     symbol: str

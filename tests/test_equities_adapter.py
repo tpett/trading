@@ -346,3 +346,16 @@ def test_tiingo_malformed_config_raises_clean_error(monkeypatch, tmp_path):
 
     with pytest.raises(DataFetchError, match="not valid TOML"):
         tiingo_token()
+
+
+def test_tiingo_persistent_429_raises_ratelimiterror(monkeypatch):
+    from trading.venues.base import RateLimitError
+
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    monkeypatch.setattr("trading.venues.equities._tiingo_sleep", lambda s: None)
+    monkeypatch.setattr(
+        "trading.venues.equities._tiingo_get", lambda url, params: (429, b"over allocation")
+    )
+    adapter = EquitiesAdapter(_tiingo_config())
+    with pytest.raises(RateLimitError):  # distinct from a plain DataFetchError 404-miss
+        adapter.fetch_ohlcv("AAPL", datetime.date(2022, 1, 1), datetime.date(2022, 2, 1))

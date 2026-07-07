@@ -27,6 +27,7 @@ from trading.config import VenueConfig
 from trading.venues.base import (
     OHLCV_COLUMNS,
     DataFetchError,
+    RateLimitError,
     SymbolInfo,
     VenueConstraints,
     validate_ohlcv,
@@ -155,6 +156,8 @@ def _tiingo_download(symbol: str, start: datetime.date, end: datetime.date) -> p
     )
     if status == 404:
         return pd.DataFrame()
+    if status == 429:
+        raise RateLimitError(f"tiingo {symbol}: HTTP 429 (hourly cap): {body[:200]!r}")
     if status != 200:
         raise DataFetchError(f"tiingo {symbol}: HTTP {status}: {body[:200]!r}")
     rows = json.loads(body)
