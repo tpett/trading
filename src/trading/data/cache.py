@@ -29,11 +29,33 @@ class CacheSourceError(RuntimeError):
     adjustment regimes for the same symbol."""
 
 
+class CacheSchemaError(RuntimeError):
+    """A cached parquet and a fresh fetch carry different column sets. A plain
+    pandas concat would NaN-fill the narrower side, silently corrupting the
+    persisted history. The widened backfill starts from a cleared dir so this
+    is not expected in practice; the guard exists so a mixed-width dir fails
+    loudly instead of writing garbage."""
+
+
+class OfflineCacheError(RuntimeError):
+    """Offline mode was asked for bars the frozen cache does not cover (missing
+    file, or a range that starts before / ends after the cached span beyond the
+    weekend/holiday tolerance). Serving a silent partial would reintroduce the
+    coverage bias offline mode exists to avoid, so it fails loudly instead."""
+
+
 class OhlcvCache:
-    def __init__(self, cache_dir: Path, refetch_days: int, source: str = "yfinance"):
+    def __init__(
+        self,
+        cache_dir: Path,
+        refetch_days: int,
+        source: str = "yfinance",
+        offline: bool = False,
+    ):
         self._dir = cache_dir
         self._refetch_days = refetch_days
         self._source = source
+        self._offline = offline
         self._dir.mkdir(parents=True, exist_ok=True)
         self._guard_source()
 
@@ -78,6 +100,10 @@ class OhlcvCache:
         path = self.path_for(symbol)
         start_ts = pd.Timestamp(start, tz="UTC")
         end_ts = pd.Timestamp(end, tz="UTC")
+
+        if self._offline:
+            return self._serve_offline(symbol, path, start, end, start_ts, end_ts)
+
         cutoff = end - datetime.timedelta(days=self._refetch_days)
 
         cached: pd.DataFrame | None = None
@@ -109,6 +135,18 @@ class OhlcvCache:
             # Same gap semantics for adapters that return empty instead.
             return cached.loc[start_ts:end_ts]
 
+        if cached is not None and not cached.empty and list(cached.columns) != list(fresh.columns):
+            # An OLD narrow parquet meeting a NEW wide fetch (or vice versa):
+            # concat would NaN-fill the missing columns and silently corrupt the
+            # file. The schema-widening backfill is expected to start from a
+            # cleared dir, so this never fires in normal use -- but if it does,
+            # stop rather than persist half-populated corporate-action columns.
+            raise CacheSchemaError(
+                f"{path} has columns {list(cached.columns)} but the fetch returned "
+                f"{list(fresh.columns)}; rebuild this cache dir from empty after a "
+                "schema change instead of mixing widths"
+            )
+
         parts: list[pd.DataFrame] = []
         if keep is not None and not keep.empty:
             parts.append(keep)
@@ -131,3 +169,36 @@ class OhlcvCache:
         os.replace(tmp, path)  # atomic: never leave a torn cache file
 
         return merged.loc[start_ts:end_ts]
+
+    def _serve_offline(
+        self,
+        symbol: str,
+        path: Path,
+        start: datetime.date,
+        end: datetime.date,
+        start_ts: pd.Timestamp,
+        end_ts: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Offline mode: serve [start, end] purely from the parquet, NEVER
+        touching the network. A missing file or a range the cache does not
+        cover is a hard error (naming the symbol and gap), because a silent
+        partial would reintroduce exactly the coverage bias a frozen cache is
+        meant to eliminate. Weekend/holiday gaps within the span are fine --
+        coverage is judged only at the two ends, with _START_TOLERANCE slack."""
+        if not path.exists():
+            raise OfflineCacheError(f"offline cache miss for {symbol}: no parquet at {path}")
+        cached = pd.read_parquet(path)
+        if cached.empty:
+            raise OfflineCacheError(f"offline cache for {symbol} is empty at {path}")
+        first, last = cached.index.min(), cached.index.max()
+        if first > start_ts + _START_TOLERANCE:
+            raise OfflineCacheError(
+                f"offline cache for {symbol} starts {first.date()}, after requested "
+                f"start {start} (beyond the {_START_TOLERANCE.days}-day tolerance)"
+            )
+        if last < end_ts - _START_TOLERANCE:
+            raise OfflineCacheError(
+                f"offline cache for {symbol} ends {last.date()}, before requested "
+                f"end {end} (beyond the {_START_TOLERANCE.days}-day tolerance)"
+            )
+        return cached.loc[start_ts:end_ts]

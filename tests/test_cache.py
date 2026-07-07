@@ -18,6 +18,15 @@ def _frame(start: datetime.date, end: datetime.date, value: float) -> pd.DataFra
     )
 
 
+def _wide_frame(start: datetime.date, end: datetime.date, value: float) -> pd.DataFrame:
+    """OHLCV plus the extended corporate-action columns."""
+    df = _frame(start, end, value)
+    df["div_cash"] = 0.0
+    df["split_factor"] = 1.0
+    df["close_raw"] = value * 2
+    return df
+
+
 class RecordingFetcher:
     def __init__(self, value: float):
         self.value = value
@@ -241,6 +250,100 @@ def test_datafetcherror_on_cold_miss_propagates(tmp_path):
 
     with pytest.raises(DataFetchError):
         cache.fetch("NEVER", START, END, raiser)
+
+
+def test_extended_columns_survive_cache_round_trip(tmp_path):
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+
+    class WideFetcher:
+        def __init__(self, value):
+            self.value = value
+
+        def __call__(self, symbol, start, end):
+            return _wide_frame(start, end, self.value)
+
+    df = cache.fetch("AAPL", START, END, WideFetcher(3.0))
+    assert list(df.columns) == [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "div_cash",
+        "split_factor",
+        "close_raw",
+    ]
+    assert (df["close_raw"] == 6.0).all()
+
+    # Reopen and read straight from the parquet: the extra columns persisted.
+    on_disk = pd.read_parquet(cache.path_for("AAPL"))
+    assert list(on_disk.columns) == list(df.columns)
+    assert (on_disk["split_factor"] == 1.0).all()
+
+    # A warm refetch keeps the wide schema through the concat/dedup merge.
+    warm = cache.fetch("AAPL", START, END, WideFetcher(4.0))
+    assert list(warm.columns) == list(df.columns)
+    assert warm.loc[pd.Timestamp("2026-02-15", tz="UTC"), "close_raw"] == 8.0
+
+
+def test_mixed_width_schema_raises(tmp_path):
+    from trading.data.cache import CacheSchemaError
+
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+    cache.fetch("AAPL", START, END, RecordingFetcher(1.0))  # narrow parquet on disk
+
+    def wide(symbol, start, end):
+        return _wide_frame(start, end, 2.0)  # a wider fetch than the cached file
+
+    with pytest.raises(CacheSchemaError, match="rebuild this cache dir"):
+        cache.fetch("AAPL", START, END, wide)
+
+
+def test_offline_serves_covered_range_without_fetching(tmp_path):
+    # Seed a full cache online, then reopen offline and confirm no fetch fires.
+    OhlcvCache(tmp_path / "c", refetch_days=30).fetch("AAPL", START, END, RecordingFetcher(1.0))
+
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+
+    def boom(symbol, start, end):
+        raise AssertionError("offline mode must never call fetch_fn")
+
+    df = offline.fetch("AAPL", datetime.date(2026, 1, 15), datetime.date(2026, 2, 15), boom)
+    assert df.index.min() == pd.Timestamp("2026-01-15", tz="UTC")
+    assert df.index.max() == pd.Timestamp("2026-02-15", tz="UTC")
+    assert (df["close"] == 1.0).all()
+
+
+def test_offline_missing_file_raises(tmp_path):
+    from trading.data.cache import OfflineCacheError
+
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+    with pytest.raises(OfflineCacheError, match="no parquet"):
+        offline.fetch("AAPL", START, END, RecordingFetcher(1.0))
+
+
+def test_offline_uncovered_range_raises(tmp_path):
+    from trading.data.cache import OfflineCacheError
+
+    # Cache covers Jan..Mar; request history well before the cached start.
+    OhlcvCache(tmp_path / "c", refetch_days=30).fetch("AAPL", START, END, RecordingFetcher(1.0))
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+    with pytest.raises(OfflineCacheError, match="after requested start"):
+        offline.fetch("AAPL", datetime.date(2025, 6, 1), END, RecordingFetcher(1.0))
+    # ...and a request extending past the cached end also fails.
+    with pytest.raises(OfflineCacheError, match="before requested end"):
+        offline.fetch("AAPL", START, datetime.date(2026, 6, 1), RecordingFetcher(1.0))
+
+
+def test_offline_tolerates_weekend_gap_at_edges(tmp_path):
+    # Cached span starts a few days after the requested start (weekend/holiday);
+    # within _START_TOLERANCE this must be served, not rejected.
+    OhlcvCache(tmp_path / "c", refetch_days=30).fetch(
+        "AAPL", datetime.date(2026, 1, 3), END, RecordingFetcher(1.0)
+    )
+    offline = OhlcvCache(tmp_path / "c", refetch_days=30, offline=True)
+    df = offline.fetch("AAPL", START, END, RecordingFetcher(1.0))  # asks from Jan 1
+    assert not df.empty
 
 
 def test_backfill_waits_on_ratelimit_then_succeeds(tmp_path, monkeypatch):
