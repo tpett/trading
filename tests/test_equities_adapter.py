@@ -171,6 +171,37 @@ def test_fetch_ohlcv_slices_to_requested_range(monkeypatch):
     assert df.index.max() == pd.Timestamp("2026-01-08", tz="UTC")
 
 
+def _yf_style_frame_extended(symbol: str) -> pd.DataFrame:
+    """_yf_download's combined output: the frozen adjusted OHLCV (identical to
+    _yf_style_frame) PLUS the extended corporate-action columns. A 2:1 split on
+    day 4 makes close_raw diverge from the adjusted close before it, and one
+    dividend day exercises div_cash; split_factor is 1.0 except on the split."""
+    base = _yf_style_frame(symbol)
+    base[("close_raw", symbol)] = [21.0, 20.4, 21.2, 11.0, 11.2]
+    base[("div_cash", symbol)] = [0.0, 0.25, 0.0, 0.0, 0.0]
+    base[("split_factor", symbol)] = [1.0, 1.0, 1.0, 2.0, 1.0]
+    return base
+
+
+def test_fetch_ohlcv_yfinance_populates_extended_fields_without_moving_adjusted(monkeypatch):
+    monkeypatch.setattr(
+        "trading.venues.equities._yf_download", lambda s, start, end: _yf_style_frame_extended(s)
+    )
+    adapter = EquitiesAdapter(CONFIG)
+    df = adapter.fetch_ohlcv("AAPL", datetime.date(2026, 1, 5), datetime.date(2026, 1, 9))
+    assert list(df.columns) == OHLCV_COLUMNS + ["div_cash", "split_factor", "close_raw"]
+    # The adjusted basis is UNCHANGED from the pre-existing expected values
+    # (test_fetch_ohlcv_normalizes_yfinance_frame pins these same numbers).
+    assert df["close"].tolist() == [10.5, 10.2, 10.6, 11.0, 11.2]
+    assert df["open"].iloc[0] == 10.0
+    assert df["volume"].iloc[-1] == 1.2e6
+    # Extended fields carry the raw/action values, all float64.
+    assert df["close_raw"].tolist() == [21.0, 20.4, 21.2, 11.0, 11.2]
+    assert df["div_cash"].tolist() == [0.0, 0.25, 0.0, 0.0, 0.0]
+    assert df["split_factor"].tolist() == [1.0, 1.0, 1.0, 2.0, 1.0]
+    assert (df.dtypes == "float64").all()
+
+
 def test_fetch_ohlcv_empty_raises(monkeypatch):
     monkeypatch.setattr(
         "trading.venues.equities._yf_download", lambda s, start, end: pd.DataFrame()
@@ -213,7 +244,7 @@ _TIINGO_ROWS = [
         "low": 208.0,
         "close": 209.5,
         "volume": 4_000_000,
-        "divCash": 0.0,
+        "divCash": 0.5,  # a dividend day: div_cash must carry the raw amount
         "splitFactor": 1.0,
     },
 ]
@@ -239,7 +270,8 @@ def test_tiingo_download_uses_adjusted_fields_not_raw(monkeypatch):
     monkeypatch.setattr("trading.venues.equities._tiingo_get", fake_get)
     adapter = EquitiesAdapter(_tiingo_config())
     df = adapter.fetch_ohlcv("XLNX", datetime.date(2022, 2, 11), datetime.date(2022, 2, 14))
-    assert list(df.columns) == OHLCV_COLUMNS
+    # Canonical OHLCV comes first; the extended corporate-action columns ride along.
+    assert list(df.columns) == OHLCV_COLUMNS + ["div_cash", "split_factor", "close_raw"]
     assert str(df.index.tz) == "UTC"
     assert df.index.is_monotonic_increasing  # sorted despite unordered input
     # ADJUSTED values, not raw: 104.75 (adjClose) not 209.5 (close); 97.0 not 194.0.
@@ -247,6 +279,15 @@ def test_tiingo_download_uses_adjusted_fields_not_raw(monkeypatch):
     assert df["close"].iloc[-1] == 97.0
     assert df["open"].iloc[-1] == 97.25  # adjOpen, not raw open 194.5
     assert df["volume"].iloc[-1] == 10_000_000  # adjVolume
+    # Extended fields are the RAW/action values, NOT the adjusted ones: the raw
+    # close differs from adjClose across the 2:1 split, split_factor is the ratio
+    # (2.0 on the split day, 1.0 otherwise), and div_cash carries the dividend.
+    assert df["close_raw"].iloc[0] == 209.5  # raw close, not adjClose 104.75
+    assert df["close_raw"].iloc[-1] == 194.0  # raw close, not adjClose 97.0
+    assert df["split_factor"].iloc[0] == 1.0  # no split on 02-11
+    assert df["split_factor"].iloc[-1] == 2.0  # 2:1 split on 02-14
+    assert df["div_cash"].iloc[0] == 0.5  # dividend on 02-11
+    assert df["div_cash"].iloc[-1] == 0.0
     # Every column float64, matching the yfinance path (adjVolume is int in JSON).
     assert (df.dtypes == "float64").all()
     # Token never in the URL or query params -- header only.
