@@ -42,6 +42,29 @@ def test_validate_ohlcv_rejects_wrong_columns():
         validate_ohlcv(df)
 
 
+def test_validate_ohlcv_accepts_extended_frame():
+    df = _good_frame()
+    df["div_cash"] = 0.0
+    df["split_factor"] = 1.0
+    df["close_raw"] = 2.0
+    assert validate_ohlcv(df) is df
+
+
+def test_validate_ohlcv_rejects_unknown_extra_column():
+    df = _good_frame()
+    df["div_cash"] = 0.0  # a legit extended column...
+    df["surprise"] = 1.0  # ...but this one is not in the allow-list
+    with pytest.raises(ValueError, match="unexpected columns"):
+        validate_ohlcv(df)
+
+
+def test_validate_ohlcv_rejects_missing_canonical_column():
+    df = _good_frame().drop(columns=["volume"])
+    df["div_cash"] = 0.0  # extended present, but a required canonical is gone
+    with pytest.raises(ValueError, match="missing"):
+        validate_ohlcv(df)
+
+
 def test_validate_ohlcv_rejects_naive_index():
     df = _good_frame()
     df.index = df.index.tz_localize(None)
