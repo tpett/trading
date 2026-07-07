@@ -201,3 +201,39 @@ def test_legacy_unmarked_dir_adopted_only_by_yfinance(tmp_path):
 def test_same_source_reopen_is_fine(tmp_path):
     OhlcvCache(tmp_path / "c", refetch_days=5, source="tiingo")
     OhlcvCache(tmp_path / "c", refetch_days=5, source="tiingo")  # no raise
+
+
+def test_datafetcherror_on_warm_cache_preserves_and_serves_history(tmp_path):
+    # C1 regression: a delisted name's trailing-refetch window is empty years
+    # after delisting, and the real adapter signals that by RAISING
+    # DataFetchError (not returning empty). On a warm cache that must be
+    # treated as a gap -- serve the cached history, never drop the symbol
+    # (which would silently reintroduce survivorship bias on a re-run).
+    from trading.venues.base import DataFetchError
+
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+    seed = RecordingFetcher(100.0)
+    first = cache.fetch("XLNX", START, END, seed)
+    assert not first.empty  # cold run caches the delisted name's history
+
+    def raiser(symbol, start, end):
+        raise DataFetchError(f"no equities data for {symbol}")
+
+    served = cache.fetch("XLNX", START, END, raiser)
+    assert served.equals(first)  # cached history preserved and served
+    # And the persisted file was not shrunk.
+    assert not cache.fetch("XLNX", START, END, raiser).empty
+
+
+def test_datafetcherror_on_cold_miss_propagates(tmp_path):
+    # No cache to fall back on: a genuine fetch failure must surface, not be
+    # silently swallowed into an empty frame.
+    from trading.venues.base import DataFetchError
+
+    cache = OhlcvCache(tmp_path / "c", refetch_days=30)
+
+    def raiser(symbol, start, end):
+        raise DataFetchError("boom")
+
+    with pytest.raises(DataFetchError):
+        cache.fetch("NEVER", START, END, raiser)

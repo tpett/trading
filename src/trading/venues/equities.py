@@ -71,9 +71,13 @@ def tiingo_token() -> str:
     if token := os.environ.get("TIINGO_API_KEY", ""):
         return token
     if TIINGO_CONFIG_PATH.exists():
-        with TIINGO_CONFIG_PATH.open("rb") as f:
-            if token := tomllib.load(f).get("tiingo_api_key", ""):
-                return token
+        try:
+            with TIINGO_CONFIG_PATH.open("rb") as f:
+                data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as exc:
+            raise DataFetchError(f"{TIINGO_CONFIG_PATH} is not valid TOML: {exc}") from exc
+        if token := data.get("tiingo_api_key", ""):
+            return token
     raise DataFetchError(
         f"bar_source=tiingo needs an API key: set tiingo_api_key in {TIINGO_CONFIG_PATH} "
         "or export TIINGO_API_KEY"
@@ -99,6 +103,44 @@ def _tiingo_get(url: str, params: dict[str, str]) -> tuple[int, bytes]:
         return exc.code, exc.read()
 
 
+# Transient conditions worth retrying during an unattended, thousands-of-
+# symbols backfill: without this a rate-limit burst or a blip drops symbols
+# and silently biases coverage exactly where it's used for the decision run.
+_TIINGO_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_TIINGO_MAX_ATTEMPTS = 5
+_TIINGO_BACKOFF_BASE_S = 1.0
+
+
+def _tiingo_sleep(seconds: float) -> None:
+    """Sleep touchpoint, isolated so tests don't actually wait."""
+    import time
+
+    time.sleep(seconds)
+
+
+def _tiingo_get_retrying(url: str, params: dict[str, str]) -> tuple[int, bytes]:
+    """_tiingo_get with bounded exponential backoff on transient failures
+    (429/5xx and network errors). A URLError/timeout raises inside _tiingo_get
+    and is retried here; a 404 or other 4xx returns immediately (not
+    transient). After the last attempt the final status/body is returned so
+    the caller raises a normal DataFetchError."""
+    import urllib.error
+
+    for attempt in range(_TIINGO_MAX_ATTEMPTS):
+        try:
+            status, body = _tiingo_get(url, params)
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == _TIINGO_MAX_ATTEMPTS - 1:
+                raise
+            _tiingo_sleep(_TIINGO_BACKOFF_BASE_S * 2**attempt)
+            continue
+        if status in _TIINGO_RETRY_STATUSES and attempt < _TIINGO_MAX_ATTEMPTS - 1:
+            _tiingo_sleep(_TIINGO_BACKOFF_BASE_S * 2**attempt)
+            continue
+        return status, body
+    return status, body  # exhausted retries on a retryable status
+
+
 def _tiingo_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
     """Daily bars from Tiingo, adjusted OHLCV renamed to the venue schema.
     A 404 means Tiingo has no such ticker; an empty array means no bars in
@@ -107,7 +149,7 @@ def _tiingo_download(symbol: str, start: datetime.date, end: datetime.date) -> p
     gap-tolerance semantics apply identically."""
     import json
 
-    status, body = _tiingo_get(
+    status, body = _tiingo_get_retrying(
         _TIINGO_URL.format(symbol=symbol),
         {"startDate": start.isoformat(), "endDate": end.isoformat(), "format": "json"},
     )

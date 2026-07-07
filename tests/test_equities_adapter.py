@@ -180,28 +180,39 @@ def test_fetch_ohlcv_empty_raises(monkeypatch):
         adapter.fetch_ohlcv("AAPL", datetime.date(2026, 1, 5), datetime.date(2026, 1, 9))
 
 
+# A 2:1 split sits between the two bars, so the RAW fields (open/high/low/
+# close/volume) differ from the split-adjusted ones. This is what pins the
+# single most important property: the adapter must read the ADJUSTED fields
+# (matching yfinance auto_adjust) -- a mapping bug swapping adjClose->close
+# would flip these assertions.
 _TIINGO_ROWS = [
     {
         "date": "2022-02-14T00:00:00.000Z",
-        "adjOpen": 194.5,
-        "adjHigh": 195.0,
-        "adjLow": 191.2,
-        "adjClose": 194.0,
-        "adjVolume": 5_000_000,
-        "open": 194.5,
+        "adjOpen": 97.25,
+        "adjHigh": 97.5,
+        "adjLow": 95.6,
+        "adjClose": 97.0,
+        "adjVolume": 10_000_000,
+        "open": 194.5,  # raw, pre-adjustment -- must NOT be used
+        "high": 195.0,
+        "low": 191.2,
         "close": 194.0,
+        "volume": 5_000_000,
         "divCash": 0.0,
-        "splitFactor": 1.0,
+        "splitFactor": 2.0,
     },
     {
         "date": "2022-02-11T00:00:00.000Z",  # deliberately out of order
-        "adjOpen": 210.0,
-        "adjHigh": 212.0,
-        "adjLow": 208.0,
-        "adjClose": 209.5,
-        "adjVolume": 4_000_000,
+        "adjOpen": 105.0,
+        "adjHigh": 106.0,
+        "adjLow": 104.0,
+        "adjClose": 104.75,
+        "adjVolume": 8_000_000,
         "open": 210.0,
+        "high": 212.0,
+        "low": 208.0,
         "close": 209.5,
+        "volume": 4_000_000,
         "divCash": 0.0,
         "splitFactor": 1.0,
     },
@@ -214,7 +225,7 @@ def _tiingo_config():
     return replace(CONFIG, data=replace(CONFIG.data, bar_source="tiingo"))
 
 
-def test_tiingo_download_normalizes_adjusted_fields(monkeypatch):
+def test_tiingo_download_uses_adjusted_fields_not_raw(monkeypatch):
     import json
 
     monkeypatch.setenv("TIINGO_API_KEY", "test-token")
@@ -231,10 +242,15 @@ def test_tiingo_download_normalizes_adjusted_fields(monkeypatch):
     assert list(df.columns) == OHLCV_COLUMNS
     assert str(df.index.tz) == "UTC"
     assert df.index.is_monotonic_increasing  # sorted despite unordered input
-    # adjClose -> close, not the raw close (same adjustment basis as yfinance).
-    assert df["close"].iloc[0] == 209.5
-    assert df["close"].iloc[-1] == 194.0
-    # Token rides the header, never the query string.
+    # ADJUSTED values, not raw: 104.75 (adjClose) not 209.5 (close); 97.0 not 194.0.
+    assert df["close"].iloc[0] == 104.75
+    assert df["close"].iloc[-1] == 97.0
+    assert df["open"].iloc[-1] == 97.25  # adjOpen, not raw open 194.5
+    assert df["volume"].iloc[-1] == 10_000_000  # adjVolume
+    # Every column float64, matching the yfinance path (adjVolume is int in JSON).
+    assert (df.dtypes == "float64").all()
+    # Token never in the URL or query params -- header only.
+    assert "test-token" not in captured["url"]
     assert "token" not in captured["params"]
     assert "XLNX" in captured["url"]
 
@@ -274,3 +290,59 @@ def test_tiingo_token_read_from_config_file(monkeypatch, tmp_path):
     from trading.venues.equities import tiingo_token
 
     assert tiingo_token() == "file-token-xyz"
+
+
+def test_tiingo_retries_transient_then_succeeds(monkeypatch):
+    import json
+
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    slept = []
+    monkeypatch.setattr("trading.venues.equities._tiingo_sleep", lambda s: slept.append(s))
+    statuses = [
+        (429, b"rate limited"),
+        (503, b"unavailable"),
+        (200, json.dumps(_TIINGO_ROWS).encode()),
+    ]
+    calls = iter(statuses)
+    monkeypatch.setattr("trading.venues.equities._tiingo_get", lambda url, params: next(calls))
+    adapter = EquitiesAdapter(_tiingo_config())
+    df = adapter.fetch_ohlcv("XLNX", datetime.date(2022, 2, 11), datetime.date(2022, 2, 14))
+    assert len(df) == 2
+    assert slept == [1.0, 2.0]  # exponential backoff between the two transient failures
+
+
+def test_tiingo_network_error_retried_then_raised(monkeypatch):
+    import urllib.error
+
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    monkeypatch.setattr("trading.venues.equities._tiingo_sleep", lambda s: None)
+
+    def always_timeout(url, params):
+        raise urllib.error.URLError("timed out")
+
+    monkeypatch.setattr("trading.venues.equities._tiingo_get", always_timeout)
+    adapter = EquitiesAdapter(_tiingo_config())
+    with pytest.raises(urllib.error.URLError):
+        adapter.fetch_ohlcv("AAPL", datetime.date(2022, 1, 1), datetime.date(2022, 2, 1))
+
+
+def test_tiingo_persistent_429_surfaces_as_datafetcherror(monkeypatch):
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    monkeypatch.setattr("trading.venues.equities._tiingo_sleep", lambda s: None)
+    monkeypatch.setattr(
+        "trading.venues.equities._tiingo_get", lambda url, params: (429, b"slow down")
+    )
+    adapter = EquitiesAdapter(_tiingo_config())
+    with pytest.raises(DataFetchError, match="HTTP 429"):
+        adapter.fetch_ohlcv("AAPL", datetime.date(2022, 1, 1), datetime.date(2022, 2, 1))
+
+
+def test_tiingo_malformed_config_raises_clean_error(monkeypatch, tmp_path):
+    monkeypatch.delenv("TIINGO_API_KEY", raising=False)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("this is not = = valid toml [[[")
+    monkeypatch.setattr("trading.venues.equities.TIINGO_CONFIG_PATH", cfg)
+    from trading.venues.equities import tiingo_token
+
+    with pytest.raises(DataFetchError, match="not valid TOML"):
+        tiingo_token()

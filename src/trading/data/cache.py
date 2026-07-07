@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading.venues.base import DataFetchError
+
 FetchFn = Callable[[str, datetime.date, datetime.date], pd.DataFrame]
 
 # First cached bar may legitimately start after the requested date (weekends,
@@ -90,10 +92,21 @@ class OhlcvCache:
                 # [cutoff, start) from the persisted file.
                 fetch_start = cutoff
 
-        fresh = fetch_fn(symbol, fetch_start, end)
+        try:
+            fresh = fetch_fn(symbol, fetch_start, end)
+        except DataFetchError:
+            # The adapter signals "no bars in this window" by RAISING, not by
+            # returning empty. On a warm cache that is a gap, not a loss: a
+            # delisted name's trailing-refetch window (end-refetch_days .. end)
+            # is legitimately empty years after delisting, but its earlier
+            # cached history is exactly what a survivorship-free backtest
+            # needs. Preserve the file and serve the cached slice; only a
+            # COLD miss (no cache) is a real fetch failure worth propagating.
+            if cached is not None:
+                return cached.loc[start_ts:end_ts]
+            raise
         if fresh.empty and cached is not None:
-            # A data-source gap must never shrink the file: leave the cached
-            # frame untouched and serve the requested slice from it.
+            # Same gap semantics for adapters that return empty instead.
             return cached.loc[start_ts:end_ts]
 
         parts: list[pd.DataFrame] = []
