@@ -40,10 +40,13 @@ row here whenever a new configuration is walk-forwarded.**
 | 4 | 07-06 | + S&P MidCap 400 | more names, momentum stronger in mid-caps | 0.50 | +36% | 536 | refuted |
 | 5 | 07-06 | Quality overlay | profitable firms complement momentum, filter junk | 0.49 | +29% | 337 | refuted |
 | 6 | 07-06 | Value overlay | value+momentum is a classic diversifying pair | 0.45 | +25% | 360 | refuted |
-| 7 | 07-07 | Survivorship-free momentum (Tiingo) | is 0.59 real once delisted names are included? | *pending* | — | — | *running* |
+| 7 | 07-07 | Survivorship-free momentum (Tiingo) | is 0.59 real once delisted names are included? | **0.45** | +27% | 335 | refuted |
 
-**No configuration has beaten SPY out of sample.** The best is experiment 3
-(factor-scale momentum, 0.59), which is what live paper trading runs on.
+**No configuration has beaten SPY out of sample, and the best one shrinks once
+survivorship bias is removed.** Experiment 3 (factor-scale momentum) scores 0.59
+on survivor-only data but **0.45** on delisted-inclusive data — so a meaningful
+chunk of the apparent edge was survivorship bias. Live paper trading runs on the
+exp-3 config, but its honest OOS Sharpe is ~0.45, not 0.59.
 
 ## The experiments in detail
 
@@ -109,31 +112,48 @@ diversify the momentum signal.
 worked *against* the momentum core rather than complementing it. This closed the
 fundamentals-overlay hypothesis family: neither quality nor value helped.
 
-### 7. Survivorship-free momentum (Tiingo) — *running*
+### 7. Survivorship-free momentum (Tiingo) — 0.45 (refuted)
 **Rationale:** every experiment above ran on yfinance data, which serves **no
 delisted tickers** — so the historical universe silently dropped every company
 that failed or was removed (journal survivorship ratio ≈ 0.88, i.e. ~12% of
-member-sessions had no data). That biases results *optimistically*. This re-runs
+member-sessions had no data). That biases results *optimistically*. This re-ran
 experiment 3 (the promoted config, unchanged) on Tiingo's delisted-inclusive
-data (~98% coverage) to measure how much of the 0.59 was survivorship bias.
-**Expectation:** the honest number likely *drops* — the removed names are mostly
-companies that did badly, and excluding failures flatters momentum. Result will
-be recorded here when the run completes.
+data (97.8% coverage) to measure how much of the 0.59 was survivorship bias.
+**Result:** OOS Sharpe **0.45** (vs 0.59 survivor-only), total +27% (vs +39%).
+The prediction held: including the delisted/failed names that momentum sometimes
+picks — and that then crash — knocks ~0.14 off the Sharpe. **The apparent edge
+was partly survivorship bias; the honest number is 0.45, further from SPY's 0.96
+than the biased backtests showed.**
+**Caveats:** (1) the 0.59→0.45 drop conflates survivorship (the intended change)
+with a small vendor-adjustment difference (Tiingo vs yfinance are both
+split/div-adjusted but not bit-identical); isolating survivorship cleanly would
+need a Tiingo-with vs Tiingo-without-delisted A/B. (2) 16 rename symbols were
+still missing (the ticker-alias resolution had not been deployed when this ran);
+a clean re-run with resolution would reach ~100% coverage and pin the number,
+but 16/729 ≈ 2% won't change the conclusion.
 
 ## What we've learned overall
 
-1. **Momentum has a real but sub-benchmark edge on liquid US large-caps.** Every
-   honest configuration lands between 0.09 and 0.59 OOS Sharpe; none reaches
-   SPY's 0.96. On this universe and horizon, the strategy does not beat
-   buy-and-hold out of sample.
+1. **Momentum has a weak, sub-benchmark edge on liquid US large-caps — weaker
+   than the biased backtests showed.** On survivor-only data configurations
+   land 0.09–0.59 OOS Sharpe; the best drops to **0.45 once survivorship bias
+   is removed** (exp 7). None reaches SPY's 0.96. On this universe and horizon,
+   the strategy does not beat buy-and-hold out of sample.
 2. **Simplicity wins.** Wider grids (exp 1) and trailing exits (exp 2) both made
    it worse. The improvements came from *structure* (factor-scale windows, more
    positions — exp 3), not from more tuning or more machinery.
 3. **Adding inputs diluted, it didn't sharpen.** Mid-cap breadth (4), quality
    (5), and value (6) all *reduced* the risk-adjusted return. The momentum core
    is cleanest on its own.
-4. **The open question is whether the 0.59 is even real** once survivorship bias
-   is removed (exp 7). That result should precede any further strategy work.
+4. **Survivorship bias was real and material** (exp 7): ~0.14 of Sharpe. Any
+   backtest number from this system should be read as survivor-only-optimistic
+   unless it came from the Tiingo (delisted-inclusive) path.
+5. **The open strategic question** is no longer "does fundamentals help" but
+   "does this momentum core have enough of an edge to be worth overlaying at
+   all." The one fundamentals idea with a live thesis in a survivorship-free
+   world is a *quality/junk filter* (exp #1 in the candidate list) — precisely
+   because the delisted failures now dragging the result down are what such a
+   screen would remove. Everything else is lower priority given the 0.45 core.
 
 ## Known caveats affecting these numbers
 
