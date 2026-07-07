@@ -49,6 +49,94 @@ def _yf_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.Da
     )
 
 
+TIINGO_CONFIG_PATH = Path.home() / ".config" / "trading" / "config.toml"
+_TIINGO_URL = "https://api.tiingo.com/tiingo/daily/{symbol}/prices"
+# Tiingo's adjusted fields are split+dividend adjusted -- the same basis as
+# yfinance auto_adjust=True, so signals/stops/fills keep one price basis
+# regardless of source.
+_TIINGO_COLUMNS = {
+    "adjOpen": "open",
+    "adjHigh": "high",
+    "adjLow": "low",
+    "adjClose": "close",
+    "adjVolume": "volume",
+}
+
+
+def tiingo_token() -> str:
+    """$TIINGO_API_KEY wins (tests/CI); otherwise ~/.config/trading/config.toml."""
+    import os
+    import tomllib
+
+    if token := os.environ.get("TIINGO_API_KEY", ""):
+        return token
+    if TIINGO_CONFIG_PATH.exists():
+        with TIINGO_CONFIG_PATH.open("rb") as f:
+            if token := tomllib.load(f).get("tiingo_api_key", ""):
+                return token
+    raise DataFetchError(
+        f"bar_source=tiingo needs an API key: set tiingo_api_key in {TIINGO_CONFIG_PATH} "
+        "or export TIINGO_API_KEY"
+    )
+
+
+def _tiingo_get(url: str, params: dict[str, str]) -> tuple[int, bytes]:
+    """Network touchpoint, isolated for monkeypatching. The token rides an
+    Authorization header, never the URL, so it cannot leak into error
+    messages, logs, or proxies' access logs."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    req = urllib.request.Request(
+        url + "?" + urllib.parse.urlencode(params),
+        headers={"Authorization": f"Token {tiingo_token()}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+def _tiingo_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+    """Daily bars from Tiingo, adjusted OHLCV renamed to the venue schema.
+    A 404 means Tiingo has no such ticker; an empty array means no bars in
+    range (e.g. a delisted name after its endDate) -- both surface as an
+    empty frame, matching _yf_download's shape so the cache layer's
+    gap-tolerance semantics apply identically."""
+    import json
+
+    status, body = _tiingo_get(
+        _TIINGO_URL.format(symbol=symbol),
+        {"startDate": start.isoformat(), "endDate": end.isoformat(), "format": "json"},
+    )
+    if status == 404:
+        return pd.DataFrame()
+    if status != 200:
+        raise DataFetchError(f"tiingo {symbol}: HTTP {status}: {body[:200]!r}")
+    rows = json.loads(body)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df.index = pd.to_datetime(df["date"], utc=True).dt.normalize()
+    df.index.name = "Date"
+    return df[list(_TIINGO_COLUMNS)].rename(columns=_TIINGO_COLUMNS)
+
+
+# Dispatch by source NAME resolved at call time (not a dict of function
+# refs captured at import): tests monkeypatch _yf_download/_tiingo_download
+# on the module, and a frozen dict would keep pointing at the originals.
+_DOWNLOADER_NAMES = {"yfinance": "_yf_download", "tiingo": "_tiingo_download"}
+
+
+def _download(source: str, symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+    import sys
+
+    fn = getattr(sys.modules[__name__], _DOWNLOADER_NAMES[source])
+    return fn(symbol, start, end)
+
+
 class EquitiesAdapter:
     def __init__(self, config: VenueConfig, membership_csv: Path | None = None):
         self._config = config
@@ -100,7 +188,7 @@ class EquitiesAdapter:
         )
 
     def fetch_ohlcv(self, symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
-        raw = _yf_download(symbol, start, end)
+        raw = _download(self._config.data.bar_source, symbol, start, end)
         if raw is None or raw.empty:
             raise DataFetchError(f"no equities data for {symbol}")
         if isinstance(raw.columns, pd.MultiIndex):
