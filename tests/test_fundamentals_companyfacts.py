@@ -118,6 +118,112 @@ def test_shares_cover_date_maps_to_the_filing_period():
     assert ni["qtrs"] == 4
 
 
+def _legacy_payload(revenue_tag: str, cogs_tag: str, extra_us_gaap: dict | None = None) -> dict:
+    """A single pre-ASC-606 FY 10-K reporting revenue/COGS under the given
+    tags (plus Assets). `extra_us_gaap` can add a competing modern tag."""
+    us_gaap = {
+        revenue_tag: {
+            "units": {
+                "USD": [
+                    _entry(
+                        "2017-12-31",
+                        300.0,
+                        "z-01",
+                        2017,
+                        "FY",
+                        "10-K",
+                        "2018-02-15",
+                        start="2017-01-01",
+                    )
+                ]
+            }
+        },
+        cogs_tag: {
+            "units": {
+                "USD": [
+                    _entry(
+                        "2017-12-31",
+                        180.0,
+                        "z-01",
+                        2017,
+                        "FY",
+                        "10-K",
+                        "2018-02-15",
+                        start="2017-01-01",
+                    )
+                ]
+            }
+        },
+        "Assets": {
+            "units": {
+                "USD": [_entry("2017-12-31", 1000.0, "z-01", 2017, "FY", "10-K", "2018-02-15")]
+            }
+        },
+    }
+    if extra_us_gaap:
+        us_gaap.update(extra_us_gaap)
+    return {"facts": {"us-gaap": us_gaap}}
+
+
+def test_companyfacts_pre_asc606_fallbacks_resolve():
+    # SalesRevenueNet / CostOfGoodsSold are us-gaap, so the companyfacts path
+    # (which defaults unknown tags to us-gaap and iterates TAG_PRIORITY) must
+    # pick them up with NO _TAXONOMY_BY_TAG entry.
+    facts = facts_from_companyfacts(_legacy_payload("SalesRevenueNet", "CostOfGoodsSold"), CIK)
+    rev = facts[facts["concept"] == "revenue"].iloc[0]
+    assert rev["tag"] == "SalesRevenueNet"
+    assert rev["value"] == 300.0
+    cogs = facts[facts["concept"] == "cogs"].iloc[0]
+    assert cogs["tag"] == "CostOfGoodsSold"
+    assert cogs["value"] == 180.0
+
+
+def test_companyfacts_modern_tags_still_win_over_legacy():
+    # A transition filing carrying both the modern tag and the legacy fallback
+    # must resolve to the modern tag (priority order preserved).
+    extra = {
+        "Revenues": {
+            "units": {
+                "USD": [
+                    _entry(
+                        "2017-12-31",
+                        500.0,
+                        "z-01",
+                        2017,
+                        "FY",
+                        "10-K",
+                        "2018-02-15",
+                        start="2017-01-01",
+                    )
+                ]
+            }
+        },
+        "CostOfRevenue": {
+            "units": {
+                "USD": [
+                    _entry(
+                        "2017-12-31",
+                        250.0,
+                        "z-01",
+                        2017,
+                        "FY",
+                        "10-K",
+                        "2018-02-15",
+                        start="2017-01-01",
+                    )
+                ]
+            }
+        },
+    }
+    facts = facts_from_companyfacts(
+        _legacy_payload("SalesRevenueNet", "CostOfGoodsSold", extra_us_gaap=extra), CIK
+    )
+    assert facts[facts["concept"] == "revenue"].iloc[0]["tag"] == "Revenues"
+    assert facts[facts["concept"] == "revenue"].iloc[0]["value"] == 500.0
+    assert facts[facts["concept"] == "cogs"].iloc[0]["tag"] == "CostOfRevenue"
+    assert facts[facts["concept"] == "cogs"].iloc[0]["value"] == 250.0
+
+
 def test_refresh_appends_only_new_filed_dates(tmp_path):
     store = FundamentalsStore(tmp_path)
     calls: list[str] = []

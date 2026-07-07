@@ -17,6 +17,13 @@ recomputes as (all $M, all from ORIGINAL filings):
     TTM cogs    = 54,719 + 47,074 + 52,051 +  66,822 = 220,666
     gross profitability = (387,537 - 220,666) / 346,747 = 0.4813
 
+Check 1c -- pre-ASC-606 spot-check (Best Buy FY2018 10-K). BBY reports revenue
+under the legacy SalesRevenueNet tag and COGS under the legacy CostOfGoodsSold
+tag; both were added to edgar.REVENUE_TAGS / COGS_TAGS as post-606 fallbacks
+to recover early-history quality coverage. The check confirms the parser now
+computes BBY's revenue_ttm 42,151 / cogs_ttm 32,275 / assets 13,049 ($M) ->
+gross profitability 0.7568 AND resolves them via those exact legacy tags.
+
 Check 1b -- AAPL value primitives at the same 2023-02-03 filing:
 
     shares outstanding: 15,821,946,000 (dei:EntityCommonStockSharesOutstanding
@@ -120,6 +127,26 @@ AAPL_EXPECTED_VALUE = {  # derivations in the module docstring (Check 1b)
     "ttm_net_income": 95_171e6,
 }
 VALUE_REL_TOLERANCE = 1e-3
+# Pre-ASC-606 spot-check: Best Buy's FY2018 10-K (fiscal year ended
+# 2018-02-03, filed 2018-04-02, accn 0000764478-18-000013) reports revenue
+# under the legacy SalesRevenueNet tag and COGS under the legacy
+# CostOfGoodsSold tag -- NEITHER of which the pre-fix chain resolved, so BBY's
+# quality was neutral-0.5 across all of early history. Values verified against
+# companyfacts (which mirrors the filed 10-K): net sales $42,151M, cost of
+# sales $32,275M, total assets $13,049M -> gross profitability
+# (42,151 - 32,275) / 13,049 = 0.7568. This is the TTM basis (a 10-K's four
+# derived quarters sum to the full year), so revenue_ttm/cogs_ttm equal the
+# annual figures. Guards the pre-606 fallback tags the same way check_aapl
+# guards the post-606 chain.
+BBY_FILED = "2018-04-02"
+BBY_EXPECTED = {
+    "revenue_ttm": 42_151e6,
+    "cogs_ttm": 32_275e6,
+    "assets": 13_049e6,
+    "gross_profitability": (42_151e6 - 32_275e6) / 13_049e6,  # 0.7568
+}
+BBY_EXPECTED_TAGS = {"revenue_tag": "SalesRevenueNet", "cogs_tag": "CostOfGoodsSold"}
+BBY_REL_TOLERANCE = 1e-3
 AAPL_CLOSE_2023_02_03 = 154.50  # pinned raw close for the composition check
 # 95.171e9 / (15,821,946,000 x 154.50 = 2.4445e12) = 0.03893; the shares
 # correction above moved this by +0.00003 (was 0.03890 at the old share
@@ -154,9 +181,14 @@ NEUTRAL_FRACTION_SAMPLE_DATES = [
 # Below this, quality's genuine coverage is sparse enough that a
 # quality_momentum_v1 experiment over that era is mostly momentum in
 # disguise (nearly everyone neutral-0.5); the table flags such dates so
-# experiment interpretation has to account for it. Early history sits
-# there structurally: pre-ASC-606 revenue tags (SalesRevenueNet etc.) are
-# not in the locked chain, so 2018-2019 quality is thin in BOTH sources.
+# experiment interpretation has to account for it. Early history was
+# historically thin because the pre-ASC-606 revenue/COGS tags
+# (SalesRevenueNet, CostOfGoodsSold) sat OUTSIDE the chain; those single-value
+# fallbacks are now IN the chain (edgar.REVENUE_TAGS / COGS_TAGS), which
+# materially lifts 2018-2019 quality coverage on the next backfill. A residual
+# gap remains for filers that report ONLY the split parts with no total
+# (SalesRevenueGoodsNet + SalesRevenueServicesNet, CostOfServices) -- those
+# need per-part summation, a deliberately deferred follow-up.
 QUALITY_GENUINE_FLOOR = 0.30
 
 
@@ -196,6 +228,40 @@ def check_aapl(store: FundamentalsStore) -> None:
         sys.exit(
             f"FATAL: AAPL earnings yield {earnings_yield:.4f} != {AAPL_EXPECTED_EARNINGS_YIELD}"
         )
+
+
+def check_bestbuy(store: FundamentalsStore) -> None:
+    """Check 1c -- pre-ASC-606 spot-check. Best Buy's FY2018 10-K resolved
+    revenue via SalesRevenueNet and COGS via CostOfGoodsSold, the two legacy
+    single-value tags added to the chain to recover early-history quality
+    coverage. Confirms the parser now computes BBY's revenue/COGS/gross
+    profitability (matching the filed 10-K) AND resolves them via the expected
+    legacy tags -- the counterpart to check_aapl's post-606 guard."""
+    frame = store.read("BBY")
+    ts = pd.Timestamp(BBY_FILED, tz="UTC")
+    if ts not in frame.index:
+        sys.exit(
+            f"FATAL: BBY has no row at filed date {BBY_FILED}; backfill incomplete "
+            "or pre-ASC-606 fallback tags not yet in the store?"
+        )
+    row = frame.loc[ts]
+    print(
+        f"BBY @ {BBY_FILED}: gp={float(row['gross_profitability']):.4f} "
+        f"(expected ~{BBY_EXPECTED['gross_profitability']:.4f}), "
+        f"revenue_ttm={row['revenue_ttm']:.0f}, cogs_ttm={row['cogs_ttm']:.0f}, "
+        f"assets={row['assets']:.0f}, adsh={row['adsh']}, tags="
+        f"{row['revenue_tag']}/{row['cogs_tag']}/{row['assets_tag']}"
+    )
+    for key, expected in BBY_EXPECTED.items():
+        got = float(row[key])
+        if abs(got - expected) > abs(expected) * BBY_REL_TOLERANCE:
+            sys.exit(f"FATAL: BBY {key} {got:.4f} != {expected:.4f} (pre-606 fallback broken)")
+    for key, expected_tag in BBY_EXPECTED_TAGS.items():
+        if row[key] != expected_tag:
+            sys.exit(
+                f"FATAL: BBY {key} resolved as {row[key]!r}, expected {expected_tag!r} "
+                "-- the pre-ASC-606 fallback did not win as intended"
+            )
 
 
 def check_restatements(store_root: Path, cik_map: pd.DataFrame) -> None:
@@ -388,8 +454,9 @@ def check_neutral_fraction_coverage(store: FundamentalsStore, members: list[str]
     for date_iso, frac in sparse_quality:
         print(
             f"  NOTE: quality genuine coverage {frac:.1%} < {QUALITY_GENUINE_FLOOR:.0%} at "
-            f"{date_iso} -- mostly-neutral era (pre-ASC-606 revenue tags are outside the "
-            f"locked chain); interpret quality-ranker results over this period accordingly"
+            f"{date_iso} -- mostly-neutral era (residual after the pre-ASC-606 "
+            f"SalesRevenueNet/CostOfGoodsSold fallbacks: split-only filers still need "
+            f"per-part summation); interpret quality-ranker results over this period accordingly"
         )
 
 
@@ -429,6 +496,7 @@ def main() -> None:
     cik_map = load_cik_map()
     members = current_member_symbols()
     check_aapl(store)
+    check_bestbuy(store)
     check_restatements(store_root, cik_map)
     check_recycling_reconciliation(store, cik_map)
     check_shares_coverage(store, members)
