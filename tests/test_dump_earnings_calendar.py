@@ -86,3 +86,53 @@ def test_failed_window_keeps_earlier_windows_journaled(tmp_path):
 
 def test_run_key_signs_negative_windows_distinctly():
     assert run_key(TODAY, 14) != run_key(TODAY, -14)
+
+
+def test_main_notifies_and_exits_nonzero_on_failure(tmp_path, monkeypatch):
+    import dump_earnings_calendar as script
+
+    notifications = []
+    monkeypatch.setattr(script, "McpClient", lambda path: FakeClient(fail_on_days={14, -7}))
+    monkeypatch.setattr(script, "notify", lambda title, msg: notifications.append((title, msg)))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "x",
+            "--journal",
+            str(tmp_path / "e.jsonl"),
+            "--token-path",
+            str(tmp_path / "t.json"),
+            "--state-dir",
+            str(tmp_path / "state"),
+        ],
+    )
+    rc = script.main()
+    assert rc == 1
+    assert notifications and "earnings dump failed" in notifications[0][0]
+
+
+def test_main_refuses_to_race_a_held_lock(tmp_path, monkeypatch):
+    import os
+
+    import dump_earnings_calendar as script
+
+    lock_path = tmp_path / "state" / "earnings" / ".lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text(str(os.getpid()))  # a live pid holds the lock
+    fetched = []
+    monkeypatch.setattr(script, "McpClient", lambda path: fetched.append(path) or FakeClient())
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "x",
+            "--journal",
+            str(tmp_path / "e.jsonl"),
+            "--token-path",
+            str(tmp_path / "t.json"),
+            "--state-dir",
+            str(tmp_path / "state"),
+        ],
+    )
+    assert script.main() == 1
+    assert fetched == []  # never touched the network
+    assert lock_path.exists()  # the holder's lock is left alone

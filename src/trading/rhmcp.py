@@ -48,15 +48,29 @@ class RhMcpError(RuntimeError):
     pass
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib's default redirect handler copies ALL request headers -- the
+    Bearer token included -- onto the redirected request, even cross-host.
+    A 30x from the API host (CDN misconfig, compromised edge) must never
+    hand a full-trading-scope token to an arbitrary origin, so redirects
+    surface as their raw 30x status and become errors upstream."""
+
+    def redirect_request(self, *args):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def _http(
     url: str, data: bytes | None = None, headers: dict[str, str] | None = None
 ) -> tuple[int, dict[str, str], bytes]:
     """Network touchpoint, isolated for monkeypatching. POST when data is
-    given, GET otherwise. HTTP error statuses are returned, not raised, so
-    callers can implement 401-refresh-retry."""
+    given, GET otherwise. HTTP error statuses (redirects included) are
+    returned, not raised, so callers can implement 401-refresh-retry."""
     req = urllib.request.Request(url, data=data, headers=headers or {})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _opener.open(req, timeout=60) as resp:
             return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read()
@@ -76,14 +90,24 @@ class Tokens:
                 f"no token file at {path} -- run `uv run python "
                 "scripts/dump_earnings_calendar.py --auth` once to authorize"
             )
-        raw = json.loads(path.read_text())
-        return cls(**{f.name: raw[f.name] for f in dataclasses.fields(cls)})
+        try:
+            raw = json.loads(path.read_text())
+            return cls(**{f.name: raw[f.name] for f in dataclasses.fields(cls)})
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise RhMcpError(f"token file {path} is unreadable -- re-run --auth") from exc
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
-        tmp.touch(mode=0o600)
-        tmp.write_text(json.dumps(dataclasses.asdict(self), indent=2))
+        # O_EXCL-free but owner-only from birth (umask can only tighten 0600),
+        # fsynced before the atomic replace: a power cut must never strand a
+        # zero-length file or lose a ROTATED refresh token (the old one may
+        # already be dead server-side, and recovery is a manual --auth).
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(dataclasses.asdict(self), indent=2))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
         path.chmod(0o600)
 
@@ -205,18 +229,39 @@ def auth_flow(token_path: Path = DEFAULT_TOKEN_PATH, port: int = CALLBACK_PORT) 
     print(f"tokens saved to {token_path}")
 
 
+def _sse_events(body: bytes):
+    """Yield each SSE event's data payload: events are blank-line delimited,
+    and one event's multiple data: lines join with newline (SSE spec)."""
+    data_lines: list[str] = []
+    for line in body.decode().splitlines() + [""]:
+        if line.startswith("data:"):
+            data_lines.append(line[len("data:") :].strip())
+        elif not line and data_lines:
+            yield "\n".join(data_lines)
+            data_lines = []
+
+
 def _parse_rpc_body(headers: dict[str, str], body: bytes, rpc_id: int) -> dict:
     """A Streamable HTTP response is either a plain JSON-RPC message or an
-    SSE stream of them; find the response matching rpc_id."""
+    SSE stream of them; find the response matching rpc_id. Non-JSON events
+    (keep-alive pings) and other messages (progress notifications) are
+    skipped, not fatal."""
     content_type = headers.get("content-type", "")
     if content_type.startswith("text/event-stream"):
-        for line in body.decode().splitlines():
-            if line.startswith("data:"):
-                message = json.loads(line[len("data:") :].strip())
-                if message.get("id") == rpc_id:
-                    return message
+        for data in _sse_events(body):
+            try:
+                message = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(message, dict) and message.get("id") == rpc_id:
+                return message
         raise RhMcpError(f"no SSE event answered rpc id {rpc_id}")
-    return json.loads(body)
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RhMcpError(
+            f"response was not JSON (content-type {content_type!r}): {body[:200]!r}"
+        ) from exc
 
 
 class McpClient:
@@ -265,7 +310,11 @@ class McpClient:
         if status == 401:  # stale access token despite the expiry check: retry once
             self._refresh()
             status, headers, body = self._post(message)
-        if status not in (200, 202):
+        if status == 202:
+            # Legal only for notifications/responses (no body follows); for an
+            # id-bearing request it means no answer is coming.
+            raise RhMcpError(f"{method}: server returned 202 with no response body")
+        if status != 200:
             raise RhMcpError(f"{method}: HTTP {status}: {body[:200]!r}")
         if session := headers.get("mcp-session-id"):
             self._session_id = session

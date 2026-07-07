@@ -28,7 +28,9 @@ import sys
 from pathlib import Path
 
 from trading.journal import Journal
+from trading.notify import notify
 from trading.rhmcp import DEFAULT_TOKEN_PATH, McpClient, auth_flow
+from trading.runner import RunLock
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_JOURNAL = ROOT / "journal" / "earnings-calendar.jsonl"
@@ -74,19 +76,28 @@ def main() -> int:
     parser.add_argument("--auth", action="store_true", help="run one-time OAuth consent and exit")
     parser.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
     parser.add_argument("--token-path", type=Path, default=DEFAULT_TOKEN_PATH)
+    parser.add_argument("--state-dir", type=Path, default=ROOT / "state")
     args = parser.parse_args()
 
     if args.auth:
         auth_flow(args.token_path)
         return 0
 
-    client = McpClient(args.token_path)
-    today = datetime.date.today()
-    try:
-        messages = dump(client, Journal(args.journal), today)
-    except Exception as exc:  # noqa: BLE001 - launchd log is the surface
-        print(f"earnings dump failed: {exc}", file=sys.stderr)
+    # Same discipline as venue runs: a manual run must not race the launchd
+    # job -- has_run()->fetch->append is check-then-act, and two concurrent
+    # appends could duplicate a run_key or interleave mid-file.
+    lock = RunLock(args.state_dir / "earnings" / ".lock")
+    if not lock.acquire():
+        print("another earnings dump is running; exiting", file=sys.stderr)
         return 1
+    try:
+        messages = dump(McpClient(args.token_path), Journal(args.journal), datetime.date.today())
+    except Exception as exc:  # noqa: BLE001 - notify: a silent dead pipeline is the failure mode
+        print(f"earnings dump failed: {exc}", file=sys.stderr)
+        notify("trading: earnings dump failed", str(exc))
+        return 1
+    finally:
+        lock.release()
     for message in messages:
         print(message)
     return 0

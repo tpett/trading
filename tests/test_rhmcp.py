@@ -256,3 +256,146 @@ def test_structured_content_preferred_over_text_blocks(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(rhmcp, "_http", fake)
     assert McpClient(token_path).call_tool("t", {}) == {"s": 1}
+
+
+def test_tokens_from_response_without_expires_in_is_treated_as_expired():
+    tokens = rhmcp._tokens_from_response("cid", {"access_token": "at"}, fallback_refresh="rt")
+    assert tokens.expires_at == 0.0  # 0 = unknown = refresh before next use
+
+
+def test_corrupt_token_file_raises_with_auth_hint(tmp_path):
+    path = tmp_path / "tokens.json"
+    path.write_text("{ torn")
+    with pytest.raises(RhMcpError, match="--auth"):
+        Tokens.load(path)
+    path.write_text('{"client_id": "cid"}')  # missing fields
+    with pytest.raises(RhMcpError, match="--auth"):
+        Tokens.load(path)
+
+
+def test_redirects_are_never_followed():
+    # urllib's default handler would copy the Bearer header onto a
+    # cross-host redirect; the opener must refuse instead.
+    assert rhmcp._NoRedirect().redirect_request() is None
+
+
+def test_parse_rpc_body_sse_skips_pings_and_joins_multiline_events():
+    stream = b'data: ping\n\ndata: {"jsonrpc":"2.0",\ndata: "id":3,"result":{"answer":42}}\n\n'
+    message = _parse_rpc_body({"content-type": "text/event-stream"}, stream, 3)
+    assert message["result"] == {"answer": 42}
+
+
+def test_non_json_plain_body_raises_rhmcp_error_not_decode_error():
+    with pytest.raises(RhMcpError, match="not JSON"):
+        _parse_rpc_body({"content-type": "text/html"}, b"<html>gateway error</html>", 1)
+
+
+def test_202_on_id_bearing_request_is_an_error(tmp_path, monkeypatch):
+    token_path = make_tokens(tmp_path)
+    fake = FakeHttp([(202, {}, b"")])  # initialize answered 202: no body will come
+    monkeypatch.setattr(rhmcp, "_http", fake)
+    with pytest.raises(RhMcpError, match="202"):
+        McpClient(token_path).call_tool("t", {})
+
+
+def test_refresh_request_carries_resource_binding(tmp_path, monkeypatch):
+    token_path = make_tokens(tmp_path, expires_in=-10.0)
+    fake = FakeHttp(
+        [
+            (200, {}, json.dumps({"token_endpoint": "https://t/token"}).encode()),
+            (200, {}, json.dumps({"access_token": "at-2", "expires_in": 3600}).encode()),
+            (200, {"content-type": "application/json"}, rpc_response(1, {})),
+            (202, {}, b""),
+            (
+                200,
+                {"content-type": "application/json"},
+                rpc_response(2, tool_text_result({"ok": 1})),
+            ),
+        ]
+    )
+    monkeypatch.setattr(rhmcp, "_http", fake)
+    McpClient(token_path).call_tool("t", {})
+    assert b"resource=" in fake.requests[1]["data"]
+
+
+def _run_auth_flow(monkeypatch, tmp_path, callback_qs):
+    """Drive auth_flow end to end: fake _http for discovery/registration/
+    token exchange, and a fake browser that 'visits' the consent page by
+    hitting the localhost callback (loopback only) with callback_qs."""
+    import socket
+    import urllib.parse
+    import urllib.request as _real_urllib
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    fake = FakeHttp(
+        [
+            (
+                200,
+                {},
+                json.dumps(
+                    {
+                        "authorization_endpoint": "https://rh/oauth",
+                        "token_endpoint": "https://rh/token",
+                        "registration_endpoint": "https://rh/register",
+                    }
+                ).encode(),
+            ),
+            (201, {}, json.dumps({"client_id": "cid-new"}).encode()),
+            (
+                200,
+                {},
+                json.dumps(
+                    {"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600}
+                ).encode(),
+            ),
+        ]
+    )
+    monkeypatch.setattr(rhmcp, "_http", fake)
+    seen = {}
+
+    def fake_browser(url):
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
+        seen.update(query)
+        qs = callback_qs(query)
+        with _real_urllib.urlopen(f"http://127.0.0.1:{port}/callback?{qs}", timeout=10) as resp:
+            resp.read()
+        return True
+
+    monkeypatch.setattr(rhmcp.webbrowser, "open", fake_browser)
+    rhmcp._CallbackHandler.result = {}
+    token_path = tmp_path / "tokens.json"
+    rhmcp.auth_flow(token_path, port=port)
+    return fake, seen, token_path
+
+
+def test_auth_flow_pkce_state_and_token_persistence(tmp_path, monkeypatch):
+    import urllib.parse as up
+
+    fake, seen, token_path = _run_auth_flow(
+        monkeypatch, tmp_path, lambda q: f"code=authcode-1&state={q['state']}"
+    )
+    register, exchange = fake.requests[1], fake.requests[2]
+    assert json.loads(register["data"])["token_endpoint_auth_method"] == "none"
+    form = dict(up.parse_qsl(exchange["data"].decode()))
+    assert form["code"] == "authcode-1"
+    assert form["client_id"] == "cid-new"
+    # PKCE: the challenge sent to the consent page must be the unpadded
+    # urlsafe SHA-256 of the verifier sent to the token endpoint.
+    import base64 as b64
+    import hashlib as hl
+
+    expected = b64.urlsafe_b64encode(hl.sha256(form["code_verifier"].encode()).digest())
+    assert seen["code_challenge"] == expected.rstrip(b"=").decode()
+    assert seen["code_challenge_method"] == "S256"
+    saved = Tokens.load(token_path)
+    assert saved.client_id == "cid-new"
+    assert saved.refresh_token == "rt-new"
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+
+
+def test_auth_flow_rejects_state_mismatch(tmp_path, monkeypatch):
+    with pytest.raises(RhMcpError, match="state mismatch"):
+        _run_auth_flow(monkeypatch, tmp_path, lambda q: "code=authcode-1&state=forged")
