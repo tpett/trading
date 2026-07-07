@@ -21,11 +21,47 @@ FetchFn = Callable[[str, datetime.date, datetime.date], pd.DataFrame]
 _START_TOLERANCE = pd.Timedelta(5, unit="D")
 
 
+class CacheSourceError(RuntimeError):
+    """The cache dir was built by a different bar source than the one now
+    requesting it -- serving its parquets would silently splice two
+    adjustment regimes for the same symbol."""
+
+
 class OhlcvCache:
-    def __init__(self, cache_dir: Path, refetch_days: int):
+    def __init__(self, cache_dir: Path, refetch_days: int, source: str = "yfinance"):
         self._dir = cache_dir
         self._refetch_days = refetch_days
+        self._source = source
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._guard_source()
+
+    def _guard_source(self) -> None:
+        """Bind this cache dir to one bar source. Two sources adjust prices
+        on the same basis but not bit-identically, so the cache-through
+        merge (old cached rows + fresh rows) must never mix them. The marker
+        is written on first use (or when a legacy unmarked dir is empty);
+        a mismatch fails loudly rather than corrupting history."""
+        marker = self._dir / ".source"
+        if marker.exists():
+            existing = marker.read_text().strip()
+            if existing != self._source:
+                raise CacheSourceError(
+                    f"{self._dir} holds {existing!r} bars but bar_source={self._source!r}; "
+                    "point data.cache_dir at a fresh directory when switching sources"
+                )
+            return
+        # Legacy dirs predate the marker: adopt them ONLY as the default
+        # yfinance source; a non-default source must start from an empty dir
+        # so it can never inherit yfinance parquets.
+        has_parquets = any(self._dir.glob("*.parquet"))
+        if has_parquets and self._source != "yfinance":
+            raise CacheSourceError(
+                f"{self._dir} has unmarked (legacy yfinance) parquets but bar_source="
+                f"{self._source!r}; point data.cache_dir at a fresh directory"
+            )
+        tmp = marker.with_suffix(".source.tmp")
+        tmp.write_text(self._source)
+        os.replace(tmp, marker)
 
     def path_for(self, symbol: str) -> Path:
         return self._dir / f"{symbol.replace('/', '-')}.parquet"
