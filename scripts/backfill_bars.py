@@ -20,10 +20,14 @@ import datetime
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 from trading.config import load_venue_config
 from trading.data.cache import OhlcvCache
+from trading.symbols import resolution_collisions
 from trading.venues import make_adapter
 from trading.venues.base import DataFetchError, RateLimitError
+from trading.venues.equities import DEFAULT_MEMBERSHIP_CSV
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,6 +97,23 @@ def main() -> int:
     cache = OhlcvCache(
         Path(config.data.cache_dir), config.data.refetch_days, config.data.bar_source
     )
+
+    # Warn loudly if the active universe has entity collisions (a company that
+    # enters the ranking twice -- cross-index membership double-listing, a few
+    # even in the default sp500+ndx universe, plus more under sp400). Surfaced,
+    # not yet auto-fixed; see trading.symbols.resolution_collisions.
+    if args.venue == "equities" and config.data.bar_source == "tiingo":
+        membership = pd.read_csv(DEFAULT_MEMBERSHIP_CSV, comment="#", dtype=str).fillna("")
+        collisions = resolution_collisions(membership, config.universe.indices)
+        if collisions:
+            print(
+                f"WARNING: {len(collisions)} rename/successor membership collision(s) under "
+                f"indices {config.universe.indices} -- the same company will be double-counted "
+                "in the ranking (static resolution is not point-in-time). Affected:",
+                flush=True,
+            )
+            for c in collisions:
+                print(f"  {c['old']}->{c['new']}: {c['old_window']} overlaps {c['new_window']}")
 
     start = config.backtest.start
     end = datetime.date.today()

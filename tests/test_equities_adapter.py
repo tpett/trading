@@ -367,6 +367,76 @@ def test_tiingo_network_error_retried_then_raised(monkeypatch):
         adapter.fetch_ohlcv("AAPL", datetime.date(2022, 1, 1), datetime.date(2022, 2, 1))
 
 
+def test_tiingo_fetch_resolves_renamed_ticker_to_successor(monkeypatch):
+    # A renamed PIT ticker (ABC = AmerisourceBergen) must fetch the successor
+    # (COR = Cencora) Tiingo serves the continuous history under -- the literal
+    # ABC would return the recycled Adbri (ASX) or nothing.
+    import json
+
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    captured = {}
+
+    def fake_get(url, params):
+        captured["url"] = url
+        return 200, json.dumps(_TIINGO_ROWS).encode()
+
+    monkeypatch.setattr("trading.venues.equities._tiingo_get", fake_get)
+    adapter = EquitiesAdapter(_tiingo_config())
+    adapter.fetch_ohlcv("ABC", datetime.date(2022, 2, 11), datetime.date(2022, 2, 14))
+    assert "/COR/" in captured["url"]  # successor requested
+    assert "/ABC/" not in captured["url"]  # NOT the literal recycled ticker
+
+
+def test_tiingo_fetch_applies_namespace_override(monkeypatch):
+    # MMC (US Marsh & McLennan) must fetch MRSH: Tiingo's bare MMC is the ASX
+    # Mitre Mining squatter with no US daily bars.
+    import json
+
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    captured = {}
+
+    def fake_get(url, params):
+        captured["url"] = url
+        return 200, json.dumps(_TIINGO_ROWS).encode()
+
+    monkeypatch.setattr("trading.venues.equities._tiingo_get", fake_get)
+    adapter = EquitiesAdapter(_tiingo_config())
+    adapter.fetch_ohlcv("MMC", datetime.date(2022, 2, 11), datetime.date(2022, 2, 14))
+    assert "/MRSH/" in captured["url"]
+
+
+def test_tiingo_fetch_is_noop_for_current_ticker(monkeypatch):
+    import json
+
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    captured = {}
+
+    def fake_get(url, params):
+        captured["url"] = url
+        return 200, json.dumps(_TIINGO_ROWS).encode()
+
+    monkeypatch.setattr("trading.venues.equities._tiingo_get", fake_get)
+    adapter = EquitiesAdapter(_tiingo_config())
+    adapter.fetch_ohlcv("AAPL", datetime.date(2022, 2, 11), datetime.date(2022, 2, 14))
+    assert "/AAPL/" in captured["url"]
+
+
+def test_yfinance_fetch_does_not_resolve_renamed_ticker(monkeypatch):
+    # Resolution is gated to tiingo: the yfinance path must request the literal
+    # symbol (current members already use current tickers there, and the
+    # MMC->MRSH override would be WRONG on yfinance).
+    captured = {}
+
+    def fake_yf(symbol, start, end):
+        captured["symbol"] = symbol
+        return _yf_style_frame(symbol)
+
+    monkeypatch.setattr("trading.venues.equities._yf_download", fake_yf)
+    adapter = EquitiesAdapter(CONFIG)  # default bar_source = yfinance
+    adapter.fetch_ohlcv("ABC", datetime.date(2026, 1, 5), datetime.date(2026, 1, 9))
+    assert captured["symbol"] == "ABC"  # NOT resolved to COR
+
+
 def test_tiingo_persistent_429_surfaces_as_datafetcherror(monkeypatch):
     monkeypatch.setenv("TIINGO_API_KEY", "test-token")
     monkeypatch.setattr("trading.venues.equities._tiingo_sleep", lambda s: None)

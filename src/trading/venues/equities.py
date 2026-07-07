@@ -19,11 +19,13 @@ indices, not filtered) for the backtest engine's ticker-recycling guard
 from __future__ import annotations
 
 import datetime
+import logging
 from pathlib import Path
 
 import pandas as pd
 
 from trading.config import VenueConfig
+from trading.symbols import resolve_current
 from trading.venues.base import (
     EXTENDED_OHLCV_COLUMNS,
     OHLCV_COLUMNS,
@@ -35,6 +37,8 @@ from trading.venues.base import (
 )
 
 DEFAULT_MEMBERSHIP_CSV = Path(__file__).parent / "universes" / "equities_membership.csv"
+
+logger = logging.getLogger(__name__)
 
 
 def _yf_download(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
@@ -299,7 +303,33 @@ class EquitiesAdapter:
         )
 
     def fetch_ohlcv(self, symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
-        raw = _download(self._config.data.bar_source, symbol, start, end)
+        source = self._config.data.bar_source
+        # Resolve a renamed/namespace-collided ticker to the successor Tiingo
+        # serves the continuous history under, BEFORE the network call. Two
+        # invariants keep this safe:
+        #   * The CACHE keys by the ORIGINAL `symbol` (the point-in-time
+        #     membership ticker) -- resolution only changes the STRING sent to
+        #     the vendor. The returned frame is date-indexed and carries no
+        #     ticker label, so the caller/cache is unaffected: the parquet for
+        #     ABC holds the continuous history fetched via COR.
+        #   * PIT-safe, NO lookahead: a bar's adjusted price on any past date
+        #     is identical whether the entity was labeled ABC or COR -- only
+        #     the label differs, and the recycling guard (engine.prepare's
+        #     _truncate_for_membership_exit) still truncates the ORIGINAL
+        #     symbol's frame at its membership-interval end, so no post-rename
+        #     bars reach the simulator.
+        # Gated to tiingo: the successor-keyed continuous serving is a verified
+        # Tiingo behaviour, and NAMESPACE_OVERRIDES (MMC->MRSH) is a Tiingo
+        # ticker string that would be WRONG on yfinance (where bare MMC is the
+        # correct US listing). yfinance current members already use current
+        # tickers, so resolution there is at best a no-op and at worst breaks
+        # the override case -- so it is not applied.
+        fetch_symbol = resolve_current(symbol) if source == "tiingo" else symbol
+        if fetch_symbol != symbol:
+            logger.info(
+                "resolved %s -> %s for %s fetch (rename/namespace)", symbol, fetch_symbol, source
+            )
+        raw = _download(source, fetch_symbol, start, end)
         if raw is None or raw.empty:
             raise DataFetchError(f"no equities data for {symbol}")
         if isinstance(raw.columns, pd.MultiIndex):
