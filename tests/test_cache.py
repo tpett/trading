@@ -1,6 +1,7 @@
 import datetime
 
 import pandas as pd
+import pytest
 
 from trading.data.cache import OhlcvCache
 
@@ -168,3 +169,35 @@ def test_full_refetch_gappy_fresh_is_authoritative_in_range(tmp_path):
     # Cached tail past the requested end is preserved.
     assert on_disk.loc[pd.Timestamp("2026-02-20", tz="UTC"), "close"] == 1.0
     assert not on_disk.index.duplicated().any()
+
+
+def test_source_marker_written_on_first_use(tmp_path):
+    OhlcvCache(tmp_path / "c", refetch_days=5, source="tiingo")
+    assert (tmp_path / "c" / ".source").read_text() == "tiingo"
+
+
+def test_source_mismatch_raises(tmp_path):
+    from trading.data.cache import CacheSourceError
+
+    OhlcvCache(tmp_path / "c", refetch_days=5, source="yfinance")
+    with pytest.raises(CacheSourceError, match="fresh directory"):
+        OhlcvCache(tmp_path / "c", refetch_days=5, source="tiingo")
+
+
+def test_legacy_unmarked_dir_adopted_only_by_yfinance(tmp_path):
+    from trading.data.cache import CacheSourceError
+
+    d = tmp_path / "legacy"
+    d.mkdir()
+    (d / "AAPL.parquet").write_bytes(b"")  # a pre-marker cache file
+    # A non-default source must not inherit unmarked (yfinance) parquets.
+    with pytest.raises(CacheSourceError, match="legacy yfinance"):
+        OhlcvCache(d, refetch_days=5, source="tiingo")
+    # yfinance adopts it and stamps the marker.
+    OhlcvCache(d, refetch_days=5, source="yfinance")
+    assert (d / ".source").read_text() == "yfinance"
+
+
+def test_same_source_reopen_is_fine(tmp_path):
+    OhlcvCache(tmp_path / "c", refetch_days=5, source="tiingo")
+    OhlcvCache(tmp_path / "c", refetch_days=5, source="tiingo")  # no raise

@@ -178,3 +178,99 @@ def test_fetch_ohlcv_empty_raises(monkeypatch):
     adapter = EquitiesAdapter(CONFIG)
     with pytest.raises(DataFetchError):
         adapter.fetch_ohlcv("AAPL", datetime.date(2026, 1, 5), datetime.date(2026, 1, 9))
+
+
+_TIINGO_ROWS = [
+    {
+        "date": "2022-02-14T00:00:00.000Z",
+        "adjOpen": 194.5,
+        "adjHigh": 195.0,
+        "adjLow": 191.2,
+        "adjClose": 194.0,
+        "adjVolume": 5_000_000,
+        "open": 194.5,
+        "close": 194.0,
+        "divCash": 0.0,
+        "splitFactor": 1.0,
+    },
+    {
+        "date": "2022-02-11T00:00:00.000Z",  # deliberately out of order
+        "adjOpen": 210.0,
+        "adjHigh": 212.0,
+        "adjLow": 208.0,
+        "adjClose": 209.5,
+        "adjVolume": 4_000_000,
+        "open": 210.0,
+        "close": 209.5,
+        "divCash": 0.0,
+        "splitFactor": 1.0,
+    },
+]
+
+
+def _tiingo_config():
+    from dataclasses import replace
+
+    return replace(CONFIG, data=replace(CONFIG.data, bar_source="tiingo"))
+
+
+def test_tiingo_download_normalizes_adjusted_fields(monkeypatch):
+    import json
+
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    captured = {}
+
+    def fake_get(url, params):
+        captured["url"] = url
+        captured["params"] = params
+        return 200, json.dumps(_TIINGO_ROWS).encode()
+
+    monkeypatch.setattr("trading.venues.equities._tiingo_get", fake_get)
+    adapter = EquitiesAdapter(_tiingo_config())
+    df = adapter.fetch_ohlcv("XLNX", datetime.date(2022, 2, 11), datetime.date(2022, 2, 14))
+    assert list(df.columns) == OHLCV_COLUMNS
+    assert str(df.index.tz) == "UTC"
+    assert df.index.is_monotonic_increasing  # sorted despite unordered input
+    # adjClose -> close, not the raw close (same adjustment basis as yfinance).
+    assert df["close"].iloc[0] == 209.5
+    assert df["close"].iloc[-1] == 194.0
+    # Token rides the header, never the query string.
+    assert "token" not in captured["params"]
+    assert "XLNX" in captured["url"]
+
+
+def test_tiingo_404_is_empty_frame_then_raises(monkeypatch):
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    monkeypatch.setattr("trading.venues.equities._tiingo_get", lambda url, params: (404, b"{}"))
+    adapter = EquitiesAdapter(_tiingo_config())
+    with pytest.raises(DataFetchError, match="no equities data"):
+        adapter.fetch_ohlcv("NOPE", datetime.date(2022, 1, 1), datetime.date(2022, 2, 1))
+
+
+def test_tiingo_http_error_surfaces(monkeypatch):
+    monkeypatch.setenv("TIINGO_API_KEY", "test-token")
+    monkeypatch.setattr(
+        "trading.venues.equities._tiingo_get", lambda url, params: (503, b"upstream boom")
+    )
+    adapter = EquitiesAdapter(_tiingo_config())
+    with pytest.raises(DataFetchError, match="HTTP 503"):
+        adapter.fetch_ohlcv("AAPL", datetime.date(2022, 1, 1), datetime.date(2022, 2, 1))
+
+
+def test_tiingo_token_missing_raises_with_hint(monkeypatch, tmp_path):
+    monkeypatch.delenv("TIINGO_API_KEY", raising=False)
+    monkeypatch.setattr("trading.venues.equities.TIINGO_CONFIG_PATH", tmp_path / "absent.toml")
+    from trading.venues.equities import tiingo_token
+
+    with pytest.raises(DataFetchError, match="TIINGO_API_KEY"):
+        tiingo_token()
+
+
+def test_tiingo_token_read_from_config_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("TIINGO_API_KEY", raising=False)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('tiingo_api_key = "file-token-xyz"\n')
+    monkeypatch.setattr("trading.venues.equities.TIINGO_CONFIG_PATH", cfg)
+    from trading.venues.equities import tiingo_token
+
+    assert tiingo_token() == "file-token-xyz"
