@@ -127,3 +127,109 @@ def test_contract_from_sample_infers_type() -> None:
     call = Contract.from_sample({"role": "atm", "type": "call", "strike": 100, "close": 3.4})
     assert put.is_call is False
     assert call.is_call is True
+
+
+def _poc_cell(contracts, spot=100.0, dte=30):
+    return {
+        "symbol": "X",
+        "decision_date": "2024-01-02",
+        "spot_at_decision": spot,
+        "days_to_expiry": dte,
+        "contracts": contracts,
+    }
+
+
+def test_skew_from_cell_two_leg_computes_put_atm_only():
+    # A 2-leg sample (atm + otm_put, no otm_call) must still yield skew_put_atm;
+    # skew_put_call is None without the call leg.
+    from trading.research.options_iv import skew_from_cell
+
+    s = skew_from_cell(
+        _poc_cell(
+            [
+                {
+                    "role": "atm",
+                    "type": "call",
+                    "strike": 100.0,
+                    "close": 3.5,
+                    "interpolated": False,
+                },
+                {
+                    "role": "otm_put",
+                    "type": "put",
+                    "strike": 90.0,
+                    "close": 1.2,
+                    "interpolated": False,
+                },
+            ]
+        )
+    )
+    assert s is not None
+    assert s.skew_put_atm is not None
+    assert s.skew_put_call is None
+
+
+def test_skew_from_cell_drops_interpolated_leg():
+    # An interpolated / placeholder otm_put leg is dropped -> atm+otm_put
+    # requirement fails -> None (no garbage IV from a $0.01 gap-fill).
+    from trading.research.options_iv import skew_from_cell
+
+    assert (
+        skew_from_cell(
+            _poc_cell(
+                [
+                    {
+                        "role": "atm",
+                        "type": "call",
+                        "strike": 100.0,
+                        "close": 3.5,
+                        "interpolated": False,
+                    },
+                    {
+                        "role": "otm_put",
+                        "type": "put",
+                        "strike": 90.0,
+                        "close": 0.01,
+                        "interpolated": True,
+                    },
+                ]
+            )
+        )
+        is None
+    )
+
+
+def test_skew_from_cell_interpolated_call_still_yields_put_atm():
+    # A junk otm_call leg must not sink the whole cell: put_atm still computes.
+    from trading.research.options_iv import skew_from_cell
+
+    s = skew_from_cell(
+        _poc_cell(
+            [
+                {
+                    "role": "atm",
+                    "type": "call",
+                    "strike": 100.0,
+                    "close": 3.5,
+                    "interpolated": False,
+                },
+                {
+                    "role": "otm_put",
+                    "type": "put",
+                    "strike": 90.0,
+                    "close": 1.2,
+                    "interpolated": False,
+                },
+                {
+                    "role": "otm_call",
+                    "type": "call",
+                    "strike": 110.0,
+                    "close": 0.01,
+                    "interpolated": True,
+                },
+            ]
+        )
+    )
+    assert s is not None
+    assert s.skew_put_atm is not None
+    assert s.skew_put_call is None

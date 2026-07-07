@@ -36,6 +36,11 @@ from dataclasses import dataclass
 RATE = 0.045
 DIV_YIELD = 0.0
 
+# An option close at or below this is treated as a placeholder / too illiquid
+# to invert (Robinhood's gap-filled expired bars park at $0.01). Legs at or
+# below it are dropped in skew_from_cell alongside interpolated=True legs.
+_MIN_OPTION_CLOSE = 0.03
+
 # --- Inversion tuning ------------------------------------------------------
 # Sigma is bracketed here. 1e-4 is a floor (below it the price is
 # indistinguishable from intrinsic); 5.0 (500% vol) is far above anything a
@@ -241,16 +246,19 @@ def compute_skew(
     days_to_expiry: float,
     atm: Contract,
     otm_put: Contract,
-    otm_call: Contract,
+    otm_call: Contract | None = None,
     rate: float = RATE,
     div_yield: float = DIV_YIELD,
 ) -> SkewResult:
-    """Invert all three legs and form the two skew measures.
+    """Invert the legs and form the skew measures.
 
     * ``skew_put_atm  = iv_otm_put - iv_atm``  -- how much richer the downside
-      put vol is than at-the-money (the classic equity "smirk").
+      put vol is than at-the-money (the classic equity "smirk"). Needs only the
+      ATM and OTM-put legs.
     * ``skew_put_call = iv_otm_put - iv_otm_call`` -- a symmetric risk-reversal:
-      downside vol minus equidistant upside vol.
+      downside vol minus equidistant upside vol. Needs the OTM-call leg; when it
+      is absent (a two-leg sample) this measure is None but skew_put_atm still
+      computes.
 
     A steep (large positive) put skew is the market paying up for downside
     protection; the hypothesis under test is that it precedes LOWER forward
@@ -258,7 +266,11 @@ def compute_skew(
     """
     iv_atm = contract_iv(atm, spot, days_to_expiry, rate, div_yield)
     iv_otm_put = contract_iv(otm_put, spot, days_to_expiry, rate, div_yield)
-    iv_otm_call = contract_iv(otm_call, spot, days_to_expiry, rate, div_yield)
+    iv_otm_call = (
+        contract_iv(otm_call, spot, days_to_expiry, rate, div_yield)
+        if otm_call is not None
+        else None
+    )
 
     skew_put_atm = iv_otm_put - iv_atm if (iv_otm_put is not None and iv_atm is not None) else None
     skew_put_call = (
@@ -276,19 +288,27 @@ def compute_skew(
 def skew_from_cell(cell: dict) -> SkewResult | None:
     """Convenience: compute skew straight from a parsed samples.jsonl cell.
 
-    Returns ``None`` when the cell lacks the three required roles (atm,
-    otm_put, otm_call).
+    Requires the ATM and OTM-put legs (for skew_put_atm, the primary signal);
+    the OTM-call leg is OPTIONAL -- a two-leg sample yields skew_put_atm with
+    skew_put_call None. Returns ``None`` only when atm or otm_put is missing.
     """
+    # Drop legs the data source gap-filled: Robinhood's expired-option daily
+    # history flags interpolated bars (often a $0.01 placeholder), which are not
+    # real prices and would invert to garbage IV. A leg missing for this reason
+    # is treated as absent.
     by_role: dict[str, dict] = {}
     for raw in cell.get("contracts", []):
+        if raw.get("interpolated") or float(raw.get("close", 0.0)) <= _MIN_OPTION_CLOSE:
+            continue
         role = str(raw.get("role", "")).lower()
         by_role[role] = raw
-    if not {"atm", "otm_put", "otm_call"} <= by_role.keys():
+    if not {"atm", "otm_put"} <= by_role.keys():
         return None
+    otm_call = by_role.get("otm_call")
     return compute_skew(
         spot=float(cell["spot_at_decision"]),
         days_to_expiry=float(cell["days_to_expiry"]),
         atm=Contract.from_sample(by_role["atm"]),
         otm_put=Contract.from_sample(by_role["otm_put"]),
-        otm_call=Contract.from_sample(by_role["otm_call"]),
+        otm_call=Contract.from_sample(otm_call) if otm_call is not None else None,
     )
