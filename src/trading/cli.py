@@ -145,6 +145,38 @@ def build_parser() -> argparse.ArgumentParser:
         "(date,strategy,benchmark) for factor-regression analysis; walk-forward only",
     )
 
+    alphasearch = sub.add_parser(
+        "alphasearch",
+        help="cheap alpha search: sweep signals x universes, leaderboard, holdout",
+    )
+    alphasearch.add_argument("action", choices=["sweep", "leaderboard", "holdout"])
+    alphasearch.add_argument(
+        "trial",
+        nargs="?",
+        default=None,
+        help="holdout target as signal:universe (e.g. mom126:largecap)",
+    )
+    alphasearch.add_argument(
+        "--universe",
+        choices=["largecap", "midcap", "all"],
+        default="all",
+        help="sweep scope (sweep only)",
+    )
+    alphasearch.add_argument(
+        "--signals",
+        default=None,
+        help="comma-separated signal subset for the sweep; every run is still "
+        "a journaled trial",
+    )
+    alphasearch.add_argument("--journal-dir", default="journal", help="journal root")
+    alphasearch.add_argument(
+        "--factors-dir", default="data/factors", help="Ken French factor cache directory"
+    )
+    alphasearch.add_argument(
+        "--refresh-factors", action="store_true", help="re-download the factor CSVs"
+    )
+    alphasearch.add_argument("--json", action="store_true", help="machine-readable output")
+
     sched = sub.add_parser("schedule", help="manage launchd jobs")
     sched.add_argument("action", choices=["install", "status", "remove"])
     sched.add_argument(
@@ -165,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         "reset-breaker": _cmd_reset_breaker,
         "schedule": _cmd_schedule,
         "backtest": _cmd_backtest,
+        "alphasearch": _cmd_alphasearch,
     }
     return handlers[args.command](args)
 
@@ -804,3 +837,180 @@ def _render_walk_forward(wf: WalkForwardResult, venue: str, count: int) -> None:
     )
     console.print(f"stress segments covered: {', '.join(wf.stress_segments_covered)}")
     console.print(f"experiments journaled for {venue}: {count} (all windows + summary included)")
+
+
+def _cmd_alphasearch(args: argparse.Namespace) -> int:
+    from trading.alphasearch import sweep as engine
+    from trading.alphasearch.panel import PanelError
+
+    journal = engine.trials_journal(Path(args.journal_dir))
+
+    if args.action == "leaderboard":
+        # The auditable view: recomputed from the journal alone, no new trials.
+        rows, count = engine.build_leaderboard(journal)
+        _print_alphasearch_leaderboard(rows, count, as_json=args.json)
+        return 0
+
+    if args.action == "sweep":
+        signals = None
+        if args.signals:
+            from trading.alphasearch.spec import SIGNALS
+
+            names = [n.strip() for n in args.signals.split(",") if n.strip()]
+            unknown = sorted(set(names) - set(SIGNALS))
+            if unknown:
+                print(f"ERROR: unknown signals: {', '.join(unknown)}", file=sys.stderr)
+                return 1
+            signals = {n: SIGNALS[n] for n in names}
+        factors = _load_alphasearch_factors(args)
+        if factors is None:
+            return 1
+        universes = engine.default_universes(Path("."))
+        if args.universe != "all":
+            universes = {args.universe: universes[args.universe]}
+        try:
+            rows, count = engine.run_sweep(
+                universes, journal, factors, _utcnow().isoformat(), signals=signals
+            )
+        except (engine.SweepError, PanelError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        _print_alphasearch_leaderboard(rows, count, as_json=args.json)
+        return 0
+
+    # holdout
+    if not args.trial or ":" not in args.trial:
+        print(
+            "ERROR: holdout needs a trial id: signal:universe (e.g. mom126:largecap)",
+            file=sys.stderr,
+        )
+        return 1
+    signal_name, _, universe = args.trial.partition(":")
+    universes = engine.default_universes(Path("."))
+    if universe not in universes:
+        print(
+            f"ERROR: unknown universe {universe!r}; choose from "
+            f"{', '.join(sorted(universes))}",
+            file=sys.stderr,
+        )
+        return 1
+    factors = _load_alphasearch_factors(args)
+    if factors is None:
+        return 1
+
+    def confirm() -> str:
+        # Same ceremony as the backtest holdout: spent the first time it is
+        # read; stdout stays clean for --json, prompts live on stderr.
+        print(
+            "Holdout already evaluated for this candidate (journaled). "
+            "Rerunning it invalidates the evidence (spec).",
+            file=sys.stderr,
+        )
+        try:
+            return input("Type RERUN HOLDOUT to run it anyway: ").strip()
+        except EOFError:  # non-interactive stdin: refusal, not a crash
+            return ""
+
+    try:
+        outcome = engine.run_holdout(
+            universes[universe], journal, factors, _utcnow().isoformat(),
+            signal_name, confirm=confirm,
+        )
+    except (engine.SweepError, PanelError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "signal": signal_name,
+                    "universe": universe,
+                    "window": outcome.window,
+                    "discovery_alpha_annual_pct": outcome.discovery_alpha,
+                    "holdout_alpha_annual_pct": outcome.holdout_alpha,
+                    "passed": outcome.passed,
+                    "error": outcome.event.get("error"),
+                }
+            )
+        )
+        return 0 if outcome.holdout_alpha is not None else 1
+    print(f"holdout {signal_name}:{universe} over {outcome.window}")
+    if outcome.holdout_alpha is None:
+        print(
+            f"ERRORED: {outcome.event.get('error')} (journaled; still spends a trial)",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"discovery alpha {outcome.discovery_alpha:+.1f}%/yr -> "
+        f"holdout {outcome.holdout_alpha:+.1f}%/yr"
+    )
+    print(
+        "pass rule (same sign, >=50% of the effect retained): "
+        + ("PASS" if outcome.passed else "FAIL")
+    )
+    return 0
+
+
+def _load_alphasearch_factors(args: argparse.Namespace):
+    """Factors or None (error already printed). Offline with a warm cache;
+    a cold cache offline is a hard error instructing --refresh-factors."""
+    from trading.alphasearch.evaluate import load_factors
+
+    try:
+        return load_factors(Path(args.factors_dir), refresh=args.refresh_factors)
+    except OSError as exc:
+        print(
+            f"ERROR: factor data unavailable ({exc}); run once online with "
+            "--refresh-factors to (re)build the cache",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _print_alphasearch_leaderboard(rows, count: int, *, as_json: bool) -> None:
+    if as_json:
+        from dataclasses import asdict
+
+        print(json.dumps({"trials": count, "bh_q": 0.10,
+                          "rows": [asdict(r) for r in rows]}))
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    def num(value, fmt="{:+.2f}"):
+        return "-" if value is None else fmt.format(value)
+
+    # Wide on purpose: 15 columns don't fit rich's 80-col no-tty default, which
+    # would silently ellipsize every cell (including the signal name itself).
+    console = Console(width=200)
+    table = Table(
+        title=f"alphasearch leaderboard — {count} discovery trials, BH q=0.10"
+    )
+    for col in ["signal", "universe", "4F a%/yr", "t", "p", "BH", "DSR", "CAPM t",
+                "bMkt", "bSMB", "bHML", "bMom", "turn", "names", "error"]:
+        table.add_column(col, justify="right")
+    for r in rows:
+        table.add_row(
+            r.signal,
+            r.universe,
+            num(r.alpha_annual_pct, "{:+.1f}"),
+            num(r.alpha_t),
+            num(r.p, "{:.4f}"),
+            "PASS" if r.bh_pass else "-",
+            num(r.dsr, "{:.3f}"),
+            num(r.capm_alpha_t),
+            num(r.loadings.get("Mkt-RF")),
+            num(r.loadings.get("SMB")),
+            num(r.loadings.get("HML")),
+            num(r.loadings.get("Mom")),
+            num(r.turnover_monthly, "{:.2f}"),
+            num(r.n_names_median, "{:.0f}"),
+            r.error or "",
+        )
+    console.print(table)
+    console.print(
+        f"honest trial count: {count} journaled discovery trials — the BH gate "
+        "is computed across ALL of them, not just this run"
+    )
