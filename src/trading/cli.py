@@ -138,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--json", action="store_true", help="machine-readable output")
     backtest.add_argument("--config-dir", default="config", help="directory with <venue>.toml")
     backtest.add_argument("--journal-dir", default="journal", help="journal root")
+    backtest.add_argument(
+        "--dump-returns",
+        default=None,
+        help="write the stitched daily strategy/benchmark returns to a CSV "
+        "(date,strategy,benchmark) for factor-regression analysis; walk-forward only",
+    )
 
     sched = sub.add_parser("schedule", help="manage launchd jobs")
     sched.add_argument("action", choices=["install", "status", "remove"])
@@ -556,7 +562,36 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     return _run_plain_backtest_command(prepared, config, journal, args, start, end, now, prior)
 
 
+def _dump_returns(path: Path, equity: pd.Series, benchmark: pd.Series) -> None:
+    """Write daily percent-change returns of the stitched OOS curves to CSV.
+
+    Columns: date,strategy,benchmark. The first (all-NaN) pct_change row is
+    dropped so every row is a real trading-day return; dates are date-only ISO
+    strings so the factor-regression tool can re-index them to UTC cleanly.
+    """
+    frame = pd.DataFrame(
+        {"strategy": equity.pct_change(), "benchmark": benchmark.pct_change()}
+    ).dropna()
+    out = pd.DataFrame(
+        {
+            "date": frame.index.strftime("%Y-%m-%d"),
+            "strategy": frame["strategy"].to_numpy(),
+            "benchmark": frame["benchmark"].to_numpy(),
+        }
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False)
+
+
 def _run_plain_backtest_command(prepared, config, journal, args, start, end, now, prior) -> int:
+    if args.dump_returns:
+        # The plain/holdout path has no stitched OOS return series; --dump-returns
+        # is meaningful only for the walk-forward stitched curve.
+        print(
+            "note: --dump-returns is ignored without --walk-forward (no stitched "
+            "OOS return series to dump)",
+            file=sys.stderr,
+        )
     try:
         result = replay(prepared, config)
     except BacktestError as exc:
@@ -598,6 +633,8 @@ def _run_walk_forward_command(prepared, config, journal, args, start, end, now) 
     except (WalkForwardError, BacktestError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    if args.dump_returns:
+        _dump_returns(Path(args.dump_returns), wf.stitched_equity, wf.stitched_benchmark)
     for wr in wf.windows:
         log_experiment(
             journal,

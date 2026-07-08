@@ -2,6 +2,7 @@ import datetime
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import trading.cli as cli
@@ -305,6 +306,32 @@ def test_holdout_with_to_is_rejected_not_a_partial_evaluation(backtest_env, caps
     assert "holdout" in capsys.readouterr().err.lower()
     journal = experiments_journal(backtest_env / "journal", "crypto")
     assert list(journal.events()) == []
+
+
+def test_dump_returns_flag_parses_default_none():
+    args = cli.build_parser().parse_args(
+        ["backtest", "--venue", "crypto", "--dump-returns", "out.csv"]
+    )
+    assert args.dump_returns == "out.csv"
+    default = cli.build_parser().parse_args(["backtest", "--venue", "crypto"])
+    assert default.dump_returns is None
+
+
+def test_dump_returns_writes_daily_pct_change_csv(tmp_path):
+    idx = pd.date_range("2025-01-01", periods=4, freq="D", tz="UTC")
+    equity = pd.Series([100.0, 110.0, 99.0, 108.9], index=idx)
+    benchmark = pd.Series([50.0, 51.0, 51.0, 52.02], index=idx)
+    path = tmp_path / "sub" / "rets.csv"
+    cli._dump_returns(path, equity, benchmark)
+
+    frame = pd.read_csv(path)
+    assert list(frame.columns) == ["date", "strategy", "benchmark"]
+    # First (all-NaN) pct_change row dropped -> one row per subsequent day.
+    assert len(frame) == 3
+    assert frame["date"].tolist() == ["2025-01-02", "2025-01-03", "2025-01-04"]
+    assert frame["strategy"].iloc[0] == pytest.approx(0.10)  # 110/100 - 1
+    assert frame["strategy"].iloc[1] == pytest.approx(-0.10)  # 99/110 - 1
+    assert frame["benchmark"].iloc[0] == pytest.approx(0.02)  # 51/50 - 1
 
 
 def test_holdout_with_from_is_rejected(backtest_env, capsys):
