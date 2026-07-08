@@ -2,7 +2,9 @@
 
 Per decision date: rank the cross-section of signal scores, form equal-weight
 quantile portfolios (quintiles; terciles below 50 names; skip + record below
-15 -- spec section 5.4), hold to the next decision date. Output is two dated
+15 -- spec section 5.4), hold to the next decision date. Skipping a date means
+"don't rebalance", never "delete the period": the prior portfolio is held
+through skipped dates until the next actual rebalance. Output is two dated
 DAILY return series -- ls = mean(top) - mean(bottom), lo = mean(top) -- which
 give ~1250 regression observations over the 5-year discovery window vs ~60
 monthly. No transaction costs here (costs belong to the survivor-stage full
@@ -81,20 +83,28 @@ def portfolio_sort(
     tops: list[set[str]] = []
     skipped: list[str] = []
     names_per_date: list[int] = []
+    # A skipped date means "don't rebalance", never "delete the period": the
+    # previously formed portfolio (if any) is held through the skipped period
+    # until the next actual rebalance (or the window end). Leading skips have
+    # no portfolio yet, so those days contribute nothing.
+    current_top: list[str] | None = None
+    current_bottom: list[str] | None = None
 
     for i, date in enumerate(dates):
         scores = spec.fn(panel.view(date), date).dropna()
         if len(scores) < min_names:
             skipped.append(date.date().isoformat())
+        else:
+            q = quantiles if len(scores) >= tercile_below else 3
+            current_top, current_bottom = assign_quantiles(scores, q)
+            tops.append(set(current_top))
+            names_per_date.append(len(scores))
+        if current_top is None or current_bottom is None:
             continue
-        q = quantiles if len(scores) >= tercile_below else 3
-        top, bottom = assign_quantiles(scores, q)
-        tops.append(set(top))
-        names_per_date.append(len(scores))
         hold_end = dates[i + 1] if i + 1 < len(dates) else end
         segment = returns.loc[(returns.index > date) & (returns.index <= hold_end)]
-        top_mean = segment[top].mean(axis=1)
-        bottom_mean = segment[bottom].mean(axis=1)
+        top_mean = segment[current_top].mean(axis=1)
+        bottom_mean = segment[current_bottom].mean(axis=1)
         ls_parts.append(top_mean - bottom_mean)
         lo_parts.append(top_mean)
 

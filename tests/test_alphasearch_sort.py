@@ -138,3 +138,80 @@ def test_turnover_hand_example():
                             quantiles=3, tercile_below=0, min_names=3)
     # tops: {S5,S6} then {S4,S5} -> overlap 1 of 2 -> one-way turnover 0.5.
     assert result.turnover_monthly == 0.5
+
+
+def _skipping_spec(skip_calls: set[int],
+                   rotate_calls: frozenset[int] = frozenset()) -> SignalSpec:
+    """Signal that returns a thin (2-name) cross-section on the given calls.
+
+    Base scores rank S1..S6 ascending -> top {S5,S6}, bottom {S1,S2}. On
+    rotate_calls S6's score drops to 0 -> top {S4,S5}, bottom {S6,S1}.
+    """
+    calls = {"n": 0}
+
+    def fn(view, as_of):
+        calls["n"] += 1
+        if calls["n"] in skip_calls:
+            return pd.Series({"S1": 1.0, "S2": 2.0})  # 2 < min_names 3 -> skip
+        base = {"S1": 1.0, "S2": 2.0, "S3": 3.0, "S4": 4.0, "S5": 5.0, "S6": 6.0}
+        if calls["n"] in rotate_calls:
+            base["S6"] = 0.0
+        return pd.Series(base, dtype="float64")
+
+    return SignalSpec("skipper", fn)
+
+
+def test_skipped_middle_date_holds_prior_portfolio_no_gap():
+    # A skipped date means "don't rebalance", never "delete the period": the
+    # portfolio formed on dates[0] keeps accruing through the skipped dates[1]
+    # period, and the daily series has no missing trading days.
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[0], idx[-1])[:3]
+    assert len(dates) == 3
+    spec = _skipping_spec(skip_calls={2}, rotate_calls=frozenset({3}))
+    result = portfolio_sort(panel, spec, dates, idx[-1],
+                            quantiles=3, tercile_below=0, min_names=3)
+    # Continuous: every union trading day from the first rebalance to end.
+    expected_days = idx[(idx > dates[0]) & (idx <= idx[-1])]
+    assert list(result.ls.index) == list(expected_days)
+    assert result.skipped_dates == (dates[1].date().isoformat(),)
+    # (dates[1], dates[2]]: prior portfolio {S5,S6}/{S1,S2} still held.
+    held = result.ls[(result.ls.index > dates[1]) & (result.ls.index <= dates[2])]
+    expected_held = (0.02 + 0.03) / 2 - (-0.02 + -0.01) / 2
+    assert len(held) > 0
+    assert all(math.isclose(v, expected_held, rel_tol=1e-9) for v in held)
+    # After dates[2]: rotated portfolio top {S4,S5}, bottom {S6,S1}.
+    after = result.ls[result.ls.index > dates[2]]
+    expected_after = (0.01 + 0.02) / 2 - (0.03 + -0.02) / 2
+    assert len(after) > 0
+    assert all(math.isclose(v, expected_after, rel_tol=1e-9) for v in after)
+
+
+def test_leading_skipped_date_series_starts_at_first_rebalance():
+    # No portfolio exists before the first ACTUAL rebalance, so days after a
+    # leading skipped date contribute nothing.
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[0], idx[-1])[:2]
+    spec = _skipping_spec(skip_calls={1})
+    result = portfolio_sort(panel, spec, dates, idx[-1],
+                            quantiles=3, tercile_below=0, min_names=3)
+    expected_days = idx[(idx > dates[1]) & (idx <= idx[-1])]
+    assert list(result.ls.index) == list(expected_days)
+    assert result.skipped_dates == (dates[0].date().isoformat(),)
+    assert math.isnan(result.turnover_monthly)  # single actual rebalance
+
+
+def test_turnover_across_skip_uses_actual_rebalances_only():
+    # Turnover pairs consecutive ACTUAL rebalances; the skipped middle date
+    # neither contributes a pair nor breaks the pairing across the gap.
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[0], idx[-1])[:3]
+    spec = _skipping_spec(skip_calls={2}, rotate_calls=frozenset({3}))
+    result = portfolio_sort(panel, spec, dates, idx[-1],
+                            quantiles=3, tercile_below=0, min_names=3)
+    # tops: {S5,S6} (dates[0]) then {S4,S5} (dates[2]) -> one pair -> 0.5.
+    assert result.turnover_monthly == 0.5
+    assert result.n_names_median == 6.0
