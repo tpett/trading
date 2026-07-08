@@ -25,6 +25,7 @@ from trading.research.options_gather import (
     gather_cell,
     is_standard_monthly,
     load_existing_keys,
+    rank_strikes_by_distance,
     run_gather,
     select_bar_for_decision,
     select_expiration,
@@ -147,6 +148,103 @@ def test_collapsed_call_strike_fetched_once():
     # atm (C@100) and otm_call (C@100) collapse -> the C@100 leg fetched once.
     call_fetches = [c for c in client.history_calls if c[0] == 100.0 and c[1] == "C"]
     assert len(call_fetches) == 1
+
+
+# --- Nearest-strike-with-data walk -----------------------------------------
+
+
+def test_rank_strikes_by_distance_ties_break_by_strike():
+    # target 101 is equidistant from 100 and 102 -> lower strike first.
+    assert rank_strikes_by_distance([102.0, 100.0, 98.0, 104.0], 101.0) == [
+        100.0,
+        102.0,
+        98.0,
+        104.0,
+    ]
+
+
+def _aapl_client(history: dict) -> FakeClient:
+    """AAPL-like ladder: whole-dollar strikes carry data, half-dollar strikes are
+    listed but dataless (FakeClient returns [] for any strike absent from
+    ``history``)."""
+    ladder = [
+        150.0, 152.5, 155.0, 157.5, 160.0, 162.5, 165.0, 167.5, 170.0, 172.5,
+        175.0, 180.0, 182.5, 185.0,
+    ]
+    return FakeClient(expirations=["2019-03-15"], strikes=ladder, history=history)
+
+
+def test_gather_cell_walks_past_dataless_strike_to_data():
+    """AAPL 2019-02-01 scenario: spot 166.52, exp 2019-03-15. The NEAREST ATM
+    strike is the half-dollar 167.5 (dist 0.98), but it is dataless; the walk
+    falls back to 165 (dist 1.52), which has data. OTM legs resolve to 150 / 185."""
+    spot = 166.52
+    dte = (date(2019, 3, 15) - date(2019, 2, 1)).days
+    t = dte / 365
+    atm_p = bs_price(spot, 165.0, t, RATE, DIV_YIELD, 0.30, True)
+    put_p = bs_price(spot, 150.0, t, RATE, DIV_YIELD, 0.34, False)
+    call_p = bs_price(spot, 185.0, t, RATE, DIV_YIELD, 0.27, True)
+    history = {
+        (165.0, "C"): [_bar("2019-02-01", atm_p - 0.05, atm_p + 0.05, atm_p, "c")],
+        (150.0, "P"): [_bar("2019-02-01", put_p - 0.05, put_p + 0.05, put_p, "c")],
+        (185.0, "C"): [_bar("2019-02-01", call_p - 0.05, call_p + 0.05, call_p, "c")],
+    }
+    cell = gather_cell(_aapl_client(history), "AAPL", date(2019, 2, 1), spot)
+
+    assert cell is not None
+    by_role = {c["role"]: c for c in cell["contracts"]}
+    assert by_role["atm"]["strike"] == 165.0  # resolved past the dataless 167.5
+    assert by_role["otm_put"]["strike"] == 150.0
+    assert by_role["otm_call"]["strike"] == 185.0
+    assert by_role["atm"]["iv"] == pytest.approx(0.30, abs=5e-3)  # real time value, inverts
+    assert cell["skew_put_call"] is not None  # 185 != 165, a genuine risk-reversal
+
+
+def test_gather_cell_skipped_when_all_atm_candidates_dataless():
+    """If none of the ATM leg's <=4 candidate strikes returns a bar, the ATM leg
+    is absent and the whole cell is skipped."""
+    # Empty history -> every strike returns [] -> no candidate resolves.
+    cell = gather_cell(_aapl_client({}), "AAPL", date(2019, 2, 1), 166.52)
+    assert cell is None
+
+
+def test_gather_cell_stops_after_candidate_cap():
+    """A data-bearing strike beyond the candidate cap is NOT reached: with the
+    first 4 candidates all dataless the leg gives up even though strike #5 has
+    data."""
+    spot = 166.52
+    # Nearest four to 166.52 are 167.5, 165, 170, 162.5 (all dataless here); the
+    # 5th, 160, has data but is past the cap.
+    ladder = [160.0, 162.5, 165.0, 167.5, 170.0]
+    history = {(160.0, "C"): [_bar("2019-02-01", 5.0, 5.1, 5.05, "c")]}
+    client = FakeClient(expirations=["2019-03-15"], strikes=ladder, history=history)
+    cell = gather_cell(client, "AAPL", date(2019, 2, 1), spot, max_candidates=4)
+    assert cell is None  # 160 never probed (5th candidate)
+    assert (160.0, "C") not in [(c[0], c[1]) for c in client.history_calls]
+
+
+def test_gather_cell_probe_cached_across_role_walks():
+    """A (strike, right) reached by more than one role's walk is fetched once."""
+    spot = 100.0
+    dte = (date(2019, 4, 18) - date(2019, 3, 1)).days
+    t = dte / 365
+    atm_p = bs_price(spot, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    put_p = bs_price(spot, 90.0, t, RATE, DIV_YIELD, 0.35, False)
+    # (110,C) is listed but dataless; the OTM-call walk probes it, then falls back
+    # to (100,C) -- already fetched by the ATM walk, so it is NOT refetched.
+    ladder = [90.0, 100.0, 110.0]
+    history = {
+        (100.0, "C"): [_bar("2019-03-01", atm_p - 0.05, atm_p + 0.05, atm_p, "c")],
+        (90.0, "P"): [_bar("2019-03-01", put_p - 0.05, put_p + 0.05, put_p, "c")],
+    }
+    client = FakeClient(expirations=["2019-04-18"], strikes=ladder, history=history)
+    gather_cell(client, "AAA", date(2019, 3, 1), spot)
+
+    fetch_counts: dict[tuple, int] = {}
+    for strike, right, _s, _e in client.history_calls:
+        fetch_counts[(strike, right)] = fetch_counts.get((strike, right), 0) + 1
+    assert fetch_counts[(100.0, "C")] == 1  # atm probe reused by otm_call walk
+    assert fetch_counts[(110.0, "C")] == 1  # dataless probe cached, not repeated
 
 
 # --- Dedup by trade date ---------------------------------------------------

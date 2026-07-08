@@ -69,6 +69,12 @@ MAX_DTE = 50
 # OTM legs sit a nominal 10% either side of spot; snapped to the real ladder.
 OTM_PUT_MULT = 0.90
 OTM_CALL_MULT = 1.10
+# A listed strike can be dataless: ThetaData lists half-dollar strikes (e.g. AAPL
+# 167.5) that /history/eod returns empty (HTTP 472) for, while the neighbouring
+# whole-dollar strike has real bars. So a leg walks outward from its nominal
+# target to the nearest strike that ACTUALLY returns a bar, up to this many
+# candidates before giving the leg up as absent.
+MAX_STRIKE_CANDIDATES = 4
 # EOD history is requested over decision +/- this many calendar days; the bar
 # used is the one ON the decision date, else the nearest PRIOR trade date still
 # inside the window.
@@ -380,6 +386,13 @@ def snap_strikes(
     }
 
 
+def rank_strikes_by_distance(strikes: list[float], target: float) -> list[float]:
+    """Ladder strikes ordered by distance to ``target``, ties broken by strike
+    (ascending) so the ordering is deterministic. This is the walk order a leg
+    tries when its nearest strike turns out to be dataless."""
+    return sorted({float(s) for s in strikes}, key=lambda s: (abs(s - target), s))
+
+
 # --- Bar dedup & decision-date selection -----------------------------------
 
 
@@ -547,15 +560,23 @@ def gather_cell(
     put_mult: float = OTM_PUT_MULT,
     call_mult: float = OTM_CALL_MULT,
     window_days: int = QUOTE_WINDOW_DAYS,
+    max_candidates: int = MAX_STRIKE_CANDIDATES,
     rate: float = RATE,
     div_yield: float = DIV_YIELD,
 ) -> dict | None:
     """Gather one (symbol, decision-date) cell end to end.
 
-    Selects the target expiration, snaps the three strikes, pulls each unique
-    (strike, right) leg's EOD quote (de-duplicated so a collapsed ladder is not
-    fetched twice), and hands the bars to ``build_cell``. Returns the cell dict,
-    or None (with a logged reason) when the cell should be skipped.
+    Selects the target expiration, then RESOLVES each role to the nearest strike
+    that actually returns a bar: a listed strike can be dataless (ThetaData lists
+    half-dollar strikes whose /history/eod is empty while the neighbouring whole
+    strike has data), so each role walks its ladder outward from the nominal
+    target -- ``spot`` for ATM, ``put_mult*spot`` / ``call_mult*spot`` for the OTM
+    legs -- up to ``max_candidates`` strikes, taking the first that yields a
+    usable bar. Every ``(strike, right)`` probe is cached for the cell, so a
+    strike probed by one role's walk is reused (never refetched) if another
+    role's walk reaches it. The RESOLVED strike (the one with data) is what the
+    stored contract carries. Returns the cell dict, or None (with a logged
+    reason) when the cell should be skipped.
     """
     expiration = select_expiration(
         client.list_expirations(symbol),
@@ -574,26 +595,37 @@ def gather_cell(
         log.info("skip %s %s: empty strike ladder for %s", symbol, decision_date, exp_str)
         return None
 
-    snapped = snap_strikes(strikes, spot, put_mult=put_mult, call_mult=call_mult)
-
-    # Fetch each distinct (strike, right) contract once; reuse across roles that
-    # collapsed onto it.
     start = (decision_date - timedelta(days=window_days)).isoformat()
     end = (decision_date + timedelta(days=window_days)).isoformat()
-    bar_by_contract: dict[tuple[float, bool], dict | None] = {}
-    for role, strike in snapped.items():
-        is_call = _ROLE_IS_CALL[role]
-        key = (strike, is_call)
-        if key in bar_by_contract:
-            continue
-        right = "C" if is_call else "P"
-        bars = client.history_eod(symbol, exp_str, strike, right, start, end)
-        bar_by_contract[key] = select_bar_for_decision(bars, decision_date, window_days=window_days)
+    # (strike, is_call) -> selected bar (or None). Shared across every role's walk
+    # so a probe is spent at most once per cell.
+    bar_cache: dict[tuple[float, bool], dict | None] = {}
 
-    legs = {
-        role: (strike, bar_by_contract[(strike, _ROLE_IS_CALL[role])])
-        for role, strike in snapped.items()
+    def resolve_leg(target: float, is_call: bool) -> tuple[float, dict] | None:
+        right = "C" if is_call else "P"
+        for strike in rank_strikes_by_distance(strikes, target)[:max_candidates]:
+            key = (strike, is_call)
+            if key not in bar_cache:
+                bars = client.history_eod(symbol, exp_str, strike, right, start, end)
+                bar_cache[key] = select_bar_for_decision(
+                    bars, decision_date, window_days=window_days
+                )
+            bar = bar_cache[key]
+            if bar is not None:
+                return strike, bar
+        return None  # no data-bearing strike within the candidate cap
+
+    role_targets = {
+        "atm": (spot, _ROLE_IS_CALL["atm"]),
+        "otm_put": (spot * put_mult, _ROLE_IS_CALL["otm_put"]),
+        "otm_call": (spot * call_mult, _ROLE_IS_CALL["otm_call"]),
     }
+    legs: dict[str, tuple[float, dict | None]] = {}
+    for role, (target, is_call) in role_targets.items():
+        resolved = resolve_leg(target, is_call)
+        if resolved is not None:
+            legs[role] = resolved  # (resolved strike, bar)
+
     cell = build_cell(
         symbol, decision_date, spot, expiration, legs, rate=rate, div_yield=div_yield
     )
