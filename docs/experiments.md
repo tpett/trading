@@ -42,6 +42,27 @@ row here whenever a new configuration is walk-forwarded.**
 | 6 | 07-06 | Value overlay | value+momentum is a classic diversifying pair | 0.45 | +25% | 360 | refuted |
 | 7 | 07-07 | Survivorship-free momentum (Tiingo) | is 0.59 real once delisted names are included? | **0.45** | +27% | 335 | refuted |
 
+### 8. Pure mid-cap (S&P 400) momentum — 0.49 (refuted, the universe pivot)
+
+**Rationale:** large-caps are too efficient for a momentum edge and too failure-free
+for the quality screen (see conclusion 5). Momentum is academically stronger in
+less-efficient names, so pure S&P MidCap 400 (survivorship-free Tiingo, 98.2%
+coverage) with a hard $20M liquidity floor and **15 bps slippage** (3x large-cap,
+an honest cost guard) was the natural place to look. This is the "does our built
+strategy work where momentum should" test.
+**Result:** OOS Sharpe **0.49**, +35% total, net of 15 bps — GATE FAIL. Decisive
+context from buy-and-hold over 2018-2026: SPY 0.78 / +188%, **MDY (mid-cap) 0.48 /
++94%**. So the strategy (0.49) merely *matches* mid-cap buy-and-hold on Sharpe
+(no universe alpha) and badly trails it on total return (regime gate sits in
+cash); and mid-caps themselves lagged large-caps. **The momentum-is-stronger-in-
+mid-caps thesis is refuted at realistic costs** -- the tradeable result is no
+better than holding the mid-cap index, which is worse than holding SPY. Caveat:
+0.49 is net of 15 bps; a 0-slippage re-run would show whether the raw signal is
+stronger but eaten by costs (the small-cap-momentum graveyard) vs genuinely no
+stronger -- the tradeable conclusion is the same either way. The quality screen
+(MC-2), gated on this showing life, is therefore not pursued: there is no base
+alpha to sharpen.
+
 **No configuration has beaten SPY out of sample, and the best one shrinks once
 survivorship bias is removed.** Experiment 3 (factor-scale momentum) scores 0.59
 on survivor-only data but **0.45** on delisted-inclusive data — so a meaningful
