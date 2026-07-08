@@ -148,12 +148,24 @@ but 16/729 ≈ 2% won't change the conclusion.
 4. **Survivorship bias was real and material** (exp 7): ~0.14 of Sharpe. Any
    backtest number from this system should be read as survivor-only-optimistic
    unless it came from the Tiingo (delisted-inclusive) path.
-5. **The open strategic question** is no longer "does fundamentals help" but
-   "does this momentum core have enough of an edge to be worth overlaying at
-   all." The one fundamentals idea with a live thesis in a survivorship-free
-   world is a *quality/junk filter* (exp #1 in the candidate list) — precisely
-   because the delisted failures now dragging the result down are what such a
-   screen would remove. Everything else is lower priority given the 0.45 core.
+5. **The quality/junk-screen idea is structurally dead for large-caps** (settled
+   2026-07-07). The thesis was: a screen that removes failing junk momentum
+   chases into a crash could recover some of the survivorship loss. But a direct
+   census of the 230 sp500+ndx index exits over 2018–2026 found only **4 genuine
+   distressed failures** (CHK 2020; SIVB/SBNY/FRC in the 2023 bank runs) — **2%**
+   — versus 67 acquisitions and 106 still-trading reconstitutions. Large-cap
+   members essentially don't go bankrupt while large; they get acquired or shrink
+   out. So a junk screen has almost nothing to remove here, which is why the
+   quality blend (exp 5) diluted and why the look-ahead "ceiling test" found no
+   real failures to strip. **Neither fundamentals blend NOR screen helps this
+   universe** — the fundamentals-overlay family is closed. (A quality screen may
+   still matter in a small/mid-cap universe where junk-failures are common; it is
+   the large-cap structure, not fundamentals per se, that defeats it here.)
+   Aside: the ceiling test itself was compromised (it ran on the pre-ticker-alias
+   cache so renames masqueraded as failures, and its offline mode wrongly dropped
+   96 names that listed after 2018 — a real offline bug to fix before any
+   reproducible offline re-run); the census, not the ceiling number, is the
+   evidence.
 
 ## Known caveats affecting these numbers
 
