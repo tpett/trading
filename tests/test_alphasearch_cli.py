@@ -52,6 +52,10 @@ def test_leaderboard_table_renders(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "mom21" in out
     assert "honest trial count" in out
+    # Classical-SE caveat printed under the table (spec §5 gate is unchanged;
+    # this is a read-time warning, not a different pass rule).
+    assert "classical OLS SEs" in out
+    assert "HAC" in out
 
 
 def test_leaderboard_empty_journal_is_fine(tmp_path, capsys):

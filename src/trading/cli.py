@@ -1015,3 +1015,8 @@ def _print_alphasearch_leaderboard(rows, count: int, *, as_json: bool) -> None:
         f"honest trial count: {count} journaled discovery trials — the BH gate "
         "is computed across ALL of them, not just this run"
     )
+    console.print(
+        "[dim]t-stats use classical OLS SEs on daily data; volatility "
+        "clustering typically inflates them 10-30% vs HAC — read marginal "
+        "passes skeptically[/dim]"
+    )
