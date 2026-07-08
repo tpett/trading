@@ -117,6 +117,29 @@ Concrete $/mo for IVolatility, Cboe DataShop Volatility Surfaces, dxFeed, and
 OptionMetrics; exact post-rebrand Polygon/Massive options pricing; and explicit
 delisted-*underlying* survivorship for ORATS.
 
+## ThetaData stocks vs Tiingo — keep both (evaluated 2026-07-07)
+
+ThetaData also sells STOCK data, so we checked whether it could replace Tiingo
+and consolidate onto one vendor. **It can't — keep both.** Findings:
+- **Cost logic fails:** stock data is a SEPARATE ThetaData entitlement, NOT
+  bundled into the $80 Options Standard plan (only a universal free 1-yr EOD is
+  included). Deep stock history needs a paid stock tier ON TOP of $80 — so
+  consolidating costs MORE than keeping Tiingo's ~$10–30 equity line.
+- **Adjustments regress:** ThetaData ships raw OHLC + separate split/dividend
+  event endpoints; no documented pre-adjusted close — we'd self-adjust. Tiingo
+  gives ready adjusted closes + raw + components.
+- **Survivorship unconfirmed:** no published delisted-stock guarantee (likely
+  retained via the SIP/UTP-CTA tape, but not stated); Tiingo is verified
+  survivorship-free. Not shippable on "probably" for a survivorship-free run.
+- History depth 2016 (Standard) / 2012 (Pro) is adequate for our 2018+ window
+  but shallower than Tiingo's decades; a few CTA-only NYSE names bottom at 2017.
+- ThetaData wins on microstructure (tick, NBBO, intraday) and, the only reason
+  it'd be worth buying, OPTIONS. No fundamentals (Tiingo has those + news).
+
+Verdict: **Tiingo for survivorship-free adjusted equity bars; ThetaData only for
+options if/when we pursue them.** The "one vendor, more signals" idea only pays
+off through options, not by replacing Tiingo for stocks.
+
 ## Free-data POC outcome (2026-07-07)
 The zero-cost Robinhood proof-of-concept (`scripts/option_skew_analysis.py`) came
 back **inconclusive with no encouragement** — 42 clean observations after
