@@ -20,8 +20,24 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
+from trading.alphasearch import stats
+from trading.alphasearch.evaluate import AlphaResult, evaluate_alpha
+from trading.alphasearch.panel import PanelData, build_panel
+from trading.alphasearch.sort import (
+    MIN_NAMES,
+    QUANTILES,
+    TERCILE_BELOW,
+    SortError,
+    portfolio_sort,
+)
+from trading.alphasearch.spec import SIGNALS, SignalSpec
 from trading.journal import Journal
 
 DISCOVERY_WINDOW = "2019-01-01..2023-12-31"   # pre-registered (spec 5.1)
@@ -56,17 +72,26 @@ def trial_config_hash(config: dict) -> str:
 
 
 def _json_safe(value: object) -> object:
-    """NaN -> None, recursively; numpy scalars -> Python scalars. The journal
-    must stay strict JSON (json.dumps would happily emit invalid bare NaN)."""
+    """NaN/inf -> None, recursively; numpy scalars -> Python scalars. The
+    journal must stay strict JSON: json.dumps would happily emit invalid bare
+    NaN, and would emit the equally non-standard Infinity/-Infinity tokens for
+    +-inf, which a strict JSON reader elsewhere would choke on."""
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
     if isinstance(value, list | tuple):
         return [_json_safe(v) for v in value]
     if hasattr(value, "item"):  # numpy scalar
         value = value.item()
-    if isinstance(value, float) and math.isnan(value):
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
     return value
+
+
+# Keys log_trial itself controls; a result payload containing any of these
+# would silently clobber journal-controlled fields if merged in last.
+RESERVED_RESULT_KEYS = frozenset(
+    {"event", "kind", "config_hash", "ts", "error", "signal", "universe", "window", "params"}
+)
 
 
 def log_trial(
@@ -79,6 +104,12 @@ def log_trial(
     error: str | None = None,
 ) -> dict:
     """Append one trial event (spec section 4 schema) and return it."""
+    result = result or {}
+    clobbered = RESERVED_RESULT_KEYS & result.keys()
+    if clobbered:
+        raise SweepError(
+            f"result payload cannot set reserved journal keys: {sorted(clobbered)}"
+        )
     event = {
         "event": "trial",
         "kind": kind,
@@ -86,7 +117,7 @@ def log_trial(
         "config_hash": trial_config_hash(config),
         "ts": ts,
         "error": error,
-        **(result or {}),
+        **result,
     }
     event = _json_safe(event)
     journal.append(event)
@@ -133,3 +164,281 @@ def find_discovery_trial(
         if event.get("kind") == "discovery" and event.get("config_hash") == wanted:
             return event
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Universes (spec 3.2): the two gathered options pools. Every signal family in
+# a universe is measured on this same allowlist cross-section.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class UniverseSpec:
+    name: str
+    cache_dir: Path
+    samples: Path
+    fundamentals_dir: Path | None
+
+
+def default_universes(root: Path) -> dict[str, UniverseSpec]:
+    return {
+        "largecap": UniverseSpec(
+            "largecap",
+            root / "data" / "equities-tiingo",
+            root / "data" / "options-iv" / "samples.jsonl",
+            root / "data" / "fundamentals" / "equities",
+        ),
+        "midcap": UniverseSpec(
+            "midcap",
+            root / "data" / "equities-midcap-tiingo",
+            root / "data" / "options-iv" / "samples-midcap.jsonl",
+            root / "data" / "fundamentals" / "equities",
+        ),
+    }
+
+
+def build_universe_panel(spec: UniverseSpec) -> PanelData:
+    return build_panel(spec.cache_dir, spec.samples, spec.fundamentals_dir)
+
+
+def _check_universe_supports(panel: PanelData, spec: SignalSpec, universe: str) -> None:
+    """Spec section 6: a universe/signal mismatch is refused at assembly time,
+    never silently skipped (a silent skip would corrupt the trial count)."""
+    if spec.requires_options and not panel.options:
+        raise SweepError(
+            f"signal {spec.name!r} requires options cells; universe {universe!r} has none"
+        )
+    if spec.requires_fundamentals and not panel.fundamentals:
+        raise SweepError(
+            f"signal {spec.name!r} requires fundamentals; universe {universe!r} has none"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# One trial: panel + signal + window -> the spec section-4 result payload
+# --------------------------------------------------------------------------- #
+def _window_bounds(window: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start_s, _, end_s = window.partition("..")
+    if not end_s:
+        raise SweepError(f"window must be 'YYYY-MM-DD..YYYY-MM-DD', got {window!r}")
+    return pd.Timestamp(start_s, tz="UTC"), pd.Timestamp(end_s, tz="UTC")
+
+
+def _series_moments(returns: pd.Series) -> tuple[float, float]:
+    """(skew, Pearson kurtosis) of a daily series -- the DSR's inputs."""
+    r = returns.dropna().to_numpy()
+    if len(r) < 4:
+        return math.nan, math.nan
+    mean = r.mean()
+    sd = r.std()  # population, per the DSR definition
+    if sd == 0:
+        return math.nan, math.nan
+    skew = float(((r - mean) ** 3).mean() / sd**3)
+    kurt = float(((r - mean) ** 4).mean() / sd**4)  # normal = 3
+    return skew, kurt
+
+
+def _daily_sharpe(returns: pd.Series) -> float:
+    r = returns.dropna()
+    if len(r) < 2:
+        return math.nan
+    sd = float(r.std(ddof=1))
+    return float(r.mean()) / sd if sd > 0 else math.nan
+
+
+def _leg_stats(alpha: AlphaResult, returns: pd.Series) -> dict:
+    """The journaled per-leg payload (spec section 4 'ls'/'lo' blocks).
+
+    Everything the leaderboard and DSR need is HERE, so `leaderboard` can be
+    recomputed from the journal alone -- no panel rebuild, no factor refetch.
+    """
+    four = alpha.four_factor
+    df = four.n - len(four.names)
+    skew, kurt = _series_moments(returns)
+    return {
+        "alpha_annual_pct": four.alpha_annual_pct,
+        "alpha_t": four.alpha_tstat,
+        "p": stats.p_from_t(four.alpha_tstat, df),
+        "capm_alpha_annual_pct": alpha.capm_alpha_annual_pct,
+        "capm_alpha_t": alpha.capm_alpha_tstat,
+        "loadings": {
+            name: float(b) for name, b in zip(four.names[1:], four.beta[1:], strict=True)
+        },
+        "loadings_t": {
+            name: float(t) for name, t in zip(four.names[1:], four.tstat[1:], strict=True)
+        },
+        "r2": four.r2,
+        "n_obs": four.n,
+        "sharpe": alpha.sharpe_annual,
+        "sharpe_daily": _daily_sharpe(returns),
+        "skew": skew,
+        "kurt": kurt,
+    }
+
+
+def evaluate_trial(
+    panel: PanelData,
+    spec: SignalSpec,
+    window: str,
+    factors: pd.DataFrame,
+    *,
+    quantiles: int = QUANTILES,
+    tercile_below: int = TERCILE_BELOW,
+    min_names: int = MIN_NAMES,
+) -> dict:
+    """Score -> sort -> regress. Raises SortError/ValueError/LinAlgError on
+    failure; the caller journals that as an error trial."""
+    start, end = _window_bounds(window)
+    dates = panel.decision_dates(start, end)
+    sort = portfolio_sort(
+        panel, spec, dates, end,
+        quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+    )
+    ls_alpha = evaluate_alpha(sort.ls, factors, self_financing=True)
+    lo_alpha = evaluate_alpha(sort.lo, factors, self_financing=False)
+    return {
+        "n_dates": sort.n_dates,
+        "n_names_median": sort.n_names_median,
+        "ls": _leg_stats(ls_alpha, sort.ls),
+        "lo": _leg_stats(lo_alpha, sort.lo),
+        "turnover_monthly": sort.turnover_monthly,
+        "skipped_dates": list(sort.skipped_dates),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Leaderboard: recomputed from the journal ALONE (the auditable view)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class LeaderboardRow:
+    signal: str
+    universe: str
+    window: str
+    alpha_annual_pct: float | None
+    alpha_t: float | None
+    p: float | None
+    bh_pass: bool
+    dsr: float | None
+    capm_alpha_annual_pct: float | None
+    capm_alpha_t: float | None
+    loadings: dict
+    turnover_monthly: float | None
+    lo_alpha_t: float | None
+    n_names_median: float | None
+    n_dates: int | None
+    skipped_dates: int
+    error: str | None
+
+
+def _pval(trial: dict) -> float:
+    p = (trial.get("ls") or {}).get("p")
+    return float("nan") if p is None else float(p)
+
+
+def _abs_t_key(row: LeaderboardRow) -> float:
+    if row.alpha_t is None:
+        return 0.0
+    t = float(row.alpha_t)
+    return -abs(t) if not math.isnan(t) else 0.0
+
+
+def build_leaderboard(journal: Journal) -> tuple[list[LeaderboardRow], int]:
+    """(rows sorted by |4F L/S t| desc, honest discovery-trial count).
+
+    BH is computed across EVERY journaled discovery trial -- prior sweeps
+    included -- never just the current run (spec 3.5). Error trials carry
+    p=NaN -> 1.0: they cannot pass but they raise the bar for everyone.
+    """
+    trials = discovery_trials(journal)
+    n_trials = len(trials)
+    if n_trials == 0:
+        return [], 0
+    mask = stats.bh_fdr(np.array([_pval(t) for t in trials]), q=BH_Q)
+    daily_sharpes = [
+        t["ls"]["sharpe_daily"]
+        for t in trials
+        if t.get("ls") and t["ls"].get("sharpe_daily") is not None
+    ]
+    var_sr = float(np.var(daily_sharpes, ddof=1)) if len(daily_sharpes) >= 2 else 0.0
+    rows: list[LeaderboardRow] = []
+    for trial, passed in zip(trials, mask, strict=True):
+        ls = trial.get("ls") or {}
+        lo = trial.get("lo") or {}
+        dsr = None
+        if passed and ls.get("sharpe_daily") is not None:
+            dsr = stats.deflated_sharpe(
+                sr=float(ls["sharpe_daily"]),
+                n_obs=int(ls["n_obs"]),
+                skew=float(ls["skew"]) if ls.get("skew") is not None else 0.0,
+                kurt=float(ls["kurt"]) if ls.get("kurt") is not None else 3.0,
+                n_trials=n_trials,
+                var_trials_sr=var_sr,
+            )
+            if math.isnan(dsr):
+                dsr = None  # keep leaderboard rows strictly JSON-serializable
+        rows.append(
+            LeaderboardRow(
+                signal=trial["signal"],
+                universe=trial["universe"],
+                window=trial["window"],
+                alpha_annual_pct=ls.get("alpha_annual_pct"),
+                alpha_t=ls.get("alpha_t"),
+                p=ls.get("p"),
+                bh_pass=bool(passed),
+                dsr=dsr,
+                capm_alpha_annual_pct=ls.get("capm_alpha_annual_pct"),
+                capm_alpha_t=ls.get("capm_alpha_t"),
+                loadings=ls.get("loadings") or {},
+                turnover_monthly=trial.get("turnover_monthly"),
+                lo_alpha_t=lo.get("alpha_t"),
+                n_names_median=trial.get("n_names_median"),
+                n_dates=trial.get("n_dates"),
+                skipped_dates=len(trial.get("skipped_dates") or []),
+                error=trial.get("error"),
+            )
+        )
+    rows.sort(key=_abs_t_key)
+    return rows, n_trials
+
+
+# --------------------------------------------------------------------------- #
+# The sweep runner (spec 3.6)
+# --------------------------------------------------------------------------- #
+def run_sweep(
+    universes: dict[str, UniverseSpec],
+    journal: Journal,
+    factors: pd.DataFrame,
+    ts: str,
+    *,
+    signals: dict[str, SignalSpec] | None = None,
+    window: str = DISCOVERY_WINDOW,
+    quantiles: int = QUANTILES,
+    tercile_below: int = TERCILE_BELOW,
+    min_names: int = MIN_NAMES,
+    panel_factory: Callable[[UniverseSpec], PanelData] = build_universe_panel,
+) -> tuple[list[LeaderboardRow], int]:
+    """Enumerate signals x universes serially; build each panel once; journal
+    EVERY trial BEFORE the leaderboard is computed (spec 3.6) so a crash
+    mid-sweep can never yield counted-but-unjournaled trials."""
+    chosen = signals or SIGNALS
+    params = {"quantiles": quantiles, "weighting": "equal", "cadence": "monthly"}
+    for _, uspec in sorted(universes.items()):
+        panel = panel_factory(uspec)
+        for name in sorted(chosen):  # refuse the whole universe up front
+            _check_universe_supports(panel, chosen[name], uspec.name)
+        for name in sorted(chosen):
+            config = trial_config(name, uspec.name, window, params=params)
+            try:
+                result: dict | None = evaluate_trial(
+                    panel, chosen[name], window, factors,
+                    quantiles=quantiles, tercile_below=tercile_below,
+                    min_names=min_names,
+                )
+                # Spec section 6: corrupt cells are skipped AND counted; the
+                # count rides on every trial event so coverage loss is audible.
+                result["corrupt_cells"] = panel.corrupt_cells
+                error = None
+            except (SortError, ValueError, np.linalg.LinAlgError) as exc:
+                result = None
+                error = f"{type(exc).__name__}: {exc}"
+            log_trial(journal, kind="discovery", config=config, ts=ts,
+                      result=result, error=error)
+    return build_leaderboard(journal)

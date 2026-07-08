@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from trading.alphasearch.sweep import (
     DEFAULT_PARAMS,
     DISCOVERY_WINDOW,
+    SweepError,
     discovery_trials,
     find_discovery_trial,
     load_trials,
@@ -110,6 +113,28 @@ def test_nan_results_are_journaled_as_null(tmp_path):
     stored = next(iter(journal.events()))
     assert stored["turnover_monthly"] is None    # NaN never reaches the JSONL
     assert stored["ls"]["p"] is None
+
+
+def test_inf_results_are_journaled_as_null(tmp_path):
+    journal = _journal(tmp_path)
+    result = _result()
+    result["turnover_monthly"] = math.inf
+    result["ls"]["alpha_t"] = -math.inf
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap", DISCOVERY_WINDOW),
+              ts="t1", result=result)
+    stored = next(iter(journal.events()))
+    assert stored["turnover_monthly"] is None    # +-inf never reaches the JSONL
+    assert stored["ls"]["alpha_t"] is None
+
+
+def test_log_trial_rejects_result_payload_that_clobbers_reserved_keys(tmp_path):
+    journal = _journal(tmp_path)
+    config = trial_config("mom21", "largecap", DISCOVERY_WINDOW)
+    with pytest.raises(SweepError):
+        log_trial(journal, kind="discovery", config=config, ts="t1",
+                  result={**_result(), "ts": "hacked"})
+    assert list(journal.events()) == []          # refused before any append
 
 
 def test_holdout_tracking_and_discovery_lookup(tmp_path):
