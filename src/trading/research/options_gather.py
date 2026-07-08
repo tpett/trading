@@ -60,12 +60,17 @@ from trading.research.options_iv import DIV_YIELD, RATE, implied_vol
 log = logging.getLogger("trading.research.options_gather")
 
 # --- Gather knobs (defaults; overridable at the call site) -----------------
-# A standard monthly option expires the 3rd Friday of its month. We aim for a
-# ~35-DTE contract and accept anything in the 25-50 DTE band, which brackets the
-# nearest standard monthly for a first-of-month decision date.
+# A standard monthly option expires the 3rd Friday of its month. For a
+# first-of-month decision date the SAME-month monthly is only ~15-20 DTE (too
+# near), so we always reach for the NEXT month's monthly, which lands ~45-53 DTE.
+# The band is therefore 25-55 (target ~35 as a tiebreak): the lower bound rejects
+# the same-month monthly, the upper bound must clear 53 or a few first-of-month
+# dates whose next monthly falls at 51-53 DTE would find nothing in band and be
+# dropped (observed: 2019-05-01 -> 2019-06-21 = 51 DTE). Skew is a same-expiry IV
+# difference, so the ~8-day DTE spread across months is immaterial.
 TARGET_DTE = 35
 MIN_DTE = 25
-MAX_DTE = 50
+MAX_DTE = 55
 # OTM legs sit a nominal 10% either side of spot; snapped to the real ladder.
 OTM_PUT_MULT = 0.90
 OTM_CALL_MULT = 1.10
