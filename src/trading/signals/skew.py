@@ -56,10 +56,14 @@ from trading.config import SignalConfig
 from trading.research.options_iv import skew_from_cell
 from trading.signals.engine import FeaturePanel, compute_features
 
-# The raw skew columns a store frame carries, in order. skew_put_atm is the
-# PRIMARY signal (iv(otm_put) - iv(atm)); skew_put_call is secondary and often
-# null (needs the otm_call leg).
-SKEW_COLUMNS = ["skew_put_atm", "skew_put_call"]
+# The raw columns a store frame carries, in order. skew_put_atm is the PRIMARY
+# skew signal (iv(otm_put) - iv(atm)); skew_put_call is secondary and often null
+# (needs the otm_call leg). atm_spread is the ATM option's relative bid-ask
+# spread (ask-bid)/mid -- an OPTION-ILLIQUIDITY primitive read off the same
+# gathered cell, NaN when the ATM contract or its bid/ask/mid is absent/<=0. It
+# rides alongside the skew columns so a single store/panel serves both the skew
+# rankers and the illiquidity-veto ranker (no second gather, no second panel).
+SKEW_COLUMNS = ["skew_put_atm", "skew_put_call", "atm_spread"]
 
 # One neutral policy across the whole skew channel: a missing/NaN skew ranks at
 # the cross-sectional median so it cannot tilt the book (same 0.5 as
@@ -87,6 +91,117 @@ SKEW_CHANGE_MIN_OBS = 3
 
 SKEW_V1_COLUMNS = ["skew", "composite", "raw_return_30d"]
 SKEW_CHANGE_V1_COLUMNS = ["skew", "skew_change", "composite", "raw_return_30d"]
+
+# Fraction of the cross-section VETOED by the hedge overlay each session: the
+# most downside-hedged third of names (highest skew_put_atm) are dropped before
+# the illiquidity selection runs. This is a DESIGN constant, NOT a tunable
+# hyperparameter -- the walk-forward surface stays exactly
+# entry_score_threshold x stop_atr_multiple (same no-extra-knobs discipline the
+# skew de-meaning window keeps). The veto encodes the scan finding that the
+# illiquidity premium only pays AMONG names the market is not busy insuring.
+VETO_HEDGE_FRACTION = 1 / 3
+
+ILLIQ_V1_COLUMNS = ["illiq", "composite", "raw_return_30d"]
+
+
+def illiquidity_veto_v1(
+    bars: dict[str, pd.DataFrame],
+    as_of: pd.Timestamp,
+    config: SignalConfig,
+    fundamentals: dict[str, pd.DataFrame] | None = None,
+    *,
+    skew: dict[str, pd.DataFrame] | None = None,
+    panel: FeaturePanel | None = None,
+) -> pd.DataFrame:
+    """VETO-then-SELECT ranker: hedge-veto the most-insured names, then buy the
+    most ILLIQUID options among the survivors.
+
+    Hypothesis (from a mid-cap / S&P-400 option-data scan)
+    ------------------------------------------------------
+    After removing the most downside-HEDGED names, the strongest cross-sectional
+    forward-return selector among the survivors is OPTION ILLIQUIDITY -- the ATM
+    option's relative bid-ask spread ``(ask-bid)/mid``. A WIDER spread (a more
+    neglected, under-covered, harder-to-trade name) precedes HIGHER forward
+    stock returns: an illiquidity / size / neglect premium (IC t~4.1 quarterly
+    OOS, corroborated by low option volume). The book therefore tilts toward the
+    high-spread end -- which is exactly why the cost assumption is load-bearing:
+    an illiquidity premium can be an artefact of paying that very spread, so this
+    ranker is only meaningful backtested net of honest mid-cap costs (its config
+    uses 15 bps slippage, NOT the 5 bps large-cap skew basis).
+
+    Design: veto trumps select
+    --------------------------
+    1. HEDGE VETO. Compute the cross-sectional hedge (``skew_put_atm``)
+       distribution THIS session. Any name whose hedge sits in the TOP third
+       (>= the ``1 - VETO_HEDGE_FRACTION`` quantile of the non-NaN hedges) is
+       VETOED: ``composite = 0.0``, below every ``entry_score_threshold`` in the
+       grid, so it is never bought no matter how illiquid its option is. The
+       veto trumps the illiquidity score.
+    2. SELECT AMONG SURVIVORS. For the non-vetoed names, ``composite =
+       cross-sectional percentile of illiquidity`` (higher spread -> higher
+       composite -> more attractive), ranked only against the OTHER survivors.
+
+    Neutral / fail-open policy (mirrors the skew rankers)
+    -----------------------------------------------------
+    * A name with no hedge OR no illiquidity known at as_of gets the NEUTRAL 0.5
+      percentile -- never dropped for a data reason (only a name lacking PRICE
+      history is dropped, by ``compute_features``, exactly like every other
+      ranker). 0.5 sits ABOVE a vetoed name (0.0) but BELOW a strongly illiquid
+      survivor, an acceptable fail-open middle.
+    * Thin-cross-section guard (reused ``SKEW_MIN_CROSS_SECTION``): if fewer than
+      that many SURVIVORS carry a non-NaN illiquidity, the survivor percentile is
+      degenerate (a singleton always scores 1.0, a guaranteed buy), so the WHOLE
+      session is ranked NEUTRAL rather than trusted. In steady state (a dense
+      mid-cap month) this never binds.
+
+    ``raw_return_30d`` comes from the momentum base (the M2 fee gate reads it).
+    """
+    base = compute_features(bars, as_of, config, panel=panel)
+    if base.empty:
+        return pd.DataFrame(columns=ILLIQ_V1_COLUMNS, dtype="float64")
+    known = skew or {}
+    hedge = {symbol: _asof_level(known.get(symbol)) for symbol in base.index}
+    illiq = {symbol: _asof_column(known.get(symbol), "atm_spread") for symbol in base.index}
+
+    hedge_series = pd.Series(hedge, dtype="float64")
+    illiq_series = pd.Series(illiq, dtype="float64")
+    has_hedge = hedge_series.notna()
+
+    # HEDGE VETO: the top VETO_HEDGE_FRACTION of the non-NaN hedge distribution.
+    # Only a name whose hedge is KNOWN can be vetoed (a missing hedge is neutral,
+    # fail-open, not a veto). With no known hedges at all the threshold is NaN,
+    # the comparison is False everywhere, and nothing is vetoed -> the survivor
+    # set is empty and the guard below ranks the whole session neutral.
+    veto_threshold = hedge_series.quantile(1.0 - VETO_HEDGE_FRACTION)
+    vetoed = has_hedge & (hedge_series >= veto_threshold)
+
+    # SURVIVORS = names with a KNOWN hedge that was NOT vetoed. A name missing
+    # EITHER its hedge or its illiquidity is not a ranked survivor -- it takes
+    # the neutral 0.5 default below (the fail-open policy: never bought at
+    # threshold, never dropped for a data reason). The illiquidity percentile is
+    # computed ONLY over survivors so a vetoed or data-missing name never shifts
+    # a survivor's rank.
+    survivor = has_hedge & ~vetoed
+    survivor_illiq = illiq_series[survivor]
+
+    # Default everyone to neutral. Guard (mirrors _rank_negated): too few
+    # survivors with a known illiquidity make the percentile degenerate (a lone
+    # name always scores 1.0, a guaranteed buy), so the WHOLE session stays
+    # neutral -- no veto, no buys -- rather than trust a thin cross-section.
+    composite = pd.Series(SKEW_NEUTRAL, index=base.index, dtype="float64")
+    if survivor_illiq.notna().sum() >= SKEW_MIN_CROSS_SECTION:
+        # Higher spread -> higher percentile (NO negation: illiquidity IS the
+        # buy-side end). A survivor with NaN illiquidity ranks neutral 0.5.
+        survivor_rank = survivor_illiq.rank(pct=True).fillna(SKEW_NEUTRAL)
+        composite.loc[survivor_rank.index] = survivor_rank
+        # Apply the veto LAST so it trumps any survivor/neutral score.
+        composite.loc[vetoed] = 0.0
+
+    out = pd.DataFrame(index=base.index)
+    out["illiq"] = illiq_series
+    out["composite"] = composite
+    out["raw_return_30d"] = base["raw_return_30d"]
+    return out[ILLIQ_V1_COLUMNS]
 
 
 # --- Store loading ---------------------------------------------------------
@@ -119,13 +234,45 @@ def _cell_skew(cell: dict) -> tuple[float, float]:
     )
 
 
+def _cell_atm_spread(cell: dict) -> float:
+    """The ATM option's relative bid-ask spread ``(ask - bid) / mid`` for one
+    parsed cell -- a point-in-time OPTION-ILLIQUIDITY primitive.
+
+    Read straight off the ATM-role contract priced ON the decision date (the
+    same cell the skew comes from), so it is known at the decision with no
+    lookahead. NaN when the ATM contract is absent, or any of its bid/ask/mid is
+    missing or non-positive: a zero/absent mid cannot normalise a spread, and a
+    non-positive quote is a bad/stale print we decline to trust rather than
+    fabricate an extreme illiquidity reading from. A wider spread means a more
+    neglected, harder-to-trade option -- the hypothesised illiquidity premium.
+    """
+    atm = None
+    for raw in cell.get("contracts", []):
+        if str(raw.get("role", "")).lower() == "atm":
+            atm = raw
+            break
+    if atm is None:
+        return math.nan
+    bid = atm.get("bid")
+    ask = atm.get("ask")
+    mid = atm.get("mid")
+    if bid is None or ask is None or mid is None:
+        return math.nan
+    bid, ask, mid = float(bid), float(ask), float(mid)
+    if bid <= 0.0 or ask <= 0.0 or mid <= 0.0:
+        return math.nan
+    return (ask - bid) / mid
+
+
 def load_skew_store(path: str | Path) -> dict[str, pd.DataFrame]:
     """Parse ``samples.jsonl`` into a per-symbol skew frame.
 
     Each output frame is indexed by ``decision_date`` (tz-aware UTC, sorted,
     de-duplicated keeping the LAST occurrence so a re-gathered cell supersedes
     an earlier one) with float columns ``skew_put_atm`` / ``skew_put_call``
-    (NaN where the gather stored null or a leg could not be inverted).
+    (NaN where the gather stored null or a leg could not be inverted) and
+    ``atm_spread`` -- the ATM relative bid-ask spread ``(ask-bid)/mid``, NaN when
+    the ATM contract or its bid/ask/mid is missing/<=0 (see ``_cell_atm_spread``).
 
     Tolerant like the existing JSONL loaders: blank lines are skipped and an
     unparseable line -- e.g. the torn final line a SIGKILLed gather leaves --
@@ -136,7 +283,7 @@ def load_skew_store(path: str | Path) -> dict[str, pd.DataFrame]:
     path = Path(path)
     if not path.exists():
         return {}
-    rows: dict[str, list[tuple[pd.Timestamp, float, float]]] = {}
+    rows: dict[str, list[tuple[pd.Timestamp, float, float, float]]] = {}
     with path.open() as fh:
         for line in fh:
             line = line.strip()
@@ -155,7 +302,8 @@ def load_skew_store(path: str | Path) -> dict[str, pd.DataFrame]:
             except (ValueError, TypeError):
                 continue
             put_atm, put_call = _cell_skew(cell)
-            rows.setdefault(symbol, []).append((ts, put_atm, put_call))
+            atm_spread = _cell_atm_spread(cell)
+            rows.setdefault(symbol, []).append((ts, put_atm, put_call, atm_spread))
 
     store: dict[str, pd.DataFrame] = {}
     for symbol, records in rows.items():
@@ -217,12 +365,21 @@ class IVSkewPanel:
 # --- Ranker helpers --------------------------------------------------------
 
 
+def _asof_column(frame: pd.DataFrame | None, column: str) -> float:
+    """The as-of value of ``column``: the last (piecewise-constant) entry in a
+    frame already truncated to <= as_of, or NaN when the frame is absent/empty
+    or does not carry the column. Used to read either ``skew_put_atm`` (the
+    hedge signal) or ``atm_spread`` (the illiquidity signal) at as_of with the
+    same no-lookahead guarantee ``gather`` provides."""
+    if frame is None or frame.empty or column not in frame.columns:
+        return math.nan
+    return float(frame[column].iloc[-1])
+
+
 def _asof_level(frame: pd.DataFrame | None) -> float:
     """The as-of skew_put_atm: the last (piecewise-constant) value in a frame
     already truncated to <= as_of, or NaN when absent."""
-    if frame is None or frame.empty:
-        return math.nan
-    return float(frame["skew_put_atm"].iloc[-1])
+    return _asof_column(frame, "skew_put_atm")
 
 
 def _demeaned_level(frame: pd.DataFrame | None) -> float:

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from trading.signals.skew import (
     SKEW_COLUMNS,
@@ -70,6 +71,64 @@ def test_null_skew_leg_becomes_nan(tmp_path):
     row = store["AAA"].iloc[-1]
     assert row["skew_put_atm"] == 0.06
     assert pd.isna(row["skew_put_call"])
+
+
+def _cell_with_atm(symbol, decision_date, *, bid, ask, mid, skew_put_atm=0.05) -> dict:
+    """A samples cell whose ATM-role contract carries bid/ask/mid, so the store
+    can compute atm_spread = (ask-bid)/mid. A None quote is written as JSON null
+    (a missing leg)."""
+    return {
+        "symbol": symbol,
+        "decision_date": decision_date,
+        "spot_at_decision": 100.0,
+        "contracts": [
+            {"role": "atm", "type": "call", "strike": 100.0, "bid": bid, "ask": ask, "mid": mid},
+            {"role": "otm_put", "type": "put", "strike": 90.0, "bid": 1.0, "ask": 1.2, "mid": 1.1},
+        ],
+        "skew_put_atm": skew_put_atm,
+        "skew_put_call": None,
+    }
+
+
+def test_store_carries_atm_spread_from_atm_contract(tmp_path):
+    path = tmp_path / "samples.jsonl"
+    # (ask-bid)/mid = (10.5-10.0)/10.25 for the ATM contract.
+    _write(path, [_cell_with_atm("AAA", "2019-01-02", bid=10.0, ask=10.5, mid=10.25)])
+    store = load_skew_store(path)
+    assert "atm_spread" in store["AAA"].columns
+    assert store["AAA"]["atm_spread"].iloc[-1] == pytest.approx((10.5 - 10.0) / 10.25)
+    # The skew columns are untouched by the new primitive.
+    assert store["AAA"]["skew_put_atm"].iloc[-1] == 0.05
+
+
+def test_store_atm_spread_nan_when_atm_missing_or_bad(tmp_path):
+    path = tmp_path / "samples.jsonl"
+    # No ATM-role contract at all (the _cell helper writes contracts=[]).
+    _write(path, [_cell("AAA", "2019-01-02", 0.05)])
+    assert pd.isna(load_skew_store(path)["AAA"]["atm_spread"].iloc[-1])
+    # ATM present but mid is null -> NaN (cannot normalise a spread).
+    _write(path, [_cell_with_atm("AAA", "2019-01-02", bid=10.0, ask=10.5, mid=None)])
+    assert pd.isna(load_skew_store(path)["AAA"]["atm_spread"].iloc[-1])
+    # Non-positive bid is a bad/stale print -> NaN, not a fabricated extreme.
+    _write(path, [_cell_with_atm("AAA", "2019-01-02", bid=0.0, ask=10.5, mid=5.0)])
+    assert pd.isna(load_skew_store(path)["AAA"]["atm_spread"].iloc[-1])
+
+
+def test_gather_exposes_atm_spread_pit(tmp_path):
+    path = tmp_path / "samples.jsonl"
+    _write(
+        path,
+        [
+            _cell_with_atm("AAA", "2019-01-02", bid=10.0, ask=10.2, mid=10.1),
+            _cell_with_atm("AAA", "2019-02-01", bid=10.0, ask=11.0, mid=10.5),
+        ],
+    )
+    panel = IVSkewPanel.from_store(load_skew_store(path))
+    # As-of mid-January only the first (tighter) spread is known -- the February
+    # cell dated after as_of is invisible (no lookahead), same guarantee as skew.
+    got = panel.gather(["AAA"], pd.Timestamp("2019-01-15", tz="UTC"))["AAA"]
+    assert got["atm_spread"].iloc[-1] == pytest.approx((10.2 - 10.0) / 10.1)
+    assert got.index.max() <= pd.Timestamp("2019-01-15", tz="UTC")
 
 
 def test_tolerant_of_torn_and_blank_lines(tmp_path):
