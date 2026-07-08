@@ -243,14 +243,42 @@ beat its benchmark (best 0.45).
   physically implausible |skew|>0.25 (bad inversions); left unfiltered (percentile-rank
   caps their effect to one position each).
 
-**Verdict: promising, not yet deployable.** The skew signal clearly beats momentum on
-the same names — the first thing in this program that adds real cross-sectional
-information — but a long-only implementation merely matches SPY. The natural next test
-is a **long/short skew spread** (long low-skew, short high-skew) to harvest the premium
-as market-neutral alpha the long-only book buries under beta, and **OPT-3** (skew as an
-overlay/filter on a core strategy). Both are now motivated by a genuine signal rather
-than a hunch. (Signal build: `src/trading/signals/skew.py` — IVSkewPanel + rankers,
-adversarially reviewed: no lookahead, correct sign, thin-cross-section guard.)
+**Model-free cross-sectional check (the decisive test the long-only Sharpe can't do).**
+A long-only backtest can't separate a skew *premium* from market *beta*, so we measured
+the skew→forward-return relationship directly: each decision month, rank names by skew
+and compute the tercile spread (mean forward return of the LOW-skew third minus the
+HIGH-skew third — exactly what a market-neutral long-low/short-high book earns) and the
+Spearman(skew, forward return). Forward returns are total-return (adjusted close).
+Results by holding horizon:
+
+| Horizon | FULL 2019-2025 spread (t) | OOS 2021-07+ spread (t) |
+|---|---|---|
+| 21d (backtest's monthly rebalance) | +0.86%/mo (t=1.5) | **+0.03%/mo (t=0.04)** |
+| 42d | +1.82%/2mo (t=2.1) | +0.85% (t=0.7) |
+| 63d | **+3.56%/qtr (t=3.2)** | +2.04% (t=1.4) |
+
+This **reframes OPT-1.** At the backtest's monthly horizon the OOS premium is
+**statistically zero** (t=0.04; low- and high-skew terciles returned +1.32% vs
++1.28%/mo — indistinguishable), and the Spearman is even weakly WRONG-signed. So
+**OPT-1's 0.79 gate-pass is not attributable to a skew premium** — it comes from the
+regime gate + per-window stop tuning applied to a large-cap book whose low-skew members
+happened to be favorable beta in 2023-2025, not from skew's cross-sectional predictive
+power (which is ~nil in that window). The genuine signal that *does* exist is (a)
+concentrated in the 2019-2021 crisis-inclusive period and (b) only emerges at a
+**2-3 month** horizon (t=3.2/quarter over the full sample) — consistent with skew being
+a slow, tail-/crisis-sensitive signal, not a monthly cross-sectional stock-picker.
+
+**Verdict: a real but weak medium-horizon signal — NOT the monthly alpha the backtest
+appeared to show.** The honest read: the long-only OPT-1/2 gate-passes are beta/tuning
+artifacts (the model-free monthly premium is zero OOS); there IS a skew premium, but
+it needs a 2-3 month hold and is significant only over the crisis-inclusive full sample.
+This is still the most signal any track has shown — but it argues for testing skew as a
+**longer-horizon and/or regime-conditional (high-vol) signal**, and a **long/short
+quarterly spread**, rather than deploying the monthly long-only book. The momentum-vs-skew
+gap (0.79 vs 0.46) remains real but, given the null cross-sectional premium, reflects
+name-set beta differences more than a repeatable skew edge. (Signal build:
+`src/trading/signals/skew.py`, adversarially reviewed — no lookahead, correct sign,
+thin-cross-section guard; study: `scripts/skew_premium_study.py`.)
 
 ## Known caveats affecting these numbers
 
