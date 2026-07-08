@@ -17,7 +17,7 @@ from trading.config import VenueConfig
 from trading.data.cache import OhlcvCache
 from trading.data.quality import CoverageReport, check_coverage, quarantine_outliers
 from trading.fundamentals.store import FundamentalsStore
-from trading.signals.engine import rank
+from trading.signals.engine import FeaturePanel, rank
 from trading.signals.regime import Regime, compute_regime
 from trading.signals.registry import get_ranker
 from trading.venues.base import SymbolInfo, VenueAdapter
@@ -114,12 +114,18 @@ def assemble_rankings(
     as_of: datetime.date,
     fetch_failures: tuple[str, ...] = (),
     fundamentals: dict[str, pd.DataFrame] | None = None,
+    feature_panel: FeaturePanel | None = None,
 ) -> RankingsResult:
     """Pure rankings core: coverage -> quarantine -> regime -> features -> rank
     (-> fundamentals overlay when the configured ranker requires it).
 
     No I/O, no clock. build_rankings (live) and the M3 backtester's prepare()
     both call this, so backtest and live-paper rank identically by construction.
+    `feature_panel`, when supplied (prepare() builds it once for the whole run),
+    turns the per-session ranker call into a gather instead of a rolling
+    recompute; None means recompute from `bars` (the live path). The result is
+    identical either way -- a panel gathered at as_of equals a from-scratch
+    compute at as_of.
     """
     coverage = check_coverage([i.symbol for i in infos], bars, config.data.min_coverage)
     if not coverage.ok:
@@ -149,7 +155,7 @@ def assemble_rankings(
     as_of_ts = pd.Timestamp(as_of, tz="UTC")
     regime = compute_regime(benchmark_bars, as_of_ts, config.regime)
     spec = get_ranker(config.signals.ranker)
-    features = spec.fn(clean, as_of_ts, config.signals, fundamentals)
+    features = spec.fn(clean, as_of_ts, config.signals, fundamentals, panel=feature_panel)
     table = rank(features).copy()
 
     statuses = {i.symbol: i.status for i in infos}
