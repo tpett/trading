@@ -284,6 +284,25 @@ name-set beta differences more than a repeatable skew edge. (Signal build:
 `src/trading/signals/skew.py`, adversarially reviewed — no lookahead, correct sign,
 thin-cross-section guard; study: `scripts/skew_premium_study.py`.)
 
+## 10. Alpha-search engine (Piece 1) — built; first real sweep pending
+
+The core alpha-search engine is implemented (`src/trading/alphasearch/`,
+`trading alphasearch sweep|leaderboard|holdout`; design:
+`docs/superpowers/specs/2026-07-08-alpha-search-engine-design.md`). It turns
+signal + universe into a four-factor L/S alpha t-stat via a monthly portfolio
+sort, gates candidates with BH-FDR (q=0.10) over the persisted trial journal
+(`journal/alphasearch-trials.jsonl`), reports DSR for survivors, and enforces
+a touched-once 2024+ holdout. Pre-registered rules are in the design spec §5;
+terms in the glossary ("Multiple testing" section).
+
+**No real sweep has been run yet.** When the first discovery sweep over the
+large-cap and mid-cap options pools lands, record here: the honest trial
+count, the leaderboard summary, BH survivors (if any), and the null-result
+reading if nothing survives — a null is a first-class outcome. Known caveat
+to carry forward: 2024-25 data was partially examined by the §9 skew studies,
+so holdout passes for skew-family signals carry residual contamination risk
+and must be read conservatively (spec §5.3).
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on

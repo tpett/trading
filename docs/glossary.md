@@ -198,3 +198,51 @@ big move. Helped as risk control in mid-caps, but the residual edge was the size
 **Illiquidity premium / size premium** — the tendency of smaller, less-liquid, more-
 neglected stocks to earn higher returns (the SMB factor). Real in our mid-cap data but a
 known factor, cost-sensitive, and not an options edge.
+
+---
+
+## Multiple testing, and how the alpha-search engine stays honest
+
+**Trial** — one evaluation of one (signal, universe, window, parameters)
+combination. Every trial is journaled (`journal/alphasearch-trials.jsonl`)
+whether it succeeds, fails, or errors — because the significance bar depends on
+how many things were tried, an uncounted trial silently corrupts every later
+p-value. Identical re-runs update in place (same `config_hash`); ANY parameter
+change is a new trial.
+
+**Multiple testing / data snooping** — run enough tests and "significant"
+results appear by pure luck: at |t|>2, roughly 1 in 20 dead signals looks alive.
+A sweep engine is a false-positive factory unless the bar rises with the number
+of trials. This is the central risk the alpha-search engine is built around.
+
+**False discovery rate (FDR)** — the expected fraction of your *accepted*
+signals that are actually false. Controlling FDR at q=0.10 means: of the
+candidates the gate passes, ~10% are expected to be flukes — a deliberate,
+quantified tolerance, instead of the unquantified optimism of eyeballing top
+rows.
+
+**Benjamini-Hochberg (BH)** — the standard step-up procedure that controls FDR:
+sort the n trial p-values ascending, find the largest k with
+p_(k) <= (k/n)·q, accept the k smallest. The bar RISES as the journal grows —
+running more trials makes every existing candidate harder to accept, which is
+exactly the honesty we want. Our gate: q=0.10 across ALL journaled discovery
+trials.
+
+**Deflated Sharpe Ratio (DSR)** — Bailey & López de Prado's correction to
+"best backtest of N": the probability the candidate's true Sharpe exceeds zero
+after accounting for how many trials were run, the spread of Sharpes across
+them, and fat tails/skew in the candidate's returns. Reported (advisory) for
+BH survivors; DSR near 1 = likely real, near 0.5 = coin flip.
+
+**Portfolio sort** — the cheap way to turn a signal into a return series
+without a backtest: each month, rank the universe by the signal, go long the
+top quantile and short the bottom (equal weight), hold to the next rebalance.
+The daily long/short spread isolates the signal from the market; its
+four-factor alpha t-stat is our gate statistic. Quintiles normally, terciles
+under 50 names, skip (and journal) under 15.
+
+**Discovery vs holdout window** — discovery (2019-01-01..2023-12-31) is where
+the sweep is allowed to look; the holdout (2024-01-01..latest) is spent the
+FIRST time a candidate reads it, enforced by the trial journal exactly like
+the go-live holdout. Pass rule, pre-registered: same alpha sign AND >= 50% of
+the discovery alpha magnitude retained.
