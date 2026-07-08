@@ -79,16 +79,18 @@ def options_from_cells(cells: Iterable[dict]) -> dict[str, pd.DataFrame]:
     """Per-symbol metric frames indexed by UTC decision_date.
 
     astype(float64) turns the None a missing leg leaves into NaN instead of an
-    object column; a duplicated (symbol, date) keeps the LAST gathered cell.
+    object column; a duplicated (symbol, date) keeps the LAST gathered cell --
+    deduped in gather order via a per-date dict BEFORE building the frame,
+    because sort_index's default quicksort is unstable, so sort-then-
+    duplicated(keep="last") would keep an arbitrary duplicate.
     """
-    rows: dict[str, list[dict]] = {}
+    rows: dict[str, dict[pd.Timestamp, dict]] = {}
     for cell in cells:
         date = pd.Timestamp(cell["decision_date"], tz="UTC")
-        rows.setdefault(cell["symbol"], []).append({"date": date, **cell_metrics(cell)})
+        rows.setdefault(cell["symbol"], {})[date] = {"date": date, **cell_metrics(cell)}
     frames: dict[str, pd.DataFrame] = {}
-    for symbol, symbol_rows in rows.items():
-        frame = pd.DataFrame(symbol_rows).set_index("date").sort_index()
-        frame = frame[~frame.index.duplicated(keep="last")]
+    for symbol, by_date in rows.items():
+        frame = pd.DataFrame(list(by_date.values())).set_index("date").sort_index()
         frames[symbol] = frame[OPTION_COLUMNS].astype("float64")
     return frames
 

@@ -138,6 +138,22 @@ def test_options_from_cells_builds_float_frames():
     assert f.dtypes.eq("float64").all()  # None from a missing leg becomes NaN
 
 
+def test_options_from_cells_duplicate_date_keeps_last_gathered():
+    # A re-gathered (symbol, date) must serve the LAST cell in gather order.
+    # The duplicates are interleaved across enough dates (>= ~10) that an
+    # unstable sort visibly scrambles which duplicate survives -- small cases
+    # pass by luck because quicksort falls back to insertion sort.
+    dates = [d.date().isoformat() for d in pd.date_range("2020-01-02", periods=20, freq="B")]
+    first = [_cell("AAA", d, atm_iv=0.10) for d in reversed(dates)]  # first gather
+    regather = [_cell("AAA", d, atm_iv=0.99) for d in dates]  # re-gather: must win
+    frame = options_from_cells(first + regather)["AAA"]
+    assert len(frame) == len(dates)  # one row per distinct date
+    assert (frame["atm_iv"] == 0.99).all()
+    panel = PanelData(closes={}, options={"AAA": frame}, fundamentals={}, symbols=("AAA",))
+    row = panel.view(pd.Timestamp(dates[10], tz="UTC")).option_row("AAA")
+    assert row["atm_iv"] == 0.99
+
+
 def test_load_options_skips_and_counts_corrupt_lines(tmp_path):
     path = tmp_path / "samples.jsonl"
     lines = [
