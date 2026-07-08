@@ -33,7 +33,7 @@ import math
 import pandas as pd
 
 from trading.config import SignalConfig
-from trading.signals.engine import FEATURE_COLUMNS, compute_features
+from trading.signals.engine import FEATURE_COLUMNS, FeaturePanel, compute_features
 from trading.signals.quality import QUALITY_NEUTRAL, latest_filed_row
 
 VALUE_NEUTRAL = QUALITY_NEUTRAL  # one neutral policy across fundamentals rankers
@@ -57,8 +57,10 @@ def value_momentum_v1(
     as_of: pd.Timestamp,
     config: SignalConfig,
     fundamentals: dict[str, pd.DataFrame] | None,
+    *,
+    panel: FeaturePanel | None = None,
 ) -> pd.DataFrame:
-    base = compute_features(bars, as_of, config)
+    base = compute_features(bars, as_of, config, panel=panel)
     if base.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS, dtype="float64")
     known = fundamentals or {}

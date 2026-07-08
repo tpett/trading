@@ -24,7 +24,7 @@ import math
 import pandas as pd
 
 from trading.config import SignalConfig
-from trading.signals.engine import FEATURE_COLUMNS, compute_features
+from trading.signals.engine import FEATURE_COLUMNS, FeaturePanel, compute_features
 
 QUALITY_NEUTRAL = 0.5
 OUTPUT_COLUMNS = [*FEATURE_COLUMNS, "quality", "composite", "raw_return_30d"]
@@ -46,8 +46,10 @@ def quality_momentum_v1(
     as_of: pd.Timestamp,
     config: SignalConfig,
     fundamentals: dict[str, pd.DataFrame] | None,
+    *,
+    panel: FeaturePanel | None = None,
 ) -> pd.DataFrame:
-    base = compute_features(bars, as_of, config)
+    base = compute_features(bars, as_of, config, panel=panel)
     if base.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS, dtype="float64")
     known = fundamentals or {}

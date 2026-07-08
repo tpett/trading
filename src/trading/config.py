@@ -112,6 +112,21 @@ class DataConfig:
     # loading; both real venue TOMLs still set them explicitly.
     fundamentals_dir: str = ""
     fundamentals_refresh_days: int = 0
+    # Daily-bar source for the equities venue (crypto ignores it). "tiingo"
+    # adds delisted tickers (survivorship-bias-free backtests); it needs an
+    # API key in ~/.config/trading/config.toml or $TIINGO_API_KEY. Data
+    # plumbing, NOT a tunable hyperparameter. Sources adjust prices on the
+    # same split+dividend basis but not bit-identically, so a cache dir is
+    # bound to one source via a .source marker -- switching sources means
+    # pointing cache_dir somewhere fresh.
+    bar_source: str = "yfinance"
+    # Frozen/offline cache mode: when True the OHLCV cache serves every request
+    # purely from its parquets and NEVER calls the fetch function -- a fully
+    # backfilled cache can then drive experiments with zero network (enabling
+    # e.g. a Tiingo cancellation). A request the cache does not cover raises
+    # rather than silently returning a partial. Data plumbing, NOT a tunable
+    # hyperparameter; defaulted so existing TOMLs keep loading (like bar_source).
+    cache_offline: bool = False
     # Wall-clock ceiling (seconds) on one weekly refresh_fundamentals call:
     # data plumbing, same non-tunable status as refresh_days. A ~1,100-cik
     # companyfacts refresh over a slow/degraded network could otherwise run
@@ -176,6 +191,10 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
 
     spec = get_ranker(signals["ranker"])
     data_config = DataConfig(**raw["data"])
+    if data_config.bar_source not in ("yfinance", "tiingo"):
+        raise ValueError(
+            f"data.bar_source must be 'yfinance' or 'tiingo', got {data_config.bar_source!r}"
+        )
     if spec.requires_fundamentals and not data_config.fundamentals_dir:
         raise ValueError(f"ranker {signals['ranker']!r} requires [data] fundamentals_dir to be set")
     if spec.requires_fundamentals and data_config.fundamentals_refresh_days < 1:

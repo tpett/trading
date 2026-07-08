@@ -31,6 +31,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading.fundamentals.companyfacts import COMPANYFACTS_URL, http_get_json
+from trading.symbols import RENAMES, normalize
 
 ROOT = Path(__file__).resolve().parent.parent
 MEMBERSHIP = ROOT / "src" / "trading" / "venues" / "universes" / "equities_membership.csv"
@@ -67,30 +68,13 @@ EXCLUSIONS: dict[str, str] = {
     ),
 }
 
-# (old_symbol, new_symbol, change_date). Reviewed ticker renames among 2017+
-# membership symbols; the boundary date decides which symbol a filing filed
-# near it attaches to, so day-exactness is low-stakes but should match the
-# membership CSV's remove/add transition. Chains (A->B->C) are supported.
-RENAMES = [
-    ("DWDP", "DD", "2019-06-03"),
-    ("HCP", "PEAK", "2019-11-05"),
-    ("HRS", "LHX", "2019-07-01"),
-    ("UTX", "RTX", "2020-04-03"),
-    ("MYL", "VTRS", "2020-11-16"),
-    ("WLTW", "WTW", "2022-01-05"),
-    ("FB", "META", "2022-06-09"),
-    ("ANTM", "ELV", "2022-06-28"),
-    ("FBHS", "FBIN", "2022-12-19"),
-    ("PKI", "RVTY", "2023-05-16"),
-    ("FISV", "FI", "2023-06-06"),
-    ("RE", "EG", "2023-07-10"),
-    ("ABC", "COR", "2023-08-30"),
-    ("PEAK", "DOC", "2024-03-04"),
-]
-
-
-def normalize(symbol: str) -> str:
-    return str(symbol).strip().upper().replace(".", "-")
+# RENAMES (old_symbol, new_symbol, change_date) and normalize() now live in
+# trading.symbols -- the single source of truth shared with the price-fetch
+# path (trading.venues.equities). build_rows() reads the module-global
+# RENAMES name below, so tests that monkeypatch build_cik_map.RENAMES still
+# work. The boundary date decides which symbol a filing filed near it
+# attaches to; day-exactness is low-stakes but matches the membership CSV's
+# remove/add transition. Chains (A->B->C) are supported.
 
 
 def fetch_company_tickers_raw() -> dict[str, dict]:

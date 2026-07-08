@@ -49,6 +49,16 @@ def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
 
+def _make_cache(config) -> OhlcvCache:
+    data = config.data
+    return OhlcvCache(
+        Path(data.cache_dir),
+        data.refetch_days,
+        data.bar_source,
+        offline=data.cache_offline,
+    )
+
+
 def _add_store_dirs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config-dir", default="config", help="directory with <venue>.toml")
     parser.add_argument("--state-dir", default="state", help="portfolio state root")
@@ -156,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
 def _cmd_rankings(args: argparse.Namespace) -> int:
     config = load_venue_config(args.venue, Path(args.config_dir))
     adapter = make_adapter(config)
-    cache = OhlcvCache(Path(config.data.cache_dir), config.data.refetch_days)
+    cache = _make_cache(config)
     as_of = args.as_of or datetime.datetime.now(datetime.UTC).date()
     try:
         result = build_rankings(config, adapter, cache, as_of)
@@ -187,7 +197,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     adapter = make_adapter(config)
-    cache = OhlcvCache(Path(config.data.cache_dir), config.data.refetch_days)
+    cache = _make_cache(config)
     try:
         outcome = run_venue(
             config,
@@ -534,7 +544,7 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
         return 1
 
     adapter = make_adapter(config)
-    cache = OhlcvCache(Path(config.data.cache_dir), config.data.refetch_days)
+    cache = _make_cache(config)
     try:
         prepared = prepare(config, adapter, cache, start, end)
     except BacktestError as exc:

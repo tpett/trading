@@ -8,3 +8,5 @@ dist/
 /state/
 /journal/
 /digest/
+/data/options-poc/
+/config.toml
