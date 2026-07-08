@@ -226,3 +226,17 @@ def test_precompute_has_no_lookahead(config, bars):
         # dates[1] untouched.
         pert = perturbed_panel.gather(bars.keys(), as_of)
         pd.testing.assert_frame_equal(full.sort_index(), pert.sort_index(), check_exact=True)
+
+
+def test_history_skip_boundary_inclusive_at_exactly_required():
+    """A symbol with EXACTLY min_history_rows bars at as_of is INCLUDED; one
+    bar fewer is EXCLUDED -- pins the `< required` gate against a `<=` mutation
+    (the one surviving mutation the identity tests didn't cover)."""
+    config = TRADING
+    required = min_history_rows(config)
+    df = _bars(123, required, freq="B")  # exactly `required` bars
+    panel = FeaturePanel.from_bars({"EXACT": df}, config)
+    # as_of = last bar -> exactly `required` bars <= as_of -> INCLUDED
+    assert "EXACT" in panel.gather(["EXACT"], df.index[-1]).index
+    # as_of = penultimate bar -> only required-1 bars <= as_of -> EXCLUDED
+    assert "EXACT" not in panel.gather(["EXACT"], df.index[-2]).index
