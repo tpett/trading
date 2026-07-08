@@ -254,6 +254,10 @@ def test_bh_gate_spans_the_whole_journal_not_one_sweep(tmp_path):
 
 DISCOVERY = "2020-01-01..2020-03-31"
 HOLDOUT_FROM = "2020-04-01"
+# The 130-bar fixture leaves only ~3 months after HOLDOUT_FROM -- under the
+# production HOLDOUT_MIN_FACTOR_SPAN_DAYS floor -- so tests that actually RUN
+# the holdout shrink the floor to fit the fixture.
+MIN_SPAN = 30
 
 
 def _sweep_then_holdout_setup(tmp_path):
@@ -283,9 +287,11 @@ def test_holdout_runs_once_and_journals_with_end_date(tmp_path):
     outcome = run_holdout(
         _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
         holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-        panel_factory=lambda _u: panel,
+        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
     )
+    # Fixture factors outlast the bars, so the clamped end IS the latest bar.
     latest = max(s.index.max() for s in panel.closes.values())
+    assert factors.index.max() > latest            # precondition for the line above
     assert outcome.window == f"{HOLDOUT_FROM}..{latest.date().isoformat()}"
     prior = prior_holdout_trial(journal, "mom21", "largecap")
     assert prior is not None and prior["kind"] == "holdout"
@@ -294,10 +300,32 @@ def test_holdout_runs_once_and_journals_with_end_date(tmp_path):
     assert outcome.holdout_alpha is not None
 
 
+def test_holdout_clamps_window_end_to_factor_coverage(tmp_path):
+    # The FF publication lag means the factor cache routinely ends before the
+    # latest bar even freshly refreshed. The holdout must RUN (not refuse) and
+    # journal a window ending at the FACTOR end -- the window evaluate_trial
+    # actually saw -- never at the latest bar the regression couldn't reach.
+    journal, panel, _ = _sweep_then_holdout_setup(tmp_path)
+    lagged = make_factors(periods=145)             # ends 2020-06-19
+    latest = max(s.index.max() for s in panel.closes.values())
+    assert lagged.index.max() < latest             # the clamp genuinely binds
+    outcome = run_holdout(
+        _universe(tmp_path)["largecap"], journal, lagged, "t2", "mom21",
+        holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
+        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
+    )
+    factors_end = lagged.index.max().date().isoformat()
+    assert outcome.window == f"{HOLDOUT_FROM}..{factors_end}"
+    prior = prior_holdout_trial(journal, "mom21", "largecap")
+    assert prior["window"] == outcome.window       # journaled == evaluated
+    assert prior["error"] is None                  # a clean run, not an error trial
+    assert outcome.holdout_alpha is not None
+
+
 def test_holdout_double_touch_refused_without_literal_confirmation(tmp_path):
     journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
     kwargs = dict(holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-                  panel_factory=lambda _u: panel)
+                  min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel)
     run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
                 "mom21", **kwargs)
     events_before = len(list(journal.events()))
@@ -403,7 +431,7 @@ def test_holdout_journals_the_actual_params(tmp_path):
     outcome = run_holdout(
         _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
         holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY, quantiles=4,
-        panel_factory=lambda _u: panel,
+        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
     )
     assert outcome.event["params"]["quantiles"] == 4
     default_hash = trial_config_hash(
@@ -413,18 +441,22 @@ def test_holdout_journals_the_actual_params(tmp_path):
 
 
 def test_holdout_refused_before_touch_when_factors_stale(tmp_path):
-    # A stale factor cache must refuse in the PRE-checks, BEFORE the once-only
+    # TRULY stale factors -- ending before the holdout even accumulates the
+    # minimum span -- must refuse in the PRE-checks, BEFORE the once-only
     # touch is journaled: journaling it as a spent-but-errored holdout would
     # burn the reserved touch on a fixable data problem (a --refresh-factors
-    # away), not a real signal failure.
+    # away). This fixture ends BEFORE holdout_start (2020-02-21 < 04-01), so
+    # it is outside the clamp zone (which the clamp test above covers) under
+    # ANY minimum span; the production default floor applies here.
     journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
-    stale_factors = make_factors(periods=60)  # ends 2020-02-21, well before holdout end
-    with pytest.raises(SweepError, match="factor cache"):
+    stale_factors = make_factors(periods=60)  # ends 2020-02-21, pre-holdout
+    with pytest.raises(SweepError, match="factor cache") as excinfo:
         run_holdout(
             _universe(tmp_path)["largecap"], journal, stale_factors, "t2", "mom21",
             holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
             panel_factory=lambda _u: panel,
         )
+    assert "--refresh-factors" in str(excinfo.value)  # names the fix
     assert all(e.get("kind") != "holdout" for e in journal.events())  # untouched
 
 
@@ -448,7 +480,7 @@ def test_holdout_journals_error_event_before_reraising_unexpected_exception(
         run_holdout(
             _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
             holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-            panel_factory=lambda _u: panel,
+            min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
         )
     holdout_events = [e for e in journal.events() if e.get("kind") == "holdout"]
     assert len(holdout_events) == 1                  # journaled despite the raise

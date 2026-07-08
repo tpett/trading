@@ -537,6 +537,17 @@ def run_sweep(
 # --------------------------------------------------------------------------- #
 RERUN_CONFIRMATION = "RERUN HOLDOUT"
 
+# Ken French publishes the daily factor files with a multi-week lag, so even a
+# just-refreshed cache routinely ends BEFORE the latest equity bar. run_holdout
+# therefore clamps its window end to min(latest bar, factor end) instead of
+# refusing -- a staleness refusal there would brick the holdout for most of
+# every month, and --refresh-factors could never satisfy it. But factors
+# covering less than this many calendar days of the holdout window make the
+# clamped evaluation statistically meaningless (too few daily observations to
+# re-prove an annualized alpha), and THAT is refused pre-touch. ~6 months
+# (~126 daily obs) is the floor: below it the alpha t-stat is noise.
+HOLDOUT_MIN_FACTOR_SPAN_DAYS = 182
+
 
 def holdout_passes(discovery_alpha: float, holdout_alpha: float) -> bool:
     """Pre-registered pass rule: same sign AND the holdout point estimate
@@ -578,6 +589,7 @@ def run_holdout(
     quantiles: int = QUANTILES,
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
+    min_factor_span_days: int = HOLDOUT_MIN_FACTOR_SPAN_DAYS,
     panel_factory: Callable[[UniverseSpec], PanelData] = build_universe_panel,
 ) -> HoldoutOutcome:
     """Evaluate ONE BH survivor on the reserved holdout window.
@@ -586,8 +598,10 @@ def run_holdout(
     clean same-params discovery trial with a usable alpha; that EXACT trial
     (by config hash, never merely the (signal, universe) pair) not a current
     BH survivor; already holdout-touched unless confirm() returns the literal
-    RERUN_CONFIRMATION. The realized window end (latest bar) is journaled so
-    the evaluation is exactly reproducible.
+    RERUN_CONFIRMATION; factor cache covering < min_factor_span_days of the
+    holdout. The realized window end -- min(latest bar, factor end), i.e.
+    exactly what evaluate_trial sees -- is journaled so the evaluation is
+    exactly reproducible.
     """
     if signal_name not in SIGNALS:
         known = ", ".join(sorted(SIGNALS))
@@ -635,14 +649,29 @@ def run_holdout(
     panel = panel_factory(uspec)
     spec = SIGNALS[signal_name]
     _check_universe_supports(panel, spec, uspec.name)
-    window = f"{holdout_start}..{latest_bar_date(panel).date().isoformat()}"
-    # Pre-check, BEFORE the once-only touch is journaled: a stale factor cache
-    # must refuse outright, not get journaled as a spent-but-errored holdout
-    # (that would burn the reserved touch on a fixable data problem).
-    try:
-        _check_factor_coverage(factors, _window_bounds(window)[1])
-    except ValueError as exc:
-        raise SweepError(str(exc)) from exc
+    # The FF publication lag means the factor cache routinely ends before the
+    # latest bar (even freshly refreshed), so the window end is clamped to
+    # what BOTH datasets cover: the journaled window must equal the window
+    # actually evaluated -- journaling latest-bar while the regression only
+    # reached the factor end would misrecord the evidence. Refuse pre-touch
+    # (BEFORE the once-only touch is journaled) only when factors are truly
+    # stale: covering < min_factor_span_days of the holdout leaves too few
+    # observations to re-prove anything, and only a refresh can fix that.
+    factors_end = factors.index.max() if len(factors) else None
+    min_factor_end = pd.Timestamp(holdout_start, tz="UTC") + pd.Timedelta(
+        min_factor_span_days, unit="D"
+    )
+    if factors_end is None or factors_end < min_factor_end:
+        have = "no data" if factors_end is None else factors_end.date().isoformat()
+        raise SweepError(
+            f"factor cache ends {have} but the holdout starting {holdout_start} "
+            f"needs factors through at least {min_factor_end.date().isoformat()} "
+            f"({min_factor_span_days}d minimum span); refresh the factor cache "
+            "with `trading alphasearch ... --refresh-factors` (or "
+            "`scripts/factor_regression.py --refresh`)"
+        )
+    end = min(latest_bar_date(panel), factors_end)
+    window = f"{holdout_start}..{end.date().isoformat()}"
     config = trial_config(signal_name, uspec.name, window, params=params)
     try:
         result: dict | None = evaluate_trial(
