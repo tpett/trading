@@ -475,3 +475,121 @@ def run_sweep(
             log_trial(journal, kind="discovery", config=config, ts=ts,
                       result=result, error=error)
     return build_leaderboard(journal)
+
+
+# --------------------------------------------------------------------------- #
+# Holdout re-prove (spec 3.6 + 5.3): touched once per (signal, universe),
+# journal-enforced, mirroring backtest/experiments.py::prior_holdout.
+# --------------------------------------------------------------------------- #
+RERUN_CONFIRMATION = "RERUN HOLDOUT"
+
+
+def holdout_passes(discovery_alpha: float, holdout_alpha: float) -> bool:
+    """Pre-registered pass rule: same sign AND the holdout point estimate
+    retains >= HOLDOUT_PASS_RATIO of the discovery magnitude. Both conditions
+    collapse to the signed ratio (positive iff same-signed), which applies the
+    magnitude test symmetrically for negative-alpha candidates."""
+    if (
+        discovery_alpha == 0
+        or math.isnan(discovery_alpha)
+        or math.isnan(holdout_alpha)
+    ):
+        return False
+    return holdout_alpha / discovery_alpha >= HOLDOUT_PASS_RATIO
+
+
+def latest_bar_date(panel: PanelData) -> pd.Timestamp:
+    return max(series.index.max() for series in panel.closes.values())
+
+
+@dataclass(frozen=True)
+class HoldoutOutcome:
+    event: dict
+    passed: bool | None          # None when the holdout evaluation errored
+    discovery_alpha: float
+    holdout_alpha: float | None
+    window: str
+
+
+def run_holdout(
+    uspec: UniverseSpec,
+    journal: Journal,
+    factors: pd.DataFrame,
+    ts: str,
+    signal_name: str,
+    *,
+    holdout_start: str = HOLDOUT_START,
+    discovery_window: str = DISCOVERY_WINDOW,
+    confirm: Callable[[], str] = lambda: "",
+    quantiles: int = QUANTILES,
+    tercile_below: int = TERCILE_BELOW,
+    min_names: int = MIN_NAMES,
+    panel_factory: Callable[[UniverseSpec], PanelData] = build_universe_panel,
+) -> HoldoutOutcome:
+    """Evaluate ONE BH survivor on the reserved holdout window.
+
+    Refusals (SweepError) protect the once-only holdout: unknown signal; no
+    clean default-params discovery trial; not a current BH survivor; already
+    holdout-touched unless confirm() returns the literal RERUN_CONFIRMATION.
+    The realized window end (latest bar) is journaled so the evaluation is
+    exactly reproducible.
+    """
+    if signal_name not in SIGNALS:
+        known = ", ".join(sorted(SIGNALS))
+        raise SweepError(f"unknown signal {signal_name!r}; known: {known}")
+    discovery = find_discovery_trial(journal, signal_name, uspec.name, discovery_window)
+    if discovery is None:
+        raise SweepError(
+            f"no discovery trial for {signal_name}:{uspec.name} over "
+            f"{discovery_window}; run the sweep first"
+        )
+    if discovery.get("error"):
+        raise SweepError(
+            f"discovery trial for {signal_name}:{uspec.name} errored "
+            f"({discovery['error']}); nothing to re-prove"
+        )
+    rows, _ = build_leaderboard(journal)
+    survivor = any(
+        row.signal == signal_name and row.universe == uspec.name and row.bh_pass
+        for row in rows
+    )
+    if not survivor:
+        raise SweepError(
+            f"{signal_name}:{uspec.name} is not a current BH survivor "
+            f"(q={BH_Q}); the once-only holdout is reserved for survivors"
+        )
+    prior = prior_holdout_trial(journal, signal_name, uspec.name)
+    if prior is not None and confirm() != RERUN_CONFIRMATION:
+        raise SweepError(
+            f"holdout for {signal_name}:{uspec.name} already evaluated at "
+            f"{prior['ts']}; rerunning invalidates the evidence — aborted"
+        )
+
+    panel = panel_factory(uspec)
+    spec = SIGNALS[signal_name]
+    _check_universe_supports(panel, spec, uspec.name)
+    window = f"{holdout_start}..{latest_bar_date(panel).date().isoformat()}"
+    config = trial_config(signal_name, uspec.name, window)
+    try:
+        result: dict | None = evaluate_trial(
+            panel, spec, window, factors,
+            quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+        )
+        error = None
+    except (SortError, ValueError, np.linalg.LinAlgError) as exc:
+        result = None
+        error = f"{type(exc).__name__}: {exc}"
+    event = log_trial(journal, kind="holdout", config=config, ts=ts,
+                      result=result, error=error)
+
+    discovery_alpha = float(discovery["ls"]["alpha_annual_pct"])
+    if result is None:
+        return HoldoutOutcome(event, None, discovery_alpha, None, window)
+    holdout_alpha = float(result["ls"]["alpha_annual_pct"])
+    return HoldoutOutcome(
+        event,
+        holdout_passes(discovery_alpha, holdout_alpha),
+        discovery_alpha,
+        holdout_alpha,
+        window,
+    )

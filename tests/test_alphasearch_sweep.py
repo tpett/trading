@@ -9,10 +9,14 @@ import pytest
 from alphasearch_helpers import make_factors, make_panel
 from trading.alphasearch.spec import SIGNALS
 from trading.alphasearch.sweep import (
+    RERUN_CONFIRMATION,
     SweepError,
     UniverseSpec,
     build_leaderboard,
     discovery_trials,
+    holdout_passes,
+    prior_holdout_trial,
+    run_holdout,
     run_sweep,
     trials_journal,
 )
@@ -212,3 +216,118 @@ def test_bh_gate_spans_the_whole_journal_not_one_sweep(tmp_path):
                             signals=_subset("rev5"), window=WINDOW,
                             panel_factory=lambda _u: panel)
     assert n_trials == 2  # the gate sees ALL journaled discovery trials
+
+
+# --------------------------------------------------------------------------- #
+# Holdout (Task 9)
+# --------------------------------------------------------------------------- #
+
+DISCOVERY = "2020-01-01..2020-03-31"
+HOLDOUT_FROM = "2020-04-01"
+
+
+def _sweep_then_holdout_setup(tmp_path):
+    """Discovery on Q1 2020; the fixture's remaining bars are the holdout."""
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=DISCOVERY,
+              panel_factory=lambda _u: panel)
+    return journal, panel, factors
+
+
+def test_holdout_pass_rule_is_signed_ratio():
+    assert holdout_passes(10.0, 6.0) is True      # kept 60% of the effect
+    assert holdout_passes(10.0, 4.9) is False     # faded below half
+    assert holdout_passes(10.0, -6.0) is False    # flipped sign
+    assert holdout_passes(-10.0, -6.0) is True    # negative alphas: same rule
+    assert holdout_passes(-10.0, -4.0) is False
+    assert holdout_passes(-10.0, 6.0) is False
+    assert holdout_passes(0.0, 1.0) is False      # degenerate discovery
+    assert holdout_passes(float("nan"), 1.0) is False
+
+
+def test_holdout_runs_once_and_journals_with_end_date(tmp_path):
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
+    outcome = run_holdout(
+        _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
+        holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
+        panel_factory=lambda _u: panel,
+    )
+    latest = max(s.index.max() for s in panel.closes.values())
+    assert outcome.window == f"{HOLDOUT_FROM}..{latest.date().isoformat()}"
+    prior = prior_holdout_trial(journal, "mom21", "largecap")
+    assert prior is not None and prior["kind"] == "holdout"
+    assert prior["window"] == outcome.window       # reproducible end date
+    assert outcome.passed in (True, False)
+    assert outcome.holdout_alpha is not None
+
+
+def test_holdout_double_touch_refused_without_literal_confirmation(tmp_path):
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
+    kwargs = dict(holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
+                  panel_factory=lambda _u: panel)
+    run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
+                "mom21", **kwargs)
+    events_before = len(list(journal.events()))
+    # Default confirm refuses; a wrong phrase refuses; nothing is journaled.
+    with pytest.raises(SweepError):
+        run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t3",
+                    "mom21", **kwargs)
+    with pytest.raises(SweepError):
+        run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t3",
+                    "mom21", confirm=lambda: "yes please", **kwargs)
+    assert len(list(journal.events())) == events_before
+    # The literal phrase re-runs (and appends a fresh holdout event).
+    run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t4",
+                "mom21", confirm=lambda: RERUN_CONFIRMATION, **kwargs)
+    assert len(list(journal.events())) == events_before + 1
+
+
+def test_holdout_refused_without_discovery_trial(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    with pytest.raises(SweepError):
+        run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
+                    "t1", "mom21", holdout_start=HOLDOUT_FROM,
+                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+    assert list(journal.events()) == []
+
+
+def test_holdout_refused_for_non_bh_survivor(tmp_path):
+    # Fabricate a deterministic non-survivor: a clean discovery event whose
+    # p-value can never clear BH, alongside mom21's real (surviving) trial.
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
+    dull = _result_like(alpha_annual_pct=0.3, alpha_t=0.1, p=0.92)
+    log_trial(journal, kind="discovery",
+              config=trial_config("rvol21", "largecap", DISCOVERY),
+              ts="t1b", result=dull)
+    rows, _ = build_leaderboard(journal)
+    rvol = next(r for r in rows if r.signal == "rvol21")
+    assert not rvol.bh_pass  # precondition for the refusal below
+    with pytest.raises(SweepError):
+        run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
+                    "rvol21", holdout_start=HOLDOUT_FROM,
+                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+
+
+def _result_like(*, alpha_annual_pct: float, alpha_t: float, p: float) -> dict:
+    """Minimal spec-section-4 result payload for fabricated journal events."""
+    leg = {
+        "alpha_annual_pct": alpha_annual_pct, "alpha_t": alpha_t, "p": p,
+        "capm_alpha_annual_pct": alpha_annual_pct, "capm_alpha_t": alpha_t,
+        "loadings": {}, "loadings_t": {}, "r2": 0.0, "n_obs": 120,
+        "sharpe": 0.1, "sharpe_daily": 0.006, "skew": 0.0, "kurt": 3.0,
+    }
+    return {"n_dates": 3, "n_names_median": 16.0, "ls": leg, "lo": dict(leg),
+            "turnover_monthly": 0.3, "skipped_dates": []}
+
+
+def test_unknown_signal_refused(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    with pytest.raises(SweepError):
+        run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
+                    "t1", "no_such_signal")
