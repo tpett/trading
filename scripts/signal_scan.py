@@ -37,6 +37,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from trading.alphasearch.panel import cell_metrics as _cell_metrics
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SAMPLES = ROOT / "data" / "options-iv" / "samples.jsonl"
 DEFAULT_CACHE = ROOT / "data" / "equities-tiingo"
@@ -49,38 +51,6 @@ MIN_NAMES = 15  # skip a month whose (filtered) cross-section is thinner than th
 OPTION_METRICS = ("excite", "atm_iv", "otm_put_iv", "otm_call_iv", "smile",
                   "cp_vol", "wing_vol", "tot_vol", "atm_spread")
 PRICE_METRICS = ("mom21", "mom63", "mom126", "mom252", "rev5", "rvol21", "vrp", "disthigh")
-
-
-def _cell_metrics(cell: dict) -> dict:
-    """The option-derived metrics for one samples.jsonl cell (NaN when a leg is
-    missing so a partial cell never fabricates a value)."""
-    d = {c["role"]: c for c in cell.get("contracts", [])}
-
-    def iv(role):
-        return d.get(role, {}).get("iv")
-
-    def vol(role):
-        return d.get(role, {}).get("volume") or 0
-
-    atm = d.get("atm", {})
-    put_iv, call_iv, atm_iv = iv("otm_put"), iv("otm_call"), iv("atm")
-    rr = cell.get("skew_put_call")
-    spread = ((atm["ask"] - atm["bid"]) / atm["mid"]
-              if atm.get("mid") and atm.get("bid") is not None and atm.get("ask") is not None
-              else np.nan)
-    return {
-        "hedge": cell.get("skew_put_atm"),
-        "excite": (-rr if rr is not None else np.nan),  # call-vs-put IV richness
-        "atm_iv": atm_iv,
-        "otm_put_iv": put_iv,
-        "otm_call_iv": call_iv,
-        "smile": ((put_iv + call_iv) / 2 - atm_iv
-                  if None not in (put_iv, call_iv, atm_iv) else np.nan),
-        "cp_vol": np.log((vol("atm") + vol("otm_call") + 1) / (vol("otm_put") + 1)),
-        "wing_vol": np.log((vol("otm_call") + 1) / (vol("otm_put") + 1)),
-        "tot_vol": vol("atm") + vol("otm_put") + vol("otm_call"),
-        "atm_spread": spread,
-    }
 
 
 def load_panel(samples: Path, cache_dir: Path, horizons=(21, 63)) -> pd.DataFrame:
