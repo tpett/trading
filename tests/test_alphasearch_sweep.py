@@ -118,6 +118,26 @@ def test_fundamentals_signal_without_store_refused(tmp_path):
     assert "--signals" in message
 
 
+def test_discovery_trial_with_stale_factors_is_journaled_as_error(tmp_path):
+    # Factors ending well before the window end must refuse loudly (naming the
+    # factor end date, the window end, and the fix) rather than let
+    # run_regression's inner join silently truncate to whatever overlaps.
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    stale_factors = make_factors(periods=60)  # ends 2020-02-21, WINDOW ends 06-30
+    rows, n_trials = run_sweep(
+        _universe(tmp_path), journal, stale_factors, ts="t1",
+        signals=_subset("mom21"), window=WINDOW,
+        panel_factory=lambda _u: panel,
+    )
+    assert n_trials == 1                             # the failure still counts
+    row = rows[0]
+    assert row.error is not None and "factor cache" in row.error
+    assert "--refresh-factors" in row.error
+    assert not row.bh_pass
+    assert row.alpha_t is None
+
+
 def test_leaderboard_recomputes_from_journal_alone(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel()
@@ -390,6 +410,22 @@ def test_holdout_journals_the_actual_params(tmp_path):
         trial_config("mom21", "largecap", outcome.window)
     )
     assert outcome.event["config_hash"] != default_hash
+
+
+def test_holdout_refused_before_touch_when_factors_stale(tmp_path):
+    # A stale factor cache must refuse in the PRE-checks, BEFORE the once-only
+    # touch is journaled: journaling it as a spent-but-errored holdout would
+    # burn the reserved touch on a fixable data problem (a --refresh-factors
+    # away), not a real signal failure.
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
+    stale_factors = make_factors(periods=60)  # ends 2020-02-21, well before holdout end
+    with pytest.raises(SweepError, match="factor cache"):
+        run_holdout(
+            _universe(tmp_path)["largecap"], journal, stale_factors, "t2", "mom21",
+            holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
+            panel_factory=lambda _u: panel,
+        )
+    assert all(e.get("kind") != "holdout" for e in journal.events())  # untouched
 
 
 def test_holdout_refused_when_discovery_alpha_missing(tmp_path):

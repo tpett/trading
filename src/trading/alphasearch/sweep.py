@@ -254,6 +254,29 @@ def _window_bounds(window: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     return pd.Timestamp(start_s, tz="UTC"), pd.Timestamp(end_s, tz="UTC")
 
 
+# The Ken French daily-factor files publish with a short lag; a few calendar
+# days of slack distinguishes "normal publication lag" from "this cache is
+# actually stale and will silently truncate the regression."
+FACTOR_STALENESS_TOLERANCE_DAYS = 7
+
+
+def _check_factor_coverage(factors: pd.DataFrame, window_end: pd.Timestamp) -> None:
+    """Refuse loudly if the factor cache does not reach the window end (spec
+    section 4: run_regression's inner join would otherwise silently truncate
+    to whatever dates overlap, understating the window without a trace)."""
+    factors_end = factors.index.max() if len(factors) else None
+    tolerance = pd.Timedelta(FACTOR_STALENESS_TOLERANCE_DAYS, unit="D")
+    if factors_end is None or factors_end < (window_end - tolerance):
+        have = "no data" if factors_end is None else factors_end.date().isoformat()
+        raise ValueError(
+            f"factor cache ends {have} but the window ends "
+            f"{window_end.date().isoformat()} (tolerance "
+            f"{FACTOR_STALENESS_TOLERANCE_DAYS}d); refresh the factor cache with "
+            "`trading alphasearch ... --refresh-factors` (or "
+            "`scripts/factor_regression.py --refresh`) before trusting this trial"
+        )
+
+
 def _series_moments(returns: pd.Series) -> tuple[float, float]:
     """(skew, Pearson kurtosis) of a daily series -- the DSR's inputs."""
     r = returns.dropna().to_numpy()
@@ -319,6 +342,7 @@ def evaluate_trial(
     """Score -> sort -> regress. Raises SortError/ValueError/LinAlgError on
     failure; the caller journals that as an error trial."""
     start, end = _window_bounds(window)
+    _check_factor_coverage(factors, end)
     dates = panel.decision_dates(start, end)
     sort = portfolio_sort(
         panel, spec, dates, end,
@@ -612,6 +636,13 @@ def run_holdout(
     spec = SIGNALS[signal_name]
     _check_universe_supports(panel, spec, uspec.name)
     window = f"{holdout_start}..{latest_bar_date(panel).date().isoformat()}"
+    # Pre-check, BEFORE the once-only touch is journaled: a stale factor cache
+    # must refuse outright, not get journaled as a spent-but-errored holdout
+    # (that would burn the reserved touch on a fixable data problem).
+    try:
+        _check_factor_coverage(factors, _window_bounds(window)[1])
+    except ValueError as exc:
+        raise SweepError(str(exc)) from exc
     config = trial_config(signal_name, uspec.name, window, params=params)
     try:
         result: dict | None = evaluate_trial(
