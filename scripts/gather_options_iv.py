@@ -60,6 +60,12 @@ def main(argv: list[str] | None = None) -> int:
         help="explicit symbol list (smoke test); bypasses universe ranking",
     )
     parser.add_argument("--max-workers", type=int, default=4, help="in-flight cap (terminal max 4)")
+    parser.add_argument(
+        "--indices",
+        nargs="+",
+        default=["sp500", "ndx"],
+        help="membership indices to draw the universe from (e.g. sp400 for mid-caps)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -77,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_dir=args.cache_dir,
         raw_dir=args.raw_dir,
         membership_csv=args.membership,
+        indices=tuple(args.indices),
         max_workers=args.max_workers,
     )
     print(summary)

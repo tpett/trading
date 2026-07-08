@@ -361,7 +361,9 @@ def test_build_cell_schema_shape():
     assert cell["days_to_expiry"] == 48
     assert {c["role"] for c in cell["contracts"]} == {"atm", "otm_put"}  # otm_call omitted
     contract = cell["contracts"][0]
-    assert set(contract) == {"role", "type", "strike", "bid", "ask", "close", "mid", "iv"}
+    assert set(contract) == {
+        "role", "type", "strike", "bid", "ask", "close", "mid", "iv", "volume", "count",
+    }
 
 
 def test_build_cell_skipped_when_atm_missing():

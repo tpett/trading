@@ -525,6 +525,12 @@ def build_cell(
                 "close": close,
                 "mid": mid,
                 "iv": iv,
+                # Flow proxy: EOD contract volume + trade count on the decision
+                # bar. Only these 3 contracts (ATM / OTM put / OTM call), NOT the
+                # full chain, so it is a THIN put-vs-call demand proxy -- enough
+                # to test "are people piling into the calls?" without a chain pull.
+                "volume": bar.get("volume"),
+                "count": bar.get("count"),
             }
         )
 
@@ -650,15 +656,17 @@ def build_universe(
     start_month: str = "2019-01",
     end_month: str = "2025-12",
     membership_window: tuple[str, str] = UNIVERSE_MEMBERSHIP_WINDOW,
+    indices: tuple[str, ...] = ("sp500", "ndx"),
 ) -> list[str]:
     """Top ``size`` names by median daily dollar volume.
 
-    Candidates are symbols that were EVER an ``sp500`` or ``ndx`` member with an
-    interval overlapping ``membership_window`` (survivorship-safe: delisted names
-    that are still cached count) AND have a Tiingo parquet in ``cache_dir``. Each
-    is ranked by the median of ``close*volume`` over the decision span
-    (``start_month``..``end_month``); ties break alphabetically so the ordering
-    is deterministic.
+    Candidates are symbols that were EVER a member of one of ``indices`` (default
+    the large-cap ``sp500``/``ndx``; pass ``("sp400",)`` for the S&P MidCap 400)
+    with an interval overlapping ``membership_window`` (survivorship-safe:
+    delisted names that are still cached count) AND have a Tiingo parquet in
+    ``cache_dir``. Each is ranked by the median of ``close*volume`` over the
+    decision span (``start_month``..``end_month``); ties break alphabetically so
+    the ordering is deterministic.
     """
     df = pd.read_csv(membership_csv, comment="#", dtype=str).fillna("")
     win_lo = pd.Timestamp(membership_window[0])
@@ -666,7 +674,7 @@ def build_universe(
 
     candidates: set[str] = set()
     for row in df.itertuples(index=False):
-        if row.index not in ("sp500", "ndx"):
+        if row.index not in indices:
             continue
         start = pd.Timestamp(row.start)
         end = pd.Timestamp(row.end) if row.end else pd.Timestamp.max
@@ -801,6 +809,7 @@ def run_gather(
     cache_dir: Path,
     raw_dir: Path,
     membership_csv: Path,
+    indices: tuple[str, ...] = ("sp500", "ndx"),
     max_workers: int = 4,
     log_every: int = 50,
     **cell_kwargs,
@@ -821,7 +830,12 @@ def run_gather(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if symbols is None:
         symbols = build_universe(
-            membership_csv, cache_dir, universe_size, start_month=start_month, end_month=end_month
+            membership_csv,
+            cache_dir,
+            universe_size,
+            start_month=start_month,
+            end_month=end_month,
+            indices=indices,
         )
         log.info("built universe of %d symbols", len(symbols))
 

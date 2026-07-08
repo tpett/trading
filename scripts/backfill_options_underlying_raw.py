@@ -134,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
         "--cache-dir", type=Path, default=DEFAULT_CACHE_DIR, help="adjusted Tiingo parquets"
     )
     parser.add_argument("--force", action="store_true", help="re-pull symbols already cached")
+    parser.add_argument(
+        "--indices",
+        nargs="+",
+        default=["sp500", "ndx"],
+        help="membership indices for the universe (e.g. sp400 for mid-caps); match the gather",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -145,7 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         # Same universe the gather uses, so the raw cache covers exactly the
         # names that will be gathered.
-        symbols = build_universe(args.membership, args.cache_dir, args.universe_size)
+        symbols = build_universe(
+            args.membership, args.cache_dir, args.universe_size, indices=tuple(args.indices)
+        )
         log.info("built universe of %d symbols", len(symbols))
 
     summary = run_backfill(
