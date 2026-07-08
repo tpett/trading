@@ -62,13 +62,22 @@ SKEW_COLS = ("skew_put_atm", "skew_put_call")
 
 
 def load_samples(path: Path) -> list[dict]:
-    """Parse samples.jsonl into a list of cell dicts (blank lines ignored)."""
+    """Parse samples.jsonl into a list of cell dicts.
+
+    Blank lines are ignored, and an unparseable line (e.g. a torn final line
+    left by a SIGKILLed gather) is skipped rather than aborting the whole
+    analysis -- one bad line must not sink a study over thousands of good cells.
+    """
     cells: list[dict] = []
     with path.open() as fh:
         for line in fh:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 cells.append(json.loads(line))
+            except ValueError:
+                continue
     return cells
 
 

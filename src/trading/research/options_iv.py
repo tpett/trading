@@ -184,18 +184,31 @@ def implied_vol(
 
 @dataclass(frozen=True)
 class Contract:
-    """One gathered option print, reduced to what the inversion needs."""
+    """One gathered option print, reduced to what the inversion needs.
+
+    ``mid`` (the bid/ask midpoint) is the preferred mark when the gather stored
+    one -- it is a cleaner input than the last print. Legacy POC cells
+    (data/options-poc) carry no ``mid`` and keep inverting on ``close``.
+    """
 
     strike: float
     close: float
     is_call: bool
+    mid: float | None = None
+
+    @property
+    def price(self) -> float:
+        """Effective price to invert: the MID when present, else the close."""
+        return self.mid if self.mid is not None else self.close
 
     @classmethod
     def from_sample(cls, raw: dict) -> Contract:
         """Build from a samples.jsonl contract object.
 
         ``type`` is authoritative for call/put; we fall back to the ``role``
-        naming (``otm_put`` -> put) if a print omits it.
+        naming (``otm_put`` -> put) if a print omits it. ``mid`` is read when the
+        cell carries a non-null one (the ThetaData gather path); a cell without a
+        ``mid`` key (the older POC path) leaves it None and inverts on ``close``.
         """
         kind = str(raw.get("type", "")).lower()
         role = str(raw.get("role", "")).lower()
@@ -203,7 +216,11 @@ class Contract:
             is_call = kind == "call"
         else:
             is_call = "put" not in role
-        return cls(strike=float(raw["strike"]), close=float(raw["close"]), is_call=is_call)
+        raw_mid = raw.get("mid")
+        mid = float(raw_mid) if raw_mid is not None else None
+        return cls(
+            strike=float(raw["strike"]), close=float(raw["close"]), is_call=is_call, mid=mid
+        )
 
 
 @dataclass(frozen=True)
@@ -228,10 +245,11 @@ def contract_iv(
     rate: float = RATE,
     div_yield: float = DIV_YIELD,
 ) -> float | None:
-    """Implied vol for a single gathered contract."""
+    """Implied vol for a single gathered contract (from its MID when it has one,
+    else its close -- see ``Contract.price``)."""
     t_years = days_to_expiry / 365.0
     return implied_vol(
-        contract.close,
+        contract.price,
         spot,
         contract.strike,
         t_years,
@@ -295,20 +313,30 @@ def skew_from_cell(cell: dict) -> SkewResult | None:
     # Drop legs the data source gap-filled: Robinhood's expired-option daily
     # history flags interpolated bars (often a $0.01 placeholder), which are not
     # real prices and would invert to garbage IV. A leg missing for this reason
-    # is treated as absent.
+    # is treated as absent. The threshold is applied to the EFFECTIVE price (the
+    # mid when the cell carries one, else the close) so a leg the gather accepted
+    # on a good mid is not dropped for a stale sub-threshold close, and vice-versa.
     by_role: dict[str, dict] = {}
     for raw in cell.get("contracts", []):
-        if raw.get("interpolated") or float(raw.get("close", 0.0)) <= _MIN_OPTION_CLOSE:
+        raw_mid = raw.get("mid")
+        effective = float(raw_mid) if raw_mid is not None else float(raw.get("close", 0.0))
+        if raw.get("interpolated") or effective <= _MIN_OPTION_CLOSE:
             continue
         role = str(raw.get("role", "")).lower()
         by_role[role] = raw
     if not {"atm", "otm_put"} <= by_role.keys():
         return None
+    atm_raw = by_role["atm"]
     otm_call = by_role.get("otm_call")
+    # Collapsed ladder: when the OTM-call snapped onto the ATM strike the
+    # risk-reversal degenerates into a clone of skew_put_atm. Drop the leg so
+    # skew_put_call comes back None rather than a duplicate signal.
+    if otm_call is not None and float(otm_call["strike"]) == float(atm_raw["strike"]):
+        otm_call = None
     return compute_skew(
         spot=float(cell["spot_at_decision"]),
         days_to_expiry=float(cell["days_to_expiry"]),
-        atm=Contract.from_sample(by_role["atm"]),
+        atm=Contract.from_sample(atm_raw),
         otm_put=Contract.from_sample(by_role["otm_put"]),
         otm_call=Contract.from_sample(otm_call) if otm_call is not None else None,
     )

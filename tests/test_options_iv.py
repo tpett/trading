@@ -199,6 +199,98 @@ def test_skew_from_cell_drops_interpolated_leg():
     )
 
 
+def test_skew_from_cell_prefers_mid_over_close():
+    """When a cell carries a MID, skew_from_cell inverts on it, not the close --
+    even when the two imply opposite-sign skews (the gather stores the mid-based
+    skew, so downstream must agree)."""
+    from trading.research.options_iv import skew_from_cell
+
+    spot, dte = 100.0, 30
+    t = dte / 365.0
+    atm_price = bs_price(spot, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    # OTM put: close implies 20% vol (skew -0.10), mid implies 40% vol (skew +0.10).
+    put_close = bs_price(spot, 90.0, t, RATE, DIV_YIELD, 0.20, False)
+    put_mid = bs_price(spot, 90.0, t, RATE, DIV_YIELD, 0.40, False)
+
+    # Sanity: the close-only reading is negative...
+    close_only = compute_skew(
+        spot,
+        dte,
+        Contract(strike=100.0, close=atm_price, is_call=True),
+        Contract(strike=90.0, close=put_close, is_call=False),
+    )
+    assert close_only.skew_put_atm < 0
+
+    # ...but the cell has a mid, so skew_from_cell reports the POSITIVE mid skew.
+    s = skew_from_cell(
+        _poc_cell(
+            [
+                {
+                    "role": "atm",
+                    "type": "call",
+                    "strike": 100.0,
+                    "close": atm_price,
+                    "mid": atm_price,
+                },
+                {
+                    "role": "otm_put",
+                    "type": "put",
+                    "strike": 90.0,
+                    "close": put_close,
+                    "mid": put_mid,
+                },
+            ]
+        )
+    )
+    assert s is not None
+    assert s.skew_put_atm == pytest.approx(0.10, abs=3e-3)  # 0.40 - 0.30, the mid reading
+
+
+def test_skew_from_cell_legacy_close_only_unchanged():
+    """A cell with no ``mid`` key (the POC path) still inverts on close."""
+    from trading.research.options_iv import skew_from_cell
+
+    spot, dte = 100.0, 30
+    t = dte / 365.0
+    atm_price = bs_price(spot, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    put_price = bs_price(spot, 90.0, t, RATE, DIV_YIELD, 0.40, False)
+    s = skew_from_cell(
+        _poc_cell(
+            [
+                {"role": "atm", "type": "call", "strike": 100.0, "close": atm_price},
+                {"role": "otm_put", "type": "put", "strike": 90.0, "close": put_price},
+            ]
+        )
+    )
+    assert s is not None
+    assert s.skew_put_atm == pytest.approx(0.10, abs=3e-3)  # 0.40 - 0.30 from close
+
+
+def test_skew_from_cell_collapsed_call_nulls_put_call():
+    """When the otm_call leg shares the ATM strike (collapsed ladder) the
+    risk-reversal is degenerate: skew_put_call is forced None, skew_put_atm
+    still computes."""
+    from trading.research.options_iv import skew_from_cell
+
+    spot, dte = 100.0, 30
+    t = dte / 365.0
+    atm_price = bs_price(spot, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    put_price = bs_price(spot, 90.0, t, RATE, DIV_YIELD, 0.40, False)
+    s = skew_from_cell(
+        _poc_cell(
+            [
+                {"role": "atm", "type": "call", "strike": 100.0, "close": atm_price},
+                {"role": "otm_put", "type": "put", "strike": 90.0, "close": put_price},
+                # otm_call snapped onto the ATM strike -> degenerate.
+                {"role": "otm_call", "type": "call", "strike": 100.0, "close": atm_price},
+            ]
+        )
+    )
+    assert s is not None
+    assert s.skew_put_atm is not None
+    assert s.skew_put_call is None
+
+
 def test_skew_from_cell_interpolated_call_still_yields_put_atm():
     # A junk otm_call leg must not sink the whole cell: put_atm still computes.
     from trading.research.options_iv import skew_from_cell
