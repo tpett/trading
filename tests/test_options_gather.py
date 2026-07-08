@@ -9,6 +9,7 @@ round-trip has a checkable answer.
 from __future__ import annotations
 
 import json
+import urllib.error
 from datetime import date
 from pathlib import Path
 
@@ -605,3 +606,22 @@ def test_theta_client_raises_after_exhausting_retries(monkeypatch):
     client = ThetaClient("http://x", max_retries=3, sleep=lambda _s: None)
     with pytest.raises(OSError):
         client.list_expirations("AAPL")
+
+
+def test_theta_client_treats_472_as_empty_not_error(monkeypatch):
+    """HTTP 472 (ThetaData 'no data in range') is a normal empty response, not a
+    retryable failure: history_eod returns [] and no exception escapes, so an
+    illiquid OTM leg is omitted rather than sinking the whole cell."""
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 472, "No data", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = ThetaClient("http://x", max_retries=3, sleep=sleeps.append)
+    bars = client.history_eod("AAPL", "2019-03-15", 182.5, "C", "2019-01-30", "2019-02-04")
+    assert bars == []  # empty, not an exception
+    assert calls["n"] == 1  # 472 is NOT retried
+    assert sleeps == []  # no backoff spent on a no-data response

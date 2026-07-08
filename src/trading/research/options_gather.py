@@ -112,6 +112,14 @@ def _fmt_strike(strike: float) -> str:
     return repr(float(strike))
 
 
+# ThetaData returns HTTP 472 for a well-formed request that simply has no data
+# in range -- e.g. an illiquid deep-OTM half-strike with no EOD prints in the
+# +/-3d window. That is a normal "empty", NOT a failure: an optional leg (the
+# OTM call) should be omitted, not sink the whole cell. Any OTHER non-200 stays
+# a retryable error.
+_THETA_NO_DATA_STATUS = 472
+
+
 class ThetaClient:
     """Thin stdlib-``urllib`` wrapper over the local ThetaData v3 terminal.
 
@@ -147,9 +155,17 @@ class ThetaClient:
                 req = urllib.request.Request(url, headers={"Accept": "application/json"})
                 with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                # 472 = "no data in range" for a valid request: treat as empty,
+                # no retry, so an optional dataless leg is skipped cleanly.
+                if exc.code == _THETA_NO_DATA_STATUS:
+                    return {"response": []}
+                last_exc = exc
+                if attempt < self._max_retries - 1:
+                    self._sleep(self._backoff_base * (2**attempt))
             except (urllib.error.URLError, OSError, ValueError) as exc:
-                # URLError covers HTTP errors + connection refused; OSError covers
-                # socket timeouts; ValueError covers a truncated/invalid body.
+                # URLError covers connection refused; OSError covers socket
+                # timeouts; ValueError covers a truncated/invalid body.
                 last_exc = exc
                 if attempt < self._max_retries - 1:
                     self._sleep(self._backoff_base * (2**attempt))
