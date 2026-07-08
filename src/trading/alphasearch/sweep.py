@@ -221,14 +221,26 @@ def build_universe_panel(spec: UniverseSpec) -> PanelData:
 
 def _check_universe_supports(panel: PanelData, spec: SignalSpec, universe: str) -> None:
     """Spec section 6: a universe/signal mismatch is refused at assembly time,
-    never silently skipped (a silent skip would corrupt the trial count)."""
+    never silently skipped (a silent skip would corrupt the trial count).
+
+    The refusal names the expected store, how to populate it, and the
+    zero-setup workaround -- a bare "has none" tells the operator nothing
+    actionable and sends them hunting through the codebase.
+    """
     if spec.requires_options and not panel.options:
         raise SweepError(
-            f"signal {spec.name!r} requires options cells; universe {universe!r} has none"
+            f"signal {spec.name!r} requires options cells; universe {universe!r} "
+            "has none. Gather them with `scripts/gather_options_iv.py` (writes "
+            "data/options-iv/samples*.jsonl); or work around it by passing "
+            "--signals with a non-options signal subset"
         )
     if spec.requires_fundamentals and not panel.fundamentals:
         raise SweepError(
-            f"signal {spec.name!r} requires fundamentals; universe {universe!r} has none"
+            f"signal {spec.name!r} requires fundamentals; universe {universe!r} "
+            "has none. Expected store: data/fundamentals/equities (the "
+            "fundamentals_dir config/equities.toml points at). Populate it with "
+            "`scripts/backfill_fundamentals.py`; or work around it by passing "
+            "--signals with a non-fundamentals signal subset"
         )
 
 

@@ -88,24 +88,34 @@ def test_error_trial_is_journaled_flagged_and_counted(tmp_path):
 def test_options_signal_without_cells_refused_before_any_trial(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel(with_options=False)
-    with pytest.raises(SweepError):
+    with pytest.raises(SweepError) as excinfo:
         run_sweep(
             _universe(tmp_path), journal, make_factors(), ts="t1",
             signals=_subset("mom21", "hedge"), window=WINDOW,
             panel_factory=lambda _u: panel,
         )
     assert list(journal.events()) == []             # refused at assembly: no trials
+    # Actionable: how to gather it, and the zero-setup workaround.
+    message = str(excinfo.value)
+    assert "scripts/gather_options_iv.py" in message
+    assert "--signals" in message
 
 
 def test_fundamentals_signal_without_store_refused(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel(with_fundamentals=False)
-    with pytest.raises(SweepError):
+    with pytest.raises(SweepError) as excinfo:
         run_sweep(
             _universe(tmp_path), journal, make_factors(), ts="t1",
             signals=_subset("earnings_yield"), window=WINDOW,
             panel_factory=lambda _u: panel,
         )
+    # Actionable: the expected store path, how to populate it, and the
+    # zero-setup workaround -- not just "has none".
+    message = str(excinfo.value)
+    assert "data/fundamentals/equities" in message
+    assert "scripts/backfill_fundamentals.py" in message
+    assert "--signals" in message
 
 
 def test_leaderboard_recomputes_from_journal_alone(tmp_path):
