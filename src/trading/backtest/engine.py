@@ -25,6 +25,7 @@ from trading.config import VenueConfig
 from trading.data.cache import OhlcvCache
 from trading.fundamentals.store import FundamentalsStore
 from trading.pipeline import PipelineDataError, RankingsResult, assemble_rankings
+from trading.signals.engine import FeaturePanel
 from trading.signals.registry import get_ranker
 from trading.simulator.core import step
 from trading.simulator.fills import Fill
@@ -165,6 +166,13 @@ def prepare(
         else:
             bars[symbol] = frame
 
+    # Precompute every symbol's rolling feature time-series ONCE for the whole
+    # run (vectorized). Each session then GATHERS the row at its as_of instead
+    # of recomputing 7 rolling features per symbol -- the walk-forward's former
+    # dominant cost. The panel looks only backward, so a full-span precompute
+    # and a per-session recompute agree bar-for-bar (no lookahead).
+    feature_panel = FeaturePanel.from_bars(bars, config.signals)
+
     spec = get_ranker(config.signals.ranker)
     fundamentals_all: dict[str, pd.DataFrame] = {}
     if spec.requires_fundamentals:
@@ -227,6 +235,7 @@ def prepare(
                 benchmark.loc[:ts],
                 ts.date(),
                 fundamentals=fundamentals,
+                feature_panel=feature_panel,
             )
         except PipelineDataError as exc:
             sessions.append(SessionPlan(ts, None, (), ratio, len(eligible), str(exc)))

@@ -60,14 +60,18 @@ from dataclasses import dataclass
 import pandas as pd
 
 from trading.config import SignalConfig
-from trading.signals.engine import compute_features
+from trading.signals.engine import FeaturePanel, compute_features
 from trading.signals.quality import quality_momentum_v1
 from trading.signals.value import value_momentum_v1
 
-RankerFn = Callable[
-    [dict[str, pd.DataFrame], pd.Timestamp, SignalConfig, dict[str, pd.DataFrame] | None],
-    pd.DataFrame,
-]
+RankerFn = Callable[..., pd.DataFrame]
+"""fn(bars, as_of, config, fundamentals=None, *, panel=None) -> DataFrame.
+
+`panel` is an optional precomputed FeaturePanel (trading.signals.engine): the
+backtester builds one for the whole run so per-session ranking is a gather,
+not a rolling recompute. When None, the ranker builds features from `bars`
+directly (the live path). Passing it never changes results -- a panel gathered
+at as_of equals a from-scratch compute at as_of (no lookahead)."""
 
 
 @dataclass(frozen=True)
@@ -81,10 +85,11 @@ def _momentum_v1(
     as_of: pd.Timestamp,
     config: SignalConfig,
     fundamentals: dict[str, pd.DataFrame] | None = None,
+    *,
+    panel: FeaturePanel | None = None,
 ) -> pd.DataFrame:
-    """v2-contract adapter: momentum_v1 has no fundamentals input by design;
-    compute_features keeps its original 3-arg signature untouched."""
-    return compute_features(bars, as_of, config)
+    """v2-contract adapter: momentum_v1 has no fundamentals input by design."""
+    return compute_features(bars, as_of, config, panel=panel)
 
 
 RANKERS: dict[str, RankerSpec] = {
