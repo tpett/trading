@@ -65,10 +65,72 @@ Databento's subscription tier. (The Robinhood free-data POC is essentially a
 tiny version of this DIY path — if it shows signal, ThetaData scales it
 survivorship-free without the inversion burden.)
 
-## Not verified (behind sales walls)
+## ThetaData delisted-underlying coverage — NOT YET CONFIRMED (must verify before buying)
+
+Survivorship on delisted underlyings is the one property we're really buying and
+it is **unconfirmed**. No ThetaData doc, blog, review, or Discord post makes an
+explicit survivorship / "we retain delisted symbols" statement; the `list/roots`
+doc only says it "returns all traded roots... updated overnight" (neither
+confirms nor excludes delisted names). **Structural prior: very likely yes** —
+their data is the historical OPRA consolidated tape, so options on a name like
+First Republic that traded before its 2023 failure exist in the tape by
+construction, and tape vendors generally retain expired contracts. But verify,
+don't assume.
+
+**Three ways to verify (in order of definitiveness):**
+
+1. **Free-tier MECHANISM test ($0, works today).** The free tier is EOD-only,
+   ~1 year of history (first-access date 2023-06-01). That window is too recent
+   to test FRC (failed 2023-05) or SIVB (halted 2023-03) directly, but it CAN
+   confirm the survivorship *mechanism* with any 2025–2026 delisting/take-private:
+   run the Theta Terminal (local Java on `localhost:25510`) and check that a
+   since-delisted ticker still returns roots/expirations/EOD data:
+   ```
+   java -jar ThetaTerminal.jar YOUR_EMAIL YOUR_PASSWORD   # serves REST on :25510
+   curl "http://127.0.0.1:25510/v2/list/roots/option?use_csv=true" | grep -i <DELISTED>
+   curl "http://127.0.0.1:25510/v2/list/expirations?root=<DELISTED>"
+   curl "http://127.0.0.1:25510/v2/list/strikes?root=<DELISTED>&exp=YYYYMMDD"
+   curl "http://127.0.0.1:25510/v2/hist/option/eod?root=<DELISTED>&exp=YYYYMMDD&strike=100000&right=C&start_date=YYYYMMDD&end_date=YYYYMMDD"
+   ```
+   Non-empty responses = the tape keeps delisted roots and expired contracts.
+   (Strikes are in 1/10-cent: $100.00 = `100000`; dates `YYYYMMDD`.)
+
+2. **Ask them directly (fastest, authoritative).** Discord
+   https://discord.thetadata.us/ or support@thetadata.net. Message: *"Evaluating
+   the $80/mo Options Standard plan for a historical IV-skew backtest. Does your
+   options history retain contracts on underlyings that have since delisted? Can
+   I pull historical EOD/IV for First Republic (FRC) options expiring 2023-06-16
+   during Jan–May 2023 (delisted 2023-05-01) and SVB (SIVB) exp 2023-03-17 during
+   Jan–Mar 2023, on the Standard tier (2016-01-01 depth)? Do list/roots and
+   list/expirations still return FRC/SIVB? Confirming survivorship-free coverage
+   before subscribing."*
+
+3. **The definitive FRC/SIVB test (requires the paid Standard plan).** Standard
+   is tick/EOD options back to 2016-01-01. On it, the same endpoints above with
+   `root=FRC&exp=20230616&strike=120000&right=P&start_date=20230101&end_date=20230501`
+   (and the `hist/option/implied_volatility` endpoint, `ivl=0`) either return
+   real pre-collapse data (confirmed) or don't. This is only worth reaching if
+   #1 + #2 leave doubt.
+
+## Also not verified (behind sales walls)
 Concrete $/mo for IVolatility, Cboe DataShop Volatility Surfaces, dxFeed, and
 OptionMetrics; exact post-rebrand Polygon/Massive options pricing; and explicit
-delisted-*underlying* survivorship for ThetaData/ORATS (spot-check needed).
+delisted-*underlying* survivorship for ORATS.
+
+## Free-data POC outcome (2026-07-07)
+The zero-cost Robinhood proof-of-concept (`scripts/option_skew_analysis.py`) came
+back **inconclusive with no encouragement** — 42 clean observations after
+dropping 43%-interpolated gap-fills, and the skew→forward-return relationship was
+wrong-signed / within noise. Read as weak evidence (the free data is too
+interpolated and IV-from-OHLC too noisy to be a fair test), NOT a refutation of
+the skew signal. Bottom line: no positive result to justify the $80/mo spend on
+this basis; the idea stays theoretically sound but unvalidated in our universe.
+
+Comparison table and source URLs: see the vendor-evaluation and verification
+agent transcripts (2026-07-07). Key sources: thetadata.net/pricing,
+docs.thetadata.us (Subscriptions, List Roots, hist implied_volatility),
+orats.com/data-api, ivolatility.com/historical-options-data,
+databento.com/datasets/OPRA.PILLAR.
 
 Comparison table and source URLs: see the vendor-evaluation agent transcript
 (2026-07-07). Key sources: thetadata.net/pricing, orats.com/data-api,
