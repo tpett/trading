@@ -303,6 +303,27 @@ to carry forward: 2024-25 data was partially examined by the §9 skew studies,
 so holdout passes for skew-family signals carry residual contamination risk
 and must be read conservatively (spec §5.3).
 
+**Survivorship caveat (the universes, not the bars, are tilted).** The
+alphasearch large-cap and mid-cap universes are each the gathered options
+pool — ~100 most-liquid sp500+ndx names (large-cap) selected at gather time
+in 2025, held fixed back to 2019 (§9's ThetaData gather). The underlying
+equity *bars* are survivorship-free Tiingo (§7), but pool *membership* itself
+is survivorship-tilted: a name only entered the pool because it was still
+liquid enough to gather in 2025, so every discovery alpha here is measured on
+names already known to have stayed liquid through 2025, not on the universe
+as it actually looked in 2019. Read any discovery or holdout result on these
+universes as conditional on that survival, not as a clean point-in-time
+backtest.
+
+**Classical-SE caveat (read at the point of use).** Every t-stat and BH
+p-value on the leaderboard comes from classical OLS standard errors on daily
+data (`trading.alphasearch.evaluate.ols`); volatility clustering typically
+inflates these vs. Newey-West/HAC SEs by something like 10-30%, so a marginal
+BH pass (t close to the threshold) should be read skeptically until re-checked
+with a heteroskedasticity/autocorrelation-robust estimator. This does not
+change the gate statistic itself (spec §5 is pre-registered and locked) — it
+is a caveat on how to *read* a marginal pass, not a different pass rule.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
