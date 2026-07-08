@@ -982,9 +982,10 @@ def _print_alphasearch_leaderboard(rows, count: int, *, as_json: bool) -> None:
     def num(value, fmt="{:+.2f}"):
         return "-" if value is None else fmt.format(value)
 
-    # Wide on purpose: 15 columns don't fit rich's 80-col no-tty default, which
-    # would silently ellipsize every cell (including the signal name itself).
-    console = Console(width=200)
+    # 15 columns don't fit rich's 80-col no-tty fallback, which would silently
+    # ellipsize every cell (including the signal name) in pipes and tests; a
+    # real terminal keeps its detected width so the box never hard-wraps.
+    console = Console() if sys.stdout.isatty() else Console(width=200)
     table = Table(
         title=f"alphasearch leaderboard — {count} discovery trials, BH q=0.10"
     )
