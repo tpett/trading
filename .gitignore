@@ -6,7 +6,8 @@ __pycache__/
 dist/
 /data/
 /state/
-/journal/
+/journal/*
+!/journal/alphasearch-trials.jsonl
 /digest/
 /data/options-poc/
 /config.toml
