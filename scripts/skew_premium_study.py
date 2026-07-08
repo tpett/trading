@@ -47,7 +47,8 @@ def load_cells(samples: Path) -> pd.DataFrame:
             continue
         c = json.loads(line)
         if c.get("skew_put_atm") is not None:
-            rows.append((c["symbol"], pd.Timestamp(c["decision_date"], tz="UTC"), float(c["skew_put_atm"])))
+            date = pd.Timestamp(c["decision_date"], tz="UTC")
+            rows.append((c["symbol"], date, float(c["skew_put_atm"])))
     return pd.DataFrame(rows, columns=["symbol", "date", "skew"])
 
 
@@ -110,7 +111,8 @@ def main() -> int:
           f"{df['date'].min().date()}..{df['date'].max().date()}")
     oos_start = pd.Timestamp(OOS_START, tz="UTC")
     for horizon in HORIZONS:
-        df["fwd"] = [forward_return(closes, s, d, horizon) for s, d in zip(df["symbol"], df["date"], strict=False)]
+        pairs = zip(df["symbol"], df["date"], strict=False)
+        df["fwd"] = [forward_return(closes, s, d, horizon) for s, d in pairs]
         usable = df.dropna(subset=["fwd"])
         study(usable, horizon, "FULL 2019-2025")
         study(usable[usable["date"] >= oos_start], horizon, "OOS 2021-07+")
