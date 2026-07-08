@@ -65,17 +65,27 @@ Databento's subscription tier. (The Robinhood free-data POC is essentially a
 tiny version of this DIY path — if it shows signal, ThetaData scales it
 survivorship-free without the inversion burden.)
 
-## ThetaData delisted-underlying coverage — NOT YET CONFIRMED (must verify before buying)
+## ThetaData delisted-underlying coverage — STRONG EVIDENCE YES (partially verified live 2026-07-07)
 
-Survivorship on delisted underlyings is the one property we're really buying and
-it is **unconfirmed**. No ThetaData doc, blog, review, or Discord post makes an
-explicit survivorship / "we retain delisted symbols" statement; the `list/roots`
-doc only says it "returns all traded roots... updated overnight" (neither
-confirms nor excludes delisted names). **Structural prior: very likely yes** —
-their data is the historical OPRA consolidated tape, so options on a name like
-First Republic that traded before its 2023 failure exist in the tape by
-construction, and tape vendors generally retain expired contracts. But verify,
-don't assume.
+Verified directly against the running free-tier terminal (v3, `localhost:25503`):
+`GET /v3/stock/list/symbols` returns 26,177 symbols and **retains delisted
+tickers** — XLNX (acq 2022), ATVI (acq 2023), CTXS/SGEN (2022-23), and crucially
+the genuine FAILURES **SIVB and FRC** are all present alongside live names. So
+the roster is survivorship-inclusive (it keeps dead tickers), which — since
+options are keyed by underlying root — is a strong positive signal for both the
+stock and option histories. Structural prior agrees: the data is the SIP/OPRA
+consolidated tape, where a name's pre-failure records exist by construction.
+
+**Still not fully confirmed (one gap):** the free tier serves only ~1 year of
+history, so we could NOT pull actual 2023 FRC/SIVB *bars* (outside the window) —
+only prove the tickers are in the roster. Full confirmation that historical bars
+are retrievable for a pre-2023 failure needs the paid Standard tier (2016 depth)
+or a recent (2025-26) delisting bar test. Given the roster evidence + tape prior,
+the residual risk is low. (Also verified: `/v3/stock/history/eod` returns **raw
+OHLC + the closing NBBO quote**, no pre-adjusted close — confirms we'd
+self-adjust from ThetaData's separate split/dividend endpoints.)
+
+Original open-question notes (kept for the verification recipe):
 
 **Three ways to verify (in order of definitiveness):**
 
