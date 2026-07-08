@@ -261,15 +261,31 @@ def first_trading_days(
     return out
 
 
-def spot_at(underlying: pd.DataFrame, decision_ts: pd.Timestamp) -> float | None:
-    """Adjusted close on the last bar on/before ``decision_ts`` (searchsorted
-    side='right' minus one). Returns None if the decision date precedes the
-    series entirely."""
-    idx = underlying.index
+def load_raw_close(symbol: str, raw_dir: Path) -> pd.Series | None:
+    """RAW (unadjusted) daily close series for ``symbol``, or None if absent.
+
+    Reads ``<raw_dir>/<SYM>.parquet`` (single ``close_raw`` column, UTC index)
+    produced by ``scripts/backfill_options_underlying_raw.py``. This is a
+    SEPARATE cache from ``data/equities-tiingo`` on purpose: that one holds
+    split+dividend-ADJUSTED closes, but ThetaData option strikes and the BS
+    inversion both live in RAW price space, so spot MUST be the unadjusted close.
+    """
+    path = raw_dir / f"{symbol}.parquet"
+    if not path.exists():
+        return None
+    return pd.read_parquet(path, columns=["close_raw"])["close_raw"]
+
+
+def raw_spot_at(raw_close: pd.Series, decision_ts: pd.Timestamp) -> float | None:
+    """Raw close on the last bar on/before ``decision_ts`` (searchsorted
+    side='right' minus one). Returns None if the decision date precedes the raw
+    series entirely -- the caller then skips the cell rather than falling back to
+    an adjusted (and therefore strike-mismatched) price."""
+    idx = raw_close.index
     pos = idx.searchsorted(decision_ts, side="right") - 1
     if pos < 0:
         return None
-    return float(underlying["close"].iloc[pos])
+    return float(raw_close.iloc[pos])
 
 
 # --- Expiration & strike selection ----------------------------------------
@@ -680,15 +696,21 @@ def _load_underlying(cache_dir: Path, symbol: str) -> pd.DataFrame | None:
 def build_work_items(
     symbols: list[str],
     cache_dir: Path,
+    raw_dir: Path,
     start_month: str,
     end_month: str,
     existing: set[tuple[str, str]],
 ) -> list[tuple[str, date, float]]:
     """One (symbol, decision_date, spot) tuple per not-yet-gathered cell.
 
-    Decision dates are each symbol's own first-of-month trading days; the spot is
-    the close there. Cells already present in ``existing`` and symbols without a
-    cached parquet are skipped.
+    The decision-date CALENDAR (first trading day per month) comes from the
+    adjusted ``data/equities-tiingo`` cache -- split/dividend adjustment does not
+    move trading dates, so it is the right source for the calendar. The SPOT,
+    however, is the RAW unadjusted close from ``raw_dir`` (see ``load_raw_close``)
+    because option strikes and the BS inversion live in raw price space. A symbol
+    with no raw series -- or a decision date with no raw bar on/before it -- is
+    skipped and logged; we never fall back to the adjusted (strike-mismatched)
+    price.
     """
     work: list[tuple[str, date, float]] = []
     for symbol in symbols:
@@ -696,12 +718,20 @@ def build_work_items(
         if underlying is None or underlying.empty:
             log.warning("no Tiingo cache for %s -- skipping", symbol)
             continue
+        raw_close = load_raw_close(symbol, raw_dir)
+        if raw_close is None or raw_close.empty:
+            log.warning(
+                "no raw underlying for %s -- skipping (run backfill_options_underlying_raw)",
+                symbol,
+            )
+            continue
         for ts in first_trading_days(underlying.index, start_month, end_month):
             decision_date = ts.date()
             if (symbol, decision_date.isoformat()) in existing:
                 continue
-            spot = spot_at(underlying, ts)
+            spot = raw_spot_at(raw_close, ts)
             if spot is None or spot <= 0:
+                log.info("skip %s %s: no raw spot on/before decision", symbol, decision_date)
                 continue
             work.append((symbol, decision_date, spot))
     return work
@@ -716,6 +746,7 @@ def run_gather(
     start_month: str = "2019-01",
     end_month: str = "2025-12",
     cache_dir: Path,
+    raw_dir: Path,
     membership_csv: Path,
     max_workers: int = 4,
     log_every: int = 50,
@@ -723,6 +754,10 @@ def run_gather(
 ) -> dict:
     """Gather every outstanding cell for ``symbols`` (or a freshly-built universe)
     and append them to ``out_path``.
+
+    ``cache_dir`` (adjusted OHLCV) supplies the decision calendar and the
+    dollar-volume ranking; ``raw_dir`` (unadjusted closes) supplies the spot that
+    feeds strike-snapping and the stored ``spot_at_decision``.
 
     Idempotent: existing keys are read up front and skipped. Concurrency is one
     worker per cell, capped at ``max_workers`` (<=4 for the terminal), each doing
@@ -739,7 +774,7 @@ def run_gather(
 
     _ensure_trailing_newline(out_path)  # a torn final line must not glue onto the next cell
     existing = load_existing_keys(out_path)
-    work = build_work_items(symbols, cache_dir, start_month, end_month, existing)
+    work = build_work_items(symbols, cache_dir, raw_dir, start_month, end_month, existing)
     total = len(work)
     log.info(
         "gather start: %d symbols, %d cells to do (%d already present)",

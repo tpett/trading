@@ -31,6 +31,7 @@ from trading.venues.equities import DEFAULT_MEMBERSHIP_CSV
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "data" / "options-iv" / "samples.jsonl"
 DEFAULT_CACHE_DIR = ROOT / "data" / "equities-tiingo"
+DEFAULT_RAW_DIR = ROOT / "data" / "options-iv" / "underlying_raw"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,6 +44,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end-month", default="2025-12", help="last decision month (YYYY-MM)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="samples.jsonl output path")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR, help="Tiingo parquets")
+    parser.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=DEFAULT_RAW_DIR,
+        help="raw (unadjusted) close cache for spot (backfill_options_underlying_raw)",
+    )
     parser.add_argument(
         "--membership", type=Path, default=DEFAULT_MEMBERSHIP_CSV, help="PIT membership CSV"
     )
@@ -68,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         start_month=args.start_month,
         end_month=args.end_month,
         cache_dir=args.cache_dir,
+        raw_dir=args.raw_dir,
         membership_csv=args.membership,
         max_workers=args.max_workers,
     )

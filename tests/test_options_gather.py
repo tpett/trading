@@ -19,6 +19,7 @@ from trading.research.options_gather import (
     ThetaClient,
     build_cell,
     build_universe,
+    build_work_items,
     dedup_bars_by_trade_date,
     gather_cell,
     is_standard_monthly,
@@ -301,6 +302,17 @@ def _write_underlying(cache_dir: Path, symbol: str) -> None:
     frame.to_parquet(cache_dir / f"{symbol}.parquet")
 
 
+def _write_raw(
+    raw_dir: Path, symbol: str, value: float, start: str = "2018-12-15", end: str = "2019-06-30"
+) -> None:
+    """Raw (unadjusted) close cache: one close_raw parquet, UTC index."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    idx = pd.bdate_range(start, end, tz="UTC")
+    frame = pd.DataFrame({"close_raw": [value] * len(idx)}, index=idx)
+    frame.index.name = "Date"
+    frame.to_parquet(raw_dir / f"{symbol}.parquet")
+
+
 def _full_history() -> dict:
     """Bars for every trading day Jan-Mar so any first-of-month decision hits."""
     dates = pd.bdate_range("2018-12-15", "2019-03-31")
@@ -319,7 +331,9 @@ def _full_history() -> dict:
 def test_run_gather_resume_is_idempotent(tmp_path: Path):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
+    raw_dir = tmp_path / "raw"
     _write_underlying(cache_dir, "AAA")
+    _write_raw(raw_dir, "AAA", 100.0)
     out = tmp_path / "samples.jsonl"
 
     # Standard monthlies bracketing Jan/Feb/Mar first-of-month decisions.
@@ -335,6 +349,7 @@ def test_run_gather_resume_is_idempotent(tmp_path: Path):
         start_month="2019-01",
         end_month="2019-03",
         cache_dir=cache_dir,
+        raw_dir=raw_dir,
         membership_csv=tmp_path / "unused.csv",
     )
     lines_after_first = out.read_text().splitlines()
@@ -348,6 +363,7 @@ def test_run_gather_resume_is_idempotent(tmp_path: Path):
         start_month="2019-01",
         end_month="2019-03",
         cache_dir=cache_dir,
+        raw_dir=raw_dir,
         membership_csv=tmp_path / "unused.csv",
     )
     assert summary2["cells_attempted"] == 0
@@ -365,7 +381,9 @@ def test_run_gather_recovers_from_torn_final_line(tmp_path: Path):
     is not glued onto it -- every line stays parseable and no key duplicates."""
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
+    raw_dir = tmp_path / "raw"
     _write_underlying(cache_dir, "AAA")
+    _write_raw(raw_dir, "AAA", 100.0)
     out = tmp_path / "samples.jsonl"
     # First trading day of Jan 2019 on the fixture calendar is 2019-01-01.
     out.write_text(json.dumps({"symbol": "AAA", "decision_date": "2019-01-01"}))  # no newline
@@ -382,6 +400,7 @@ def test_run_gather_recovers_from_torn_final_line(tmp_path: Path):
         start_month="2019-01",
         end_month="2019-03",
         cache_dir=cache_dir,
+        raw_dir=raw_dir,
         membership_csv=tmp_path / "unused.csv",
     )
 
@@ -415,6 +434,67 @@ def test_gather_cell_collapsed_call_nulls_put_call_no_dup_contract():
     assert len(strikes_100) == 1  # no duplicate 100-strike contract
     assert cell["skew_put_atm"] is not None
     assert cell["skew_put_call"] is None
+
+
+# --- Raw spot (unadjusted) -------------------------------------------------
+
+
+def test_build_work_items_uses_raw_spot_not_adjusted(tmp_path: Path):
+    """Spot comes from the RAW cache, not the split/dividend-adjusted one."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    raw_dir = tmp_path / "raw"
+    _write_underlying(cache_dir, "AAPL")  # adjusted close 100.0 -> calendar only
+    _write_raw(raw_dir, "AAPL", 166.52)  # raw close (real 2019 AAPL level)
+
+    work = build_work_items(["AAPL"], cache_dir, raw_dir, "2019-02", "2019-02", set())
+    assert len(work) == 1
+    symbol, _decision, spot = work[0]
+    assert symbol == "AAPL"
+    assert spot == pytest.approx(166.52)  # raw, NOT the adjusted 100.0
+
+
+def test_build_work_items_skips_symbol_without_raw_series(tmp_path: Path):
+    """A symbol with an adjusted parquet but no raw series is skipped entirely
+    (no fall-back to the strike-mismatched adjusted price)."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_underlying(cache_dir, "AAPL")  # adjusted present, raw absent
+
+    work = build_work_items(["AAPL"], cache_dir, raw_dir, "2019-02", "2019-02", set())
+    assert work == []
+
+
+def test_gather_cell_snaps_strikes_near_raw_spot():
+    """The AAPL smoke scenario: a raw spot ~166 snaps ATM to the ~165 strike and
+    the OTM legs to ~150 / ~183 -- NOT anywhere near an adjusted ~40."""
+    spot = 166.52
+    dte = (date(2019, 4, 18) - date(2019, 3, 1)).days
+    t = dte / 365
+    # A realistic raw 2019 AAPL ladder ($2.5-$5 spacing).
+    ladder = [150.0, 155.0, 160.0, 165.0, 170.0, 175.0, 180.0, 182.5, 185.0, 190.0]
+    atm_p = bs_price(spot, 165.0, t, RATE, DIV_YIELD, 0.30, True)
+    put_p = bs_price(spot, 150.0, t, RATE, DIV_YIELD, 0.34, False)
+    call_p = bs_price(spot, 182.5, t, RATE, DIV_YIELD, 0.27, True)
+    history = {
+        (165.0, "C"): [_bar("2019-03-01", atm_p - 0.05, atm_p + 0.05, atm_p, "c")],
+        (150.0, "P"): [_bar("2019-03-01", put_p - 0.05, put_p + 0.05, put_p, "c")],
+        (182.5, "C"): [_bar("2019-03-01", call_p - 0.05, call_p + 0.05, call_p, "c")],
+    }
+    client = FakeClient(expirations=["2019-04-18"], strikes=ladder, history=history)
+    cell = gather_cell(client, "AAPL", date(2019, 3, 1), spot)
+
+    assert cell is not None
+    assert cell["spot_at_decision"] == pytest.approx(166.52)
+    by_role = {c["role"]: c for c in cell["contracts"]}
+    assert by_role["atm"]["strike"] == 165.0
+    assert by_role["otm_put"]["strike"] == 150.0
+    assert by_role["otm_call"]["strike"] == 182.5
+    # Quotes are real time-value (not all-intrinsic), so IV inverts.
+    assert by_role["atm"]["iv"] == pytest.approx(0.30, abs=5e-3)
+    assert by_role["otm_put"]["iv"] is not None
 
 
 def test_load_existing_keys_ignores_torn_line(tmp_path: Path):
