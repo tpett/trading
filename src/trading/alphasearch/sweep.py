@@ -44,7 +44,16 @@ DISCOVERY_WINDOW = "2019-01-01..2023-12-31"   # pre-registered (spec 5.1)
 HOLDOUT_START = "2024-01-01"                  # pre-registered (spec 5.3)
 BH_Q = 0.10                                   # pre-registered (spec 5.2)
 HOLDOUT_PASS_RATIO = 0.5                      # pre-registered (spec 3.6)
-DEFAULT_PARAMS = {"quantiles": 5, "weighting": "equal", "cadence": "monthly"}
+# Every parameter that can change a trial's outcome MUST appear here (and in
+# run_sweep's params), or a re-run with a changed value would dedupe against
+# the stale trial -- breaking the "any changed parameter is a NEW trial" rule.
+DEFAULT_PARAMS = {
+    "quantiles": QUANTILES,
+    "weighting": "equal",
+    "cadence": "monthly",
+    "tercile_below": TERCILE_BELOW,
+    "min_names": MIN_NAMES,
+}
 
 
 class SweepError(RuntimeError):
@@ -418,12 +427,36 @@ def run_sweep(
     """Enumerate signals x universes serially; build each panel once; journal
     EVERY trial BEFORE the leaderboard is computed (spec 3.6) so a crash
     mid-sweep can never yield counted-but-unjournaled trials."""
-    chosen = signals or SIGNALS
-    params = {"quantiles": quantiles, "weighting": "equal", "cadence": "monthly"}
-    for _, uspec in sorted(universes.items()):
-        panel = panel_factory(uspec)
-        for name in sorted(chosen):  # refuse the whole universe up front
-            _check_universe_supports(panel, chosen[name], uspec.name)
+    if signals is not None and not signals:
+        # `signals or SIGNALS` would silently expand an explicitly-empty
+        # selection to the full registry; sweeping nothing is a caller bug.
+        raise SweepError("no signals selected")
+    chosen = SIGNALS if signals is None else signals
+    params = {
+        "quantiles": quantiles,
+        "weighting": "equal",
+        "cadence": "monthly",
+        "tercile_below": tercile_below,
+        "min_names": min_names,
+    }
+    # Validate the FULL signal x universe cross-product BEFORE any trial runs
+    # (spec section 6: refused at sweep-ASSEMBLY time). Checking per-universe
+    # inside the trial loop would abort mid-sweep, making "which trials got
+    # journaled" depend on universe sort order. All-or-nothing: one SweepError
+    # naming every incompatible pair, zero trials journaled.
+    panels: dict[str, PanelData] = {}
+    mismatches: list[str] = []
+    for uname, uspec in sorted(universes.items()):
+        panels[uname] = panel_factory(uspec)
+        for name in sorted(chosen):
+            try:
+                _check_universe_supports(panels[uname], chosen[name], uspec.name)
+            except SweepError as exc:
+                mismatches.append(str(exc))
+    if mismatches:
+        raise SweepError("; ".join(mismatches))
+    for uname, uspec in sorted(universes.items()):
+        panel = panels[uname]
         for name in sorted(chosen):
             config = trial_config(name, uspec.name, window, params=params)
             try:

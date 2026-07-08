@@ -130,6 +130,76 @@ def test_default_universes_point_at_gathered_pools():
     assert got["largecap"].fundamentals_dir is not None
 
 
+@pytest.mark.parametrize("bad_name,good_name", [("aaa", "zzz"), ("zzz", "aaa")])
+def test_incompatible_universe_refuses_the_whole_sweep_either_order(
+    tmp_path, bad_name, good_name
+):
+    # Validation must cover ALL universes BEFORE any trial runs: whether the
+    # compatible universe's trials get journaled must not depend on whether
+    # the incompatible one sorts first or last.
+    journal = trials_journal(tmp_path / "journal")
+    panels = {bad_name: make_panel(with_options=False), good_name: make_panel()}
+    universes = {
+        n: UniverseSpec(n, tmp_path, tmp_path / "s.jsonl", None)
+        for n in (bad_name, good_name)
+    }
+    with pytest.raises(SweepError) as excinfo:
+        run_sweep(
+            universes, journal, make_factors(), ts="t1",
+            signals=_subset("mom21", "hedge"), window=WINDOW,
+            panel_factory=lambda u: panels[u.name],
+        )
+    assert bad_name in str(excinfo.value)           # names the offending pair
+    assert list(journal.events()) == []             # zero trials, deterministically
+
+
+def test_empty_signal_selection_is_refused(tmp_path):
+    # An explicitly-empty selection must NOT silently expand to the full
+    # registry (`signals or SIGNALS` truthiness gotcha): sweeping nothing is
+    # a caller bug and must be loud.
+    journal = trials_journal(tmp_path / "journal")
+    with pytest.raises(SweepError):
+        run_sweep(
+            _universe(tmp_path), journal, make_factors(), ts="t1",
+            signals={}, window=WINDOW, panel_factory=lambda _u: make_panel(),
+        )
+    assert list(journal.events()) == []
+
+
+def test_signals_none_runs_the_full_registry(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    _, n_trials = run_sweep(
+        _universe(tmp_path), journal, make_factors(), ts="t1",
+        signals=None, window=WINDOW, panel_factory=lambda _u: panel,
+    )
+    assert n_trials == len(SIGNALS)
+
+
+def test_min_names_change_is_a_new_trial(tmp_path):
+    # tercile_below/min_names must enter the hashed config: re-running with a
+    # different sort parameter is a NEW trial, never deduped against the old.
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    kwargs = dict(signals=_subset("mom21"), window=WINDOW,
+                  panel_factory=lambda _u: panel)
+    _, first = run_sweep(_universe(tmp_path), journal, make_factors(), "t1", **kwargs)
+    _, second = run_sweep(_universe(tmp_path), journal, make_factors(), "t2",
+                          min_names=10, **kwargs)
+    assert (first, second) == (1, 2)
+
+
+def test_tercile_below_change_is_a_new_trial(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    kwargs = dict(signals=_subset("mom21"), window=WINDOW,
+                  panel_factory=lambda _u: panel)
+    _, first = run_sweep(_universe(tmp_path), journal, make_factors(), "t1", **kwargs)
+    _, second = run_sweep(_universe(tmp_path), journal, make_factors(), "t2",
+                          tercile_below=40, **kwargs)
+    assert (first, second) == (1, 2)
+
+
 def test_bh_gate_spans_the_whole_journal_not_one_sweep(tmp_path):
     # Trials from an EARLIER sweep (different window -> different hashes)
     # must raise n for the BH gate of a later sweep.
