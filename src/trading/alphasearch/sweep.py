@@ -653,6 +653,14 @@ def run_holdout(
     except (SortError, ValueError, np.linalg.LinAlgError) as exc:
         result = None
         error = f"{type(exc).__name__}: {exc}"
+    except Exception as exc:
+        # Any OTHER exception means holdout data was already read; journal an
+        # error-kind event before re-raising so the once-only touch is never
+        # spent without a journal record (the leak this guards against).
+        error = f"{type(exc).__name__}: {exc}"
+        log_trial(journal, kind="holdout", config=config, ts=ts,
+                  result=None, error=error)
+        raise
     event = log_trial(journal, kind="holdout", config=config, ts=ts,
                       result=result, error=error)
 

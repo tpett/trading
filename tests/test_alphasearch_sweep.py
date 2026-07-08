@@ -428,6 +428,35 @@ def test_holdout_refused_before_touch_when_factors_stale(tmp_path):
     assert all(e.get("kind") != "holdout" for e in journal.events())  # untouched
 
 
+def test_holdout_journals_error_event_before_reraising_unexpected_exception(
+    tmp_path, monkeypatch
+):
+    # Only (SortError, ValueError, LinAlgError) were ever journaled on
+    # failure; any OTHER exception (e.g. ArithmeticError from stats._betacf)
+    # used to escape AFTER holdout data was read but BEFORE log_trial,
+    # spending the once-only touch with no journal record. Any exception must
+    # now journal an error-kind holdout event before propagating.
+    import trading.alphasearch.sweep as sweep_mod
+
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(sweep_mod, "evaluate_trial", _boom)
+    with pytest.raises(RuntimeError, match="kaboom"):
+        run_holdout(
+            _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
+            holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
+            panel_factory=lambda _u: panel,
+        )
+    holdout_events = [e for e in journal.events() if e.get("kind") == "holdout"]
+    assert len(holdout_events) == 1                  # journaled despite the raise
+    assert holdout_events[0]["error"] is not None
+    assert "RuntimeError" in holdout_events[0]["error"]
+    assert "kaboom" in holdout_events[0]["error"]
+
+
 def test_holdout_refused_when_discovery_alpha_missing(tmp_path):
     # A discovery trial whose L/S alpha journaled as null (NaN -> None) has no
     # usable baseline: refuse in the PRE-checks, BEFORE the once-only touch is
