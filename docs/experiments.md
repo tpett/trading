@@ -274,7 +274,11 @@ artifacts (the model-free monthly premium is zero OOS); there IS a skew premium,
 it needs a 2-3 month hold and is significant only over the crisis-inclusive full sample.
 This is still the most signal any track has shown — but it argues for testing skew as a
 **longer-horizon and/or regime-conditional (high-vol) signal**, and a **long/short
-quarterly spread**, rather than deploying the monthly long-only book. The momentum-vs-skew
+quarterly spread**, rather than deploying the monthly long-only book. A regime split
+confirms the shape: at the 63d horizon the tercile spread is significant in BOTH vol
+regimes and ~2× larger in high-vol months (+5.5%/qtr, t=2.3, vs +2.7%/qtr, t=2.2 in
+calm months; at the monthly horizon neither is significant) — skew earns its keep at a
+quarterly hold and in stress, exactly where the monthly long-only book didn't use it. The momentum-vs-skew
 gap (0.79 vs 0.46) remains real but, given the null cross-sectional premium, reflects
 name-set beta differences more than a repeatable skew edge. (Signal build:
 `src/trading/signals/skew.py`, adversarially reviewed — no lookahead, correct sign,
