@@ -188,6 +188,70 @@ but 16/729 ≈ 2% won't change the conclusion.
    reproducible offline re-run); the census, not the ceiling number, is the
    evidence.
 
+## 9. Options IV-skew — the first differential signal (OPT-1 0.79, OPT-2 0.73; momentum-on-same-names control 0.46)
+
+The orthogonal pivot (momentum is exhausted on liquid US equities; §8). Hypothesis:
+a steep OTM-put vol skew — the market paying up for downside protection — precedes
+LOWER forward stock returns, so ranking a universe by *flat* skew (buying the
+low-skew names) should earn a cross-sectional premium. We trade the **stock** on
+the options **signal**; we never trade the options. Data: ThetaData Standard EOD
+option quotes for the **100 most-liquid S&P 500 + NDX names**, 2019-01..2025-12,
+first-trading-day-of-month decision dates, three contracts per name (ATM, ~10%-OTM
+put, ~10%-OTM call). IV is inverted from the quote **mid** (Black-Scholes,
+`trading.research.options_iv`); `skew_put_atm = IV(otm_put) − IV(atm)`. **6767
+cells, 99.9% with a valid skew, mean +0.059 (97% positive — the textbook equity
+smirk).** The signal plugs into the SAME walk-forward as every equities experiment
+(survivorship-free Tiingo bars for returns/stops/regime, same regime gate, same
+2-hyperparameter grid, same 5 bps cost, same fixed 2026-01-05 holdout). Universe
+restricted to exactly the gathered names via a symbols allowlist.
+
+| Experiment | Ranker | Stitched OOS Sharpe | Total | vs stitched-SPY 0.70 |
+|---|---|---|---|---|
+| **OPT-1 skew level** | `skew_v1` (percentile of −skew_put_atm) | **0.79** | **+64%** | **PASS** |
+| **OPT-2 skew change** | `skew_change_v1` (skew − own trailing mean) | **0.73** | +33% | **PASS** |
+| **Control** | `momentum_v1`, *identical universe + window* | 0.46 | +16% | FAIL |
+
+OOS span 2021-07..2025-12 (30-month train / 3-month test, rolling; 18 windows; 2022
+stress covered). **These are the first gate PASSes in the program** — momentum never
+beat its benchmark (best 0.45).
+
+**What is and isn't established (read this before believing it):**
+- **Skew is a real cross-sectional signal.** The clean control — momentum_v1 on the
+  *exact same 99 names and window and methodology* — scores **0.46** (reproducing the
+  §7 survivorship-free momentum ~0.45, which also validates the harness is
+  consistent). Skew scores **0.79**. So the edge is the SIGNAL, not the universe or
+  the window: skew beats momentum on the same book by **+0.33 Sharpe and 4× the total
+  return**. This is the one airtight comparison (everything held equal), and it is the
+  real result.
+- **But long-only skew only ~ties passive SPY.** By the engine's stitched-benchmark
+  metric skew_v1 beats SPY 0.79 vs 0.70. A naive continuous SPY buy-hold over the same
+  span, however, is ~**0.75 Sharpe / +69%** (the 0.70 is a few points lower because the
+  stitch drops each window's first-day return + low-coverage sessions — applied
+  identically to all three runs, so the *comparisons* hold, but the absolute edge over
+  a passive index is thin). skew_v1's +64% total actually **trails** SPY's +69%. So a
+  long-only book of the 20 lowest-skew large-caps is still ~a large-cap portfolio — the
+  skew premium is real but largely washed out by market beta in a long-only wrapper.
+- **2022 was ugly** (all four quarters −2.9 to −3.6 Sharpe); the outperformance is
+  concentrated 2023-2025. The per-window Sharpes are noisy.
+- **Holdout not yet evaluable.** The ≥2026-01-05 holdout has no data (skew cells end
+  2025-12); it stays reserved until 2026 options are gathered, then run ONCE.
+- **Threshold caveat:** skew_v1's composite is a single-feature percentile (near-uniform),
+  so the `entry_score_threshold` grid axis is nearly inert — the book is effectively
+  "long the ~20 lowest-skew names." Don't compare its tuned threshold to momentum's.
+- **Anti-overfitting:** OOS-only, 2 hyperparameters, journaled (`experiments-equities.jsonl`);
+  but this is ONE universe/window/frequency. Data-quality: 6 of 6761 cells (0.09%) have
+  physically implausible |skew|>0.25 (bad inversions); left unfiltered (percentile-rank
+  caps their effect to one position each).
+
+**Verdict: promising, not yet deployable.** The skew signal clearly beats momentum on
+the same names — the first thing in this program that adds real cross-sectional
+information — but a long-only implementation merely matches SPY. The natural next test
+is a **long/short skew spread** (long low-skew, short high-skew) to harvest the premium
+as market-neutral alpha the long-only book buries under beta, and **OPT-3** (skew as an
+overlay/filter on a core strategy). Both are now motivated by a genuine signal rather
+than a hunch. (Signal build: `src/trading/signals/skew.py` — IVSkewPanel + rankers,
+adversarially reviewed: no lookahead, correct sign, thin-cross-section guard.)
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
@@ -213,3 +277,14 @@ but 16/729 ≈ 2% won't change the conclusion.
   deep-history walk-forward (Kraken's ~720-candle retention; deep history now
   splices from Coinbase). Its go-live additionally requires
   `fee_drag_vs_gross < 30%`.
+- **Long/short skew spread** (the priority follow-up to §9) — long the lowest-skew,
+  short the highest-skew names, market-neutral, to harvest the skew premium that the
+  long-only book (§9) buries under market beta. skew_v1 already beats momentum on the
+  same names; the question is whether the spread earns clean alpha above SPY.
+- **OPT-3 — skew × momentum overlay** — use the skew signal as a filter/tilt on a
+  momentum (or other) core, now that skew is an established differential signal.
+- **OPT holdout** — once 2026 option cells are gathered, evaluate the reserved
+  ≥2026-01-05 holdout ONCE with the frozen OPT-1 params (go-live gate step 2).
+- **Skew robustness** — broaden beyond 100 names (survivorship-free breadth), test
+  daily vs monthly decision frequency, and sensitivity to the handful of
+  implausible-IV cells.

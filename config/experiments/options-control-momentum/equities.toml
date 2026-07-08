@@ -1,0 +1,99 @@
+# CONTROL for the options-skew experiments: momentum_v1 on the EXACT SAME
+# universe (the gathered options names, via the allowlist) and the EXACT SAME
+# window/grid/regime/holdout as config/experiments/options-skew. The ONLY
+# difference is [signals] ranker = momentum_v1 instead of skew_v1.
+#
+# Purpose: isolate the skew signal's contribution. If momentum on these same 99
+# liquid large-caps over 2021-07..2025-12 gets a similar OOS Sharpe to skew_v1,
+# then skew is not the driver -- the universe/window is. If skew_v1 clearly
+# beats this control, the options signal is adding something.
+#
+# Run:
+#   uv run trading backtest --venue equities \
+#       --config-dir config/experiments/options-control-momentum --walk-forward
+# Never point the live/paper scheduler at this directory.
+
+[venue]
+name = "equities"
+benchmark = "SPY"
+
+[costs]
+taker_fee_bps = 0.0
+maker_fee_bps = 0.0
+slippage_bps = 5.0               # identical cost basis to the skew experiments
+settlement_days = 1
+trades_24_7 = false
+
+[universe]
+min_dollar_volume = 20000000.0
+point_in_time = true
+indices = ["sp500", "ndx", "sp400"]
+# SAME universe as the skew experiments: the gathered options names.
+symbols_allowlist_path = "data/options-iv/samples.jsonl"
+
+[signals]
+momentum_windows = [63, 126, 252]
+calendar_days = false
+vol_window = 20
+volume_week = 5
+volume_baseline = 63
+breakout_windows = [20, 60]
+rsi_window = 14
+mean_window = 20
+raw_return_days = 30
+ranker = "momentum_v1"          # THE ONLY DIFFERENCE vs OPT-1
+
+[regime]
+sma_fast = 50
+sma_slow = 200
+vol_window = 20
+vol_lookback = 252
+vol_high_percentile = 0.80
+exposure_risk_on = 1.0
+exposure_neutral = 0.5
+exposure_risk_off = 0.0
+
+[portfolio]
+max_positions = 20
+position_size_pct = 0.045
+starting_balance = 1000.0
+time_stop_bars = 60
+stop_atr_multiple = 1.5
+regime_flush_atr_multiple = 1.0
+cooldown_days = 7
+max_daily_deployment_pct = 0.25
+drawdown_halt_pct = 0.20
+entry_score_threshold = 0.70
+min_raw_return_cost_multiple = 0.0
+earnings_blackout_sessions = 5
+earnings_blackout_enabled = false
+staleness_hours = 2
+atr_window = 20
+session_close_buffer_minutes = 90
+exit_style = "frozen"
+
+[data]
+cache_dir = "data/equities-tiingo"
+bar_source = "tiingo"
+refetch_days = 30
+min_coverage = 0.90
+max_daily_move = 0.40
+history_days = 500
+quarantine_window_days = 40
+drop_incomplete_last_bar = false
+backfill_exchange = ""
+backfill_page_limit = 0
+seam_max_gap_days = 0
+# momentum_v1 needs no skew channel; the allowlist above still restricts the
+# universe to the gathered names so this is a like-for-like control.
+
+[backtest]
+start = 2019-01-01
+holdout_start = 2026-01-05
+train_months = 30
+test_months = 3
+entry_score_threshold_grid = [0.60, 0.65, 0.70, 0.75, 0.80]
+stop_atr_multiple_grid = [1.0, 1.5, 2.0, 2.5]
+min_session_coverage = 0.60
+periods_per_year = 252
+stress_segments = [["2022-01-01", "2022-12-31"]]
