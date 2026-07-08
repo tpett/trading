@@ -58,8 +58,9 @@ def test_rvol21_is_negated_and_zero_for_constant_growth():
     panel = _geometric_panel()
     as_of = panel.closes["SLOW"].index[-1]
     scores = _score("rvol21", panel, as_of)
-    assert scores["SLOW"] == 0.0
-    assert scores["FAST"] == 0.0
+    # Float compounding of (1+r)**i makes the rolling std ~1e-16, not exact zero.
+    assert math.isclose(scores["SLOW"], 0.0, abs_tol=1e-9)
+    assert math.isclose(scores["FAST"], 0.0, abs_tol=1e-9)
 
 
 def test_disthigh_zero_at_high_negative_below():

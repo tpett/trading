@@ -70,9 +70,7 @@ def _rvol(closes: pd.Series, window: int = 21) -> float:
     p = len(closes) - 1
     if p < window:
         return math.nan
-    result = float(closes.iloc[p - window : p].pct_change().std() * math.sqrt(252))
-    # Handle floating-point rounding errors for near-zero values (e.g., constant growth).
-    return 0.0 if abs(result) < 1e-14 else result
+    return float(closes.iloc[p - window : p].pct_change().std() * math.sqrt(252))
 
 
 def _disthigh(closes: pd.Series, window: int = 252) -> float:
