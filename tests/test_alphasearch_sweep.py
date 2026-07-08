@@ -331,3 +331,71 @@ def test_unknown_signal_refused(tmp_path):
     with pytest.raises(SweepError):
         run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
                     "t1", "no_such_signal")
+
+
+def test_holdout_survivor_gate_binds_to_the_exact_discovery_trial(tmp_path):
+    # Two discovery trials for the SAME (signal, universe): the canonical
+    # window FAILS BH while an alternate exploratory window PASSES. The gate
+    # must bind to the specific trial being re-proven -- a surviving row for
+    # some OTHER config must not qualify a holdout whose baseline alpha comes
+    # from the failed canonical trial.
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap", DISCOVERY), ts="t1",
+              result=_result_like(alpha_annual_pct=0.3, alpha_t=0.1, p=0.92))
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap", "2019-01-01..2019-12-31"),
+              ts="t1", result=_result_like(alpha_annual_pct=12.0, alpha_t=8.0, p=1e-8))
+    rows, _ = build_leaderboard(journal)
+    assert any(r.signal == "mom21" and r.bh_pass for r in rows)  # the decoy survives
+    with pytest.raises(SweepError):
+        run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
+                    "t2", "mom21", holdout_start=HOLDOUT_FROM,
+                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+    assert all(e.get("kind") != "holdout" for e in journal.events())
+
+
+def test_holdout_journals_the_actual_params(tmp_path):
+    # A caller-overridden sort parameter must land in the journaled holdout
+    # config (and its hash) -- recording what evaluate_trial truly ran -- and
+    # the discovery lookup must use those same params.
+    from trading.alphasearch.sweep import trial_config, trial_config_hash
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=DISCOVERY, quantiles=4,
+              panel_factory=lambda _u: panel)
+    outcome = run_holdout(
+        _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
+        holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY, quantiles=4,
+        panel_factory=lambda _u: panel,
+    )
+    assert outcome.event["params"]["quantiles"] == 4
+    default_hash = trial_config_hash(
+        trial_config("mom21", "largecap", outcome.window)
+    )
+    assert outcome.event["config_hash"] != default_hash
+
+
+def test_holdout_refused_when_discovery_alpha_missing(tmp_path):
+    # A discovery trial whose L/S alpha journaled as null (NaN -> None) has no
+    # usable baseline: refuse in the PRE-checks, BEFORE the once-only touch is
+    # spent -- crashing after journaling would burn the holdout for nothing.
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    broken = _result_like(alpha_annual_pct=float("nan"), alpha_t=8.0, p=1e-8)
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap", DISCOVERY),
+              ts="t1", result=broken)
+    with pytest.raises(SweepError):
+        run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
+                    "t2", "mom21", holdout_start=HOLDOUT_FROM,
+                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+    assert all(e.get("kind") != "holdout" for e in journal.events())

@@ -44,16 +44,22 @@ DISCOVERY_WINDOW = "2019-01-01..2023-12-31"   # pre-registered (spec 5.1)
 HOLDOUT_START = "2024-01-01"                  # pre-registered (spec 5.3)
 BH_Q = 0.10                                   # pre-registered (spec 5.2)
 HOLDOUT_PASS_RATIO = 0.5                      # pre-registered (spec 3.6)
-# Every parameter that can change a trial's outcome MUST appear here (and in
-# run_sweep's params), or a re-run with a changed value would dedupe against
-# the stale trial -- breaking the "any changed parameter is a NEW trial" rule.
-DEFAULT_PARAMS = {
-    "quantiles": QUANTILES,
-    "weighting": "equal",
-    "cadence": "monthly",
-    "tercile_below": TERCILE_BELOW,
-    "min_names": MIN_NAMES,
-}
+# Every parameter that can change a trial's outcome MUST appear here, or a
+# re-run with a changed value would dedupe against the stale trial -- breaking
+# the "any changed parameter is a NEW trial" rule. run_sweep AND run_holdout
+# both build their hashed params through this one constructor so the journaled
+# config always records what evaluate_trial truly ran.
+def _hashed_params(quantiles: int, tercile_below: int, min_names: int) -> dict:
+    return {
+        "quantiles": quantiles,
+        "weighting": "equal",
+        "cadence": "monthly",
+        "tercile_below": tercile_below,
+        "min_names": min_names,
+    }
+
+
+DEFAULT_PARAMS = _hashed_params(QUANTILES, TERCILE_BELOW, MIN_NAMES)
 
 
 class SweepError(RuntimeError):
@@ -164,11 +170,16 @@ def prior_holdout_trial(journal: Journal, signal: str, universe: str) -> dict | 
 
 
 def find_discovery_trial(
-    journal: Journal, signal: str, universe: str, window: str = DISCOVERY_WINDOW
+    journal: Journal,
+    signal: str,
+    universe: str,
+    window: str = DISCOVERY_WINDOW,
+    params: dict | None = None,
 ) -> dict | None:
-    """The default-params discovery trial for (signal, universe), by exact
-    config hash -- the reference a holdout is compared against."""
-    wanted = trial_config_hash(trial_config(signal, universe, window))
+    """The discovery trial for (signal, universe) under `params` (defaults:
+    DEFAULT_PARAMS), by exact config hash -- the reference a holdout is
+    compared against."""
+    wanted = trial_config_hash(trial_config(signal, universe, window, params=params))
     for event in load_trials(journal):
         if event.get("kind") == "discovery" and event.get("config_hash") == wanted:
             return event
@@ -408,6 +419,19 @@ def build_leaderboard(journal: Journal) -> tuple[list[LeaderboardRow], int]:
     return rows, n_trials
 
 
+def _bh_survivor_hashes(journal: Journal) -> set[str]:
+    """Config hashes of the discovery trials that CURRENTLY clear the BH gate.
+
+    Hash-keyed on purpose: a holdout gate matching on (signal, universe) alone
+    would let an unrelated exploratory trial (different window/params) that
+    passed BH qualify a holdout for the FAILED canonical trial."""
+    trials = discovery_trials(journal)
+    if not trials:
+        return set()
+    mask = stats.bh_fdr(np.array([_pval(t) for t in trials]), q=BH_Q)
+    return {t["config_hash"] for t, ok in zip(trials, mask, strict=True) if ok}
+
+
 # --------------------------------------------------------------------------- #
 # The sweep runner (spec 3.6)
 # --------------------------------------------------------------------------- #
@@ -432,13 +456,7 @@ def run_sweep(
         # selection to the full registry; sweeping nothing is a caller bug.
         raise SweepError("no signals selected")
     chosen = SIGNALS if signals is None else signals
-    params = {
-        "quantiles": quantiles,
-        "weighting": "equal",
-        "cadence": "monthly",
-        "tercile_below": tercile_below,
-        "min_names": min_names,
-    }
+    params = _hashed_params(quantiles, tercile_below, min_names)
     # Validate the FULL signal x universe cross-product BEFORE any trial runs
     # (spec section 6: refused at sweep-ASSEMBLY time). Checking per-universe
     # inside the trial loop would abort mid-sweep, making "which trials got
@@ -529,34 +547,47 @@ def run_holdout(
     """Evaluate ONE BH survivor on the reserved holdout window.
 
     Refusals (SweepError) protect the once-only holdout: unknown signal; no
-    clean default-params discovery trial; not a current BH survivor; already
-    holdout-touched unless confirm() returns the literal RERUN_CONFIRMATION.
-    The realized window end (latest bar) is journaled so the evaluation is
-    exactly reproducible.
+    clean same-params discovery trial with a usable alpha; that EXACT trial
+    (by config hash, never merely the (signal, universe) pair) not a current
+    BH survivor; already holdout-touched unless confirm() returns the literal
+    RERUN_CONFIRMATION. The realized window end (latest bar) is journaled so
+    the evaluation is exactly reproducible.
     """
     if signal_name not in SIGNALS:
         known = ", ".join(sorted(SIGNALS))
         raise SweepError(f"unknown signal {signal_name!r}; known: {known}")
-    discovery = find_discovery_trial(journal, signal_name, uspec.name, discovery_window)
+    params = _hashed_params(quantiles, tercile_below, min_names)
+    discovery = find_discovery_trial(
+        journal, signal_name, uspec.name, discovery_window, params=params
+    )
     if discovery is None:
         raise SweepError(
             f"no discovery trial for {signal_name}:{uspec.name} over "
-            f"{discovery_window}; run the sweep first"
+            f"{discovery_window} with matching params; run the sweep first"
         )
     if discovery.get("error"):
         raise SweepError(
             f"discovery trial for {signal_name}:{uspec.name} errored "
             f"({discovery['error']}); nothing to re-prove"
         )
-    rows, _ = build_leaderboard(journal)
-    survivor = any(
-        row.signal == signal_name and row.universe == uspec.name and row.bh_pass
-        for row in rows
-    )
-    if not survivor:
+    discovery_alpha_raw = (discovery.get("ls") or {}).get("alpha_annual_pct")
+    if discovery_alpha_raw is None:
+        # Journaled NaN -> null: no usable baseline. Refuse HERE, before the
+        # once-only touch is spent -- crashing after log_trial would burn it.
         raise SweepError(
-            f"{signal_name}:{uspec.name} is not a current BH survivor "
-            f"(q={BH_Q}); the once-only holdout is reserved for survivors"
+            f"discovery trial for {signal_name}:{uspec.name} has no usable "
+            f"L/S alpha (journaled as null); nothing to re-prove against"
+        )
+    discovery_alpha = float(discovery_alpha_raw)
+    # Bind the gate to the EXACT trial being re-proven: an unrelated
+    # (signal, universe) row that survived BH under a different window/params
+    # must not spend the holdout against THIS trial's baseline alpha.
+    if discovery["config_hash"] not in _bh_survivor_hashes(journal):
+        raise SweepError(
+            f"discovery trial {discovery['config_hash']} for "
+            f"{signal_name}:{uspec.name} over {discovery_window} is not a "
+            f"current BH survivor (q={BH_Q}); the once-only holdout is "
+            f"reserved for survivors"
         )
     prior = prior_holdout_trial(journal, signal_name, uspec.name)
     if prior is not None and confirm() != RERUN_CONFIRMATION:
@@ -569,7 +600,7 @@ def run_holdout(
     spec = SIGNALS[signal_name]
     _check_universe_supports(panel, spec, uspec.name)
     window = f"{holdout_start}..{latest_bar_date(panel).date().isoformat()}"
-    config = trial_config(signal_name, uspec.name, window)
+    config = trial_config(signal_name, uspec.name, window, params=params)
     try:
         result: dict | None = evaluate_trial(
             panel, spec, window, factors,
@@ -582,7 +613,6 @@ def run_holdout(
     event = log_trial(journal, kind="holdout", config=config, ts=ts,
                       result=result, error=error)
 
-    discovery_alpha = float(discovery["ls"]["alpha_annual_pct"])
     if result is None:
         return HoldoutOutcome(event, None, discovery_alpha, None, window)
     holdout_alpha = float(result["ls"]["alpha_annual_pct"])
