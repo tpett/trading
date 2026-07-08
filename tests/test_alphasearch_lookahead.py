@@ -48,6 +48,7 @@ def test_fixture_actually_has_data_after_the_cutoff():
 
 
 def test_no_registered_signal_can_see_past_as_of():
+    assert SIGNALS, "registry unexpectedly empty"  # never pass vacuously
     panel = make_panel()
     dates = list(panel.decision_dates(START, CUTOFF))
     assert len(dates) >= 3  # several decision months at or before the cutoff

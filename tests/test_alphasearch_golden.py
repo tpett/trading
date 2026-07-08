@@ -67,6 +67,8 @@ def test_golden_sweep_end_to_end(tmp_path):
     # that are flagged AND still spend trials.
     errored = {r.signal for r in rows if r.error is not None}
     assert {"mom126", "mom252"} <= errored
+    # Error trials carry p=NaN -> 1.0: they must never clear the BH gate.
+    assert not any(r.bh_pass for r in rows if r.signal in {"mom126", "mom252"})
     # The engineered momentum spread is a standout survivor with full stats.
     mom = next(r for r in rows if r.signal == "mom21")
     assert mom.bh_pass
