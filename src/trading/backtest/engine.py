@@ -27,6 +27,7 @@ from trading.fundamentals.store import FundamentalsStore
 from trading.pipeline import PipelineDataError, RankingsResult, assemble_rankings
 from trading.signals.engine import FeaturePanel
 from trading.signals.registry import get_ranker
+from trading.signals.skew import IVSkewPanel, load_skew_store
 from trading.simulator.core import step
 from trading.simulator.fills import Fill
 from trading.simulator.state import initial_state
@@ -180,6 +181,14 @@ def prepare(
         # bars: nothing FILED after a session may influence it.
         fundamentals_all = FundamentalsStore(Path(config.data.fundamentals_dir)).load(union)
 
+    # IV-skew side channel: load the whole store once and build the panel; each
+    # session gathers the as-of skew below (searchsorted, no rescan). Same
+    # no-lookahead discipline as bars/fundamentals -- gather only returns
+    # decisions dated on/before the session.
+    skew_panel: IVSkewPanel | None = None
+    if spec.requires_skew:
+        skew_panel = IVSkewPanel.from_store(load_skew_store(config.data.skew_samples))
+
     sessions: list[SessionPlan] = []
     for ts in session_index:
         infos = members_by_session[ts]
@@ -227,6 +236,9 @@ def prepare(
                 for symbol, frame in fundamentals_all.items()
                 if not (window := frame.loc[:ts]).empty
             }
+        skew = None
+        if skew_panel is not None:
+            skew = skew_panel.gather([i.symbol for i in available], ts)
         try:
             rankings = assemble_rankings(
                 config,
@@ -235,6 +247,7 @@ def prepare(
                 benchmark.loc[:ts],
                 ts.date(),
                 fundamentals=fundamentals,
+                skew=skew,
                 feature_panel=feature_panel,
             )
         except PipelineDataError as exc:

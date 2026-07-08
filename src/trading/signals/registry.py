@@ -62,22 +62,34 @@ import pandas as pd
 from trading.config import SignalConfig
 from trading.signals.engine import FeaturePanel, compute_features
 from trading.signals.quality import quality_momentum_v1
+from trading.signals.skew import skew_change_v1, skew_v1
 from trading.signals.value import value_momentum_v1
 
 RankerFn = Callable[..., pd.DataFrame]
-"""fn(bars, as_of, config, fundamentals=None, *, panel=None) -> DataFrame.
+"""fn(bars, as_of, config, fundamentals=None, *, skew=None, panel=None) -> DataFrame.
 
 `panel` is an optional precomputed FeaturePanel (trading.signals.engine): the
 backtester builds one for the whole run so per-session ranking is a gather,
 not a rolling recompute. When None, the ranker builds features from `bars`
 directly (the live path). Passing it never changes results -- a panel gathered
-at as_of equals a from-scratch compute at as_of (no lookahead)."""
+at as_of equals a from-scratch compute at as_of (no lookahead).
+
+`skew` is the optional per-session IV-skew side channel (trading.signals.skew):
+a dict of per-symbol skew history truncated to <= as_of, exactly the shape
+`fundamentals` takes, loaded by the I/O layers only when the spec sets
+requires_skew. None (the momentum/quality/value default) means no skew -- those
+rankers ignore the kwarg."""
 
 
 @dataclass(frozen=True)
 class RankerSpec:
     fn: RankerFn
     requires_fundamentals: bool
+    # Parallel to requires_fundamentals: tells the I/O layers (pipeline /
+    # backtest prepare) to load the IV-skew store and build an IVSkewPanel
+    # before ranking, and gather the as-of skew per session. Defaulted False so
+    # existing specs and their construction sites stay unchanged.
+    requires_skew: bool = False
 
 
 def _momentum_v1(
@@ -86,9 +98,10 @@ def _momentum_v1(
     config: SignalConfig,
     fundamentals: dict[str, pd.DataFrame] | None = None,
     *,
+    skew: dict[str, pd.DataFrame] | None = None,
     panel: FeaturePanel | None = None,
 ) -> pd.DataFrame:
-    """v2-contract adapter: momentum_v1 has no fundamentals input by design."""
+    """v2-contract adapter: momentum_v1 has no fundamentals or skew input by design."""
     return compute_features(bars, as_of, config, panel=panel)
 
 
@@ -96,6 +109,8 @@ RANKERS: dict[str, RankerSpec] = {
     "momentum_v1": RankerSpec(_momentum_v1, requires_fundamentals=False),
     "quality_momentum_v1": RankerSpec(quality_momentum_v1, requires_fundamentals=True),
     "value_momentum_v1": RankerSpec(value_momentum_v1, requires_fundamentals=True),
+    "skew_v1": RankerSpec(skew_v1, requires_fundamentals=False, requires_skew=True),
+    "skew_change_v1": RankerSpec(skew_change_v1, requires_fundamentals=False, requires_skew=True),
 }
 
 

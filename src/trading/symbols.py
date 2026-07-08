@@ -32,6 +32,9 @@ and the price-fetch path share one reviewed table.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pandas as pd
 
 # (old_symbol, new_symbol, change_date). Reviewed ticker renames among 2017+
@@ -168,3 +171,44 @@ def resolution_collisions(membership: pd.DataFrame, indices: tuple[str, ...]) ->
                         }
                     )
     return out
+
+
+def load_symbol_allowlist(path: str | Path) -> frozenset[str]:
+    """Distinct symbols named by an allowlist file, for restricting a universe.
+
+    Tolerant of two formats so one helper serves both a hand-written list and a
+    gather's own output:
+
+    * JSONL -- a line parsing to a JSON object contributes its ``"symbol"``
+      value (an options ``samples.jsonl`` line is exactly this). An unparseable
+      line -- e.g. the torn final line a killed gather leaves -- is skipped, the
+      same discipline the JSONL loaders use.
+    * Plain -- any non-JSON, non-blank, non-``#``-comment line is taken as a
+      bare ticker.
+
+    A missing file raises FileNotFoundError: an allowlist that was ASKED for but
+    is absent must fail loudly, not silently widen the universe back to
+    everything. The result is symbols only -- intersecting it with real
+    point-in-time membership stays the adapter's job (a name in the list but not
+    a PIT member on a given date is still correctly excluded that session).
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"symbols allowlist not found: {path}")
+    symbols: set[str] = set()
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            symbols.add(line)  # bare ticker
+            continue
+        if isinstance(parsed, dict):
+            symbol = parsed.get("symbol")
+            if symbol:
+                symbols.add(str(symbol))
+        elif isinstance(parsed, str):
+            symbols.add(parsed)
+    return frozenset(symbols)

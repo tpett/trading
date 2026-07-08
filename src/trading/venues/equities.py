@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading.config import VenueConfig
-from trading.symbols import resolve_current
+from trading.symbols import load_symbol_allowlist, resolve_current
 from trading.venues.base import (
     EXTENDED_OHLCV_COLUMNS,
     OHLCV_COLUMNS,
@@ -257,6 +257,9 @@ class EquitiesAdapter:
         self._config = config
         self._membership_csv = membership_csv or DEFAULT_MEMBERSHIP_CSV
         self._membership: pd.DataFrame | None = None
+        # Loaded lazily on first universe() call; -1 is the "not yet loaded"
+        # sentinel (None is a legitimate "no allowlist configured" value).
+        self._allowlist: frozenset[str] | None | int = -1
 
     def _load_membership(self) -> pd.DataFrame:
         # Cached in memory: the backtester calls universe() once per session
@@ -266,12 +269,28 @@ class EquitiesAdapter:
             self._membership = df
         return self._membership
 
+    def _allowlist_symbols(self) -> frozenset[str] | None:
+        """The configured symbols allowlist (cached), or None when unset.
+
+        Cached in memory: universe() runs ~once per backtest session (thousands
+        of calls per span); re-reading the file each call is waste."""
+        if self._allowlist == -1:
+            path = self._config.universe.symbols_allowlist_path
+            self._allowlist = load_symbol_allowlist(path) if path else None
+        return self._allowlist  # type: ignore[return-value]
+
     def universe(self, as_of: datetime.date) -> list[SymbolInfo]:
         """Point-in-time membership as-of the given date, restricted to
         config.universe.indices (spec: backtesting today's members over the
         past is prohibited). Default indices = ("sp500", "ndx"): sp400 rows
         exist in the CSV but are excluded unless a config opts in, so live's
-        universe(as_of=today()) is unchanged by sp400's addition."""
+        universe(as_of=today()) is unchanged by sp400's addition.
+
+        When config.universe.symbols_allowlist_path is set (the options-skew
+        experiment), the result is further intersected with that allowlist so a
+        run trades only the gathered names -- still PIT-safe: a listed name
+        absent from the allowlist is dropped, and an allowlisted name not yet a
+        member on `as_of` is still correctly excluded by the membership filter."""
         df = self._load_membership()
         iso = as_of.isoformat()
         active = df[
@@ -279,7 +298,11 @@ class EquitiesAdapter:
             & (df["start"] <= iso)
             & ((df["end"] == "") | (iso < df["end"]))
         ]
-        return [SymbolInfo(symbol=s, status="tradable") for s in sorted(set(active["symbol"]))]
+        symbols = sorted(set(active["symbol"]))
+        allow = self._allowlist_symbols()
+        if allow is not None:
+            symbols = [s for s in symbols if s in allow]
+        return [SymbolInfo(symbol=s, status="tradable") for s in symbols]
 
     def membership_intervals(self, symbol: str) -> list[tuple[str, str]]:
         """All committed (start, end) intervals for `symbol`, across every

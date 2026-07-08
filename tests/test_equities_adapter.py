@@ -77,6 +77,28 @@ def test_universe_includes_sp400_when_config_opts_in(tmp_path):
     assert symbols == {"AAA", "CCC", "DDD"}
 
 
+def test_universe_restricted_by_symbols_allowlist(tmp_path):
+    # The options-skew experiment path: symbols_allowlist_path narrows the PIT
+    # universe to the gathered names, still respecting point-in-time membership.
+    from dataclasses import replace
+
+    path = tmp_path / "membership.csv"
+    path.write_text(MEMBERSHIP_CSV)
+    # A samples.jsonl-shaped allowlist: only AAA is "gathered".
+    allow = tmp_path / "samples.jsonl"
+    allow.write_text('{"symbol": "AAA", "decision_date": "2019-01-02", "skew_put_atm": 0.05}\n')
+    config = replace(
+        CONFIG, universe=replace(CONFIG.universe, symbols_allowlist_path=str(allow))
+    )
+    adapter = EquitiesAdapter(config, membership_csv=path)
+    # 2019: PIT members are {AAA, BBB} but only AAA is allowlisted.
+    assert {i.symbol for i in adapter.universe(datetime.date(2019, 1, 2))} == {"AAA"}
+    # An allowlisted name that is NOT a PIT member on a date stays excluded
+    # (membership filter still applies): AAA is a member throughout, CCC is not
+    # allowlisted, so 2021 also yields just AAA.
+    assert {i.symbol for i in adapter.universe(datetime.date(2021, 1, 4))} == {"AAA"}
+
+
 def test_membership_intervals_returns_all_indices_unfiltered(tmp_path):
     # membership_intervals is index-agnostic by design (the recycling guard
     # cares whether a ticker is a current member of ANYTHING, not just the

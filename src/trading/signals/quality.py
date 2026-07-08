@@ -47,6 +47,7 @@ def quality_momentum_v1(
     config: SignalConfig,
     fundamentals: dict[str, pd.DataFrame] | None,
     *,
+    skew: dict[str, pd.DataFrame] | None = None,
     panel: FeaturePanel | None = None,
 ) -> pd.DataFrame:
     base = compute_features(bars, as_of, config, panel=panel)

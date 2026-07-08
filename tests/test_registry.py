@@ -61,3 +61,26 @@ def test_momentum_v1_ignores_fundamentals_and_matches_compute_features():
     direct = compute_features(bars, as_of, CONFIG)
     pd.testing.assert_frame_equal(with_none, direct)
     pd.testing.assert_frame_equal(with_junk, direct)
+
+
+def test_default_specs_do_not_require_skew():
+    for name in ("momentum_v1", "quality_momentum_v1", "value_momentum_v1"):
+        assert get_ranker(name).requires_skew is False
+
+
+def test_skew_specs_registered_with_requires_skew():
+    for name in ("skew_v1", "skew_change_v1"):
+        spec = get_ranker(name)
+        assert isinstance(spec, RankerSpec)
+        assert spec.requires_skew is True
+        assert spec.requires_fundamentals is False
+
+
+def test_momentum_v1_accepts_and_ignores_skew_kwarg():
+    bars = {"UP": _trending_bars(0.01), "DOWN": _trending_bars(-0.01)}
+    as_of = bars["UP"].index[-1]
+    fn = get_ranker("momentum_v1").fn
+    pd.testing.assert_frame_equal(
+        fn(bars, as_of, CONFIG, None, skew={"UP": pd.DataFrame()}),
+        compute_features(bars, as_of, CONFIG),
+    )

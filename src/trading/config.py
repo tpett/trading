@@ -37,6 +37,14 @@ class UniverseConfig:
     # config, never a live/paper change. Ignored by venues (crypto) whose
     # universe() doesn't read that CSV.
     indices: tuple[str, ...] = ("sp500", "ndx")
+    # Optional path to an allowlist file that FURTHER restricts the point-in-time
+    # universe to the symbols it names (their intersection with PIT membership).
+    # Used by the options-skew experiment to trade ONLY the names an options
+    # gather covered: pointing this at that gather's samples.jsonl auto-restricts
+    # the universe to exactly the gathered symbols, no hand-maintained list. ""
+    # (the default) disables it, so live/paper is unaffected. See
+    # trading.symbols.load_symbol_allowlist for the tolerant file format.
+    symbols_allowlist_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -134,6 +142,14 @@ class DataConfig:
     # stops cleanly once this elapses, keeping symbols already processed and
     # deferring the remainder to next run (see trading.runner).
     fundamentals_refresh_budget_s: int = 900
+    # IV-skew overlay (used only when [signals] ranker sets requires_skew --
+    # skew_v1 / skew_change_v1; the default momentum_v1 never touches it). Path
+    # to the gathered options samples.jsonl (one skew cell per symbol/decision-
+    # month). "" means "this venue has no skew" (crypto, live equities); a
+    # skew-requiring ranker refuses to load with it empty. Data plumbing, NOT a
+    # tunable hyperparameter. Defaulted (like fundamentals_dir) so frozen
+    # test-venue TOMLs keep loading.
+    skew_samples: str = ""
 
 
 @dataclass(frozen=True)
@@ -217,6 +233,12 @@ def load_venue_config(venue: str, config_dir: Path) -> VenueConfig:
         raise ValueError(
             f"ranker {signals['ranker']!r} requires [data] fundamentals_refresh_budget_s >= 1"
         )
+    if spec.requires_skew and not data_config.skew_samples:
+        # Same fail-fast shape as the fundamentals_dir check: a skew-requiring
+        # ranker with no [data] skew_samples is a misconfiguration, not a
+        # legitimately empty channel, so it must fail at load rather than
+        # silently rank every symbol neutral.
+        raise ValueError(f"ranker {signals['ranker']!r} requires [data] skew_samples to be set")
     backtest = dict(raw["backtest"])
     backtest["entry_score_threshold_grid"] = tuple(backtest["entry_score_threshold_grid"])
     backtest["stop_atr_multiple_grid"] = tuple(backtest["stop_atr_multiple_grid"])

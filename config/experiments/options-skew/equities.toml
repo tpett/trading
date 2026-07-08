@@ -1,0 +1,115 @@
+# EXPERIMENT CONFIG (OPT-1): cross-sectional IV-skew LEVEL.
+#
+# Trades the STOCK on an options SIGNAL. Identical in structure to
+# config/experiments/midcap/equities.toml (same regime gate, same 2-hyperparameter
+# walk-forward grid, same SPY gate, same fixed 2026-01-05 holdout) except:
+#   * [signals] ranker = skew_v1                     (the OPT-1 level ranker)
+#   * [data] skew_samples points at the gathered options cells
+#   * [universe] symbols_allowlist_path RESTRICTS the universe to exactly the
+#     gathered names (see that key), so non-covered names never dilute the book.
+#
+# Run:
+#   uv run python -m trading backtest --venue equities \
+#       --config-dir config/experiments/options-skew --walk-forward
+# Never point the live/paper scheduler at this directory.
+
+[venue]
+name = "equities"
+benchmark = "SPY"
+
+[costs]
+taker_fee_bps = 0.0      # zero commission (spec)
+maker_fee_bps = 0.0
+# 5 bps: the options-covered names are liquid, optionable large-caps, and this
+# run shares the tiingo equities cache (cache_dir below) -- so it matches the
+# config/experiments/tiingo cost basis rather than the 15 bps mid-cap guard.
+slippage_bps = 5.0
+settlement_days = 1      # T+1 cash account (spec)
+trades_24_7 = false
+
+[universe]
+min_dollar_volume = 20000000.0  # entry-filter floor (M2 applies it; spec: config)
+point_in_time = true            # PIT membership intervals: a member missing data
+                                # is a data outage and degrades backtest coverage
+# Broad index set so any gathered name that is a member of ANY tracked index
+# survives the membership filter; the allowlist below then narrows to exactly
+# the gathered symbols. (This is a backtest-only config, never live/paper.)
+indices = ["sp500", "ndx", "sp400"]
+# Restrict the point-in-time universe to the names the options gather covered:
+# pointing this at the gather's own samples.jsonl auto-restricts to exactly the
+# gathered symbols, no hand-maintained list, and re-reads whatever the gather
+# has produced. Empty (the default elsewhere) leaves live/paper unaffected.
+symbols_allowlist_path = "data/options-iv/samples.jsonl"
+
+[signals]
+momentum_windows = [63, 126, 252]  # trading days (spec)
+calendar_days = false           # lookbacks in trading-day rows
+vol_window = 20                 # realized-vol window for vol adjustment
+volume_week = 5                 # "current week" = 5 trading days
+volume_baseline = 63            # trailing 3 months = 63 trading days
+breakout_windows = [20, 60]     # spec: distance from 20/60-day highs
+rsi_window = 14                 # spec: RSI-14 stretch
+mean_window = 20                # spec: distance above 20-day mean
+raw_return_days = 30            # raw 30-day return (calendar); feeds the M2 fee gate
+ranker = "skew_v1"              # OPT-1: composite = cross-sectional percentile of -skew_put_atm
+
+[regime]
+sma_fast = 50
+sma_slow = 200
+vol_window = 20
+vol_lookback = 252
+vol_high_percentile = 0.80
+exposure_risk_on = 1.0
+exposure_neutral = 0.5
+exposure_risk_off = 0.0
+
+[portfolio]
+max_positions = 20
+position_size_pct = 0.045
+starting_balance = 1000.0
+time_stop_bars = 60                 # 20 sessions (spec)
+stop_atr_multiple = 1.5
+regime_flush_atr_multiple = 1.0
+cooldown_days = 7
+max_daily_deployment_pct = 0.25
+drawdown_halt_pct = 0.20
+entry_score_threshold = 0.70        # tunable hyperparameter #1 (spec)
+min_raw_return_cost_multiple = 0.0  # fee gate off for equities
+earnings_blackout_sessions = 5
+earnings_blackout_enabled = false
+staleness_hours = 2
+atr_window = 20                     # ATR-20 (spec); frozen at entry
+session_close_buffer_minutes = 90
+exit_style = "frozen"
+
+[data]
+cache_dir = "data/equities-tiingo"   # shares the survivorship-free tiingo cache
+bar_source = "tiingo"
+refetch_days = 30
+min_coverage = 0.90
+max_daily_move = 0.40
+history_days = 500
+quarantine_window_days = 40
+drop_incomplete_last_bar = false
+backfill_exchange = ""
+backfill_page_limit = 0
+seam_max_gap_days = 0
+# IV-skew overlay: one gathered cell per (symbol, decision-month). skew_v1
+# reads the as-of skew_put_atm from here. fundamentals_dir stays empty --
+# skew_v1 does not require fundamentals.
+skew_samples = "data/options-iv/samples.jsonl"
+
+[backtest]  # spec: Backtesting & Validation
+# Skew cells begin 2019-01 (first trading day of each month, 2019-01..2025-12);
+# start the study there. Bars warm up from the deeper tiingo history.
+start = 2019-01-01
+holdout_start = 2026-01-05   # FIXED holdout boundary; data ends 2025-12 so it is untouched automatically
+train_months = 30            # spec: tune on 24-36 months
+test_months = 3              # spec: test on the following 3 months, roll
+entry_score_threshold_grid = [0.60, 0.65, 0.70, 0.75, 0.80]
+stop_atr_multiple_grid = [1.0, 1.5, 2.0, 2.5]
+min_session_coverage = 0.60
+periods_per_year = 252
+# First OOS test window (~2021-07 with a 30-month train from 2019-01) rolls
+# forward through 2022, so the stitched OOS fully covers this stress segment.
+stress_segments = [["2022-01-01", "2022-12-31"]]

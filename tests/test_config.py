@@ -198,3 +198,35 @@ def test_value_experiment_config_loads():
     config = load_venue_config("equities", Path("config") / "experiments" / "value")
     assert config.signals.ranker == "value_momentum_v1"
     assert config.data.fundamentals_dir == "data/fundamentals/equities"
+
+
+def test_skew_data_keys_default_empty_in_real_configs():
+    # skew_samples / symbols_allowlist_path are experiment-only overlays: the
+    # default equities/crypto configs leave them empty (live/paper unaffected).
+    for venue in ("equities", "crypto"):
+        config = load_venue_config(venue, Path("config"))
+        assert config.data.skew_samples == ""
+        assert config.universe.symbols_allowlist_path == ""
+
+
+def test_options_skew_experiment_config_loads():
+    config = load_venue_config("equities", Path("config") / "experiments" / "options-skew")
+    assert config.signals.ranker == "skew_v1"
+    assert config.data.skew_samples == "data/options-iv/samples.jsonl"
+    assert config.universe.symbols_allowlist_path == "data/options-iv/samples.jsonl"
+
+
+def test_options_skew_change_experiment_config_loads():
+    config = load_venue_config("equities", Path("config") / "experiments" / "options-skew-change")
+    assert config.signals.ranker == "skew_change_v1"
+    assert config.data.skew_samples == "data/options-iv/samples.jsonl"
+
+
+def test_skew_requiring_ranker_with_empty_samples_fails_at_load(tmp_path):
+    text = (Path("config") / "experiments" / "options-skew" / "equities.toml").read_text()
+    text = text.replace(
+        'skew_samples = "data/options-iv/samples.jsonl"', 'skew_samples = ""'
+    )
+    (tmp_path / "equities.toml").write_text(text)
+    with pytest.raises(ValueError, match="skew_samples"):
+        load_venue_config("equities", tmp_path)
