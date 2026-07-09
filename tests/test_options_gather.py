@@ -21,6 +21,7 @@ from trading.research.options_gather import (
     FAR_MIN_DTE,
     OI_PATH,
     ThetaClient,
+    backup_v1,
     build_cell,
     build_universe,
     build_work_items,
@@ -1151,3 +1152,64 @@ def test_enriched_cell_json_round_trip_and_resume_key(tmp_path: Path):
     out = tmp_path / "samples.jsonl"
     out.write_text(line + "\n")
     assert load_existing_keys(out) == {("AAA", "2019-03-01")}
+
+
+# --- v2 fresh-gather backup + resume under the enriched schema ---------------
+
+
+def test_backup_v1_renames_once_and_refuses_clobber(tmp_path: Path):
+    out = tmp_path / "samples.jsonl"
+    out.write_text('{"symbol":"AAA","decision_date":"2019-01-01"}\n')
+    backup = backup_v1(out)
+    assert backup == tmp_path / "samples.v1.jsonl"
+    assert not out.exists() and backup.exists()
+    # A second fresh run must NEVER destroy the v1 baseline.
+    out.write_text("regathered\n")
+    with pytest.raises(FileExistsError):
+        backup_v1(out)
+    assert backup.read_text().startswith('{"symbol"')  # baseline untouched
+    # Nothing to back up -> None, no file created.
+    assert backup_v1(tmp_path / "absent.jsonl") is None
+    # The mid-cap file maps to its own backup name.
+    mid = tmp_path / "samples-midcap.jsonl"
+    mid.write_text("x\n")
+    assert backup_v1(mid) == tmp_path / "samples-midcap.v1.jsonl"
+
+
+def test_run_gather_resume_skips_enriched_cells(tmp_path: Path):
+    """The completed-cell skip must hold when the existing file contains
+    v2-enriched cells (OI/greeks/far): keys are (symbol, decision_date), and
+    a second run adds nothing."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    raw_dir = tmp_path / "raw"
+    _write_underlying(cache_dir, "AAA")
+    _write_raw(raw_dir, "AAA", 100.0)
+    out = tmp_path / "samples.jsonl"
+
+    hist = _full_history()
+    oi = {
+        (100.0, "C"): [], (90.0, "P"): [], (110.0, "C"): [],
+    }
+    for key, bars in hist.items():
+        oi[key] = [{"date": b["last_trade"][:10], "open_interest": 500} for b in bars]
+    client = FakeClient(
+        expirations=["2019-02-15", "2019-03-15", "2019-04-18"],
+        strikes=[90.0, 100.0, 110.0],
+        history=hist,
+        open_interest=oi,
+    )
+    kwargs = dict(
+        symbols=["AAA"], start_month="2019-01", end_month="2019-03",
+        cache_dir=cache_dir, raw_dir=raw_dir, membership_csv=tmp_path / "unused.csv",
+    )
+    summary1 = run_gather(client, out, **kwargs)
+    assert summary1["written"] > 0
+    first = out.read_text().splitlines()
+    cells = [json.loads(x) for x in first]
+    assert all(
+        any("open_interest" in c for c in cell["contracts"]) for cell in cells
+    )  # the file really is enriched
+    summary2 = run_gather(client, out, **kwargs)
+    assert summary2["cells_attempted"] == 0
+    assert out.read_text().splitlines() == first

@@ -25,7 +25,7 @@ import logging
 import sys
 from pathlib import Path
 
-from trading.research.options_gather import ThetaClient, run_gather
+from trading.research.options_gather import ThetaClient, backup_v1, run_gather
 from trading.venues.equities import DEFAULT_MEMBERSHIP_CSV
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,11 +66,24 @@ def main(argv: list[str] | None = None) -> int:
         default=["sp500", "ndx"],
         help="membership indices to draw the universe from (e.g. sp400 for mid-caps)",
     )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="back up an existing --out to <stem>.v1.jsonl, then re-gather from "
+        "scratch (the v2 full re-gather; refuses to overwrite an existing backup)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+
+    if args.fresh:
+        backup = backup_v1(args.out)
+        if backup is not None:
+            logging.getLogger("scripts.gather_options_iv").info(
+                "backed up %s -> %s", args.out, backup
+            )
 
     client = ThetaClient(args.base_url)
     summary = run_gather(

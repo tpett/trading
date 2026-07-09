@@ -1060,6 +1060,24 @@ def _ensure_trailing_newline(out_path: Path) -> None:
             fh.write("\n")
 
 
+def backup_v1(out_path: Path) -> Path | None:
+    """Move an existing samples file aside as ``<stem>.v1<suffix>`` before a
+    fresh full re-gather (samples.jsonl -> samples.v1.jsonl). Returns the
+    backup path, or None when there is nothing to back up. REFUSES to
+    overwrite an existing backup: the v1 baseline must survive exactly as
+    gathered -- it feeds the coverage report's IV-agreement check."""
+    if not out_path.exists():
+        return None
+    backup = out_path.with_name(f"{out_path.stem}.v1{out_path.suffix}")
+    if backup.exists():
+        raise FileExistsError(
+            f"refusing to clobber existing v1 backup: {backup} "
+            "(move it aside manually if you truly mean to replace the baseline)"
+        )
+    out_path.rename(backup)
+    return backup
+
+
 def load_existing_keys(out_path: Path) -> set[tuple[str, str]]:
     """(symbol, decision_date) pairs already written, so a re-run resumes without
     duplicating. Malformed lines are ignored -- a torn final line from a killed
