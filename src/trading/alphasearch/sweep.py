@@ -202,6 +202,11 @@ class UniverseSpec:
     # hashed trial config is its NAME (spec section 3.3); the symbol list is
     # derived from committed CSVs, like bar caches are for Piece 1 pools.
     symbols: tuple[str, ...] | None = None
+    # Committed sic_map.csv override for sector derivation (industry-relative
+    # family); None = segments.DEFAULT_SIC_MAP_CSV. Not part of the hashed
+    # trial config: like bar caches, the map is committed data, and the
+    # universe's identity is its NAME.
+    sic_map_path: Path | None = None
 
 
 def default_universes(root: Path) -> dict[str, UniverseSpec]:
@@ -221,12 +226,31 @@ def default_universes(root: Path) -> dict[str, UniverseSpec]:
     }
 
 
+def _universe_sectors(sic_map_path: Path | None) -> dict[str, str]:
+    """symbol -> its (unique) frozen SEGMENTS sector for every mapped symbol.
+    Industry segments (biotech, banks) overlap sectors and are NOT the
+    partition, so only kind == "sector" qualifies. Imported lazily:
+    segments.py imports this module at module scope, so a top-level import
+    back would be a cycle."""
+    from trading.alphasearch.segments import SEGMENTS, load_sic_map, segments_for
+
+    sector_of: dict[str, str] = {}
+    for symbol, code in load_sic_map(sic_map_path).items():
+        sector = next(
+            (n for n in segments_for(code) if SEGMENTS[n].kind == "sector"), None
+        )
+        if sector is not None:
+            sector_of[symbol] = sector
+    return sector_of
+
+
 def build_universe_panel(
     spec: UniverseSpec, factors: pd.DataFrame | None = None
 ) -> PanelData:
     return build_panel(
         spec.cache_dir, spec.samples, spec.fundamentals_dir,
         symbols=spec.symbols, factors=factors,
+        sectors=_universe_sectors(spec.sic_map_path),
     )
 
 

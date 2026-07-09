@@ -230,3 +230,9 @@ def test_deep_segments_carry_fundamentals_dir_when_the_store_exists(tmp_path):
     universes, _ = segment_universes(tmp_path, sic, membership_path=membership)
     assert universes["largecap:biotech"].fundamentals_dir == store
     assert universes["opt-largecap:biotech"].fundamentals_dir == store
+
+
+def test_segment_universes_thread_the_sic_map_path(tmp_path):
+    _pharma, _banks, sic, membership = _fixture_root(tmp_path)
+    universes, _ = segment_universes(tmp_path, sic, membership_path=membership)
+    assert all(u.sic_map_path == sic for u in universes.values())

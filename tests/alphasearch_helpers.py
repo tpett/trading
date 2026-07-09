@@ -59,6 +59,7 @@ def assemble_panel(
     factors: pd.DataFrame,
     *,
     has_option_volume: bool = False,
+    sectors: dict[str, str] | None = None,
 ) -> PanelData:
     """PanelData from raw stores, deriving what build_panel derives (closes
     from bars). The lookahead test perturbs RAW stores and reassembles
@@ -70,6 +71,7 @@ def assemble_panel(
         symbols=tuple(sorted(bars)), bars=bars, factors=factors,
         features=compute_rolling_features(closes, factors),
         has_option_volume=has_option_volume,
+        sectors={} if sectors is None else sectors,
     )
 
 
@@ -148,9 +150,12 @@ def make_panel(
                 },
                 index=filed,
             )
+    sectors = {sym: ("manufacturing-tech" if i % 2 == 0 else "finance")
+               for i, sym in enumerate(names)}
     return assemble_panel(
         bars, options, fundamentals, factors,
         has_option_volume=with_options and with_option_volume,
+        sectors=sectors,
     )
 
 

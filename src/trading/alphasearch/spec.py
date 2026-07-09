@@ -13,9 +13,12 @@ accessors truncate at as_of -- forward data is structurally unreachable.
 Price-metric semantics (trail / rvol / disthigh) are copied from
 scripts/signal_scan.py so alphasearch scores agree with the scanner's panel.
 
-Task 4 registers the price family; Task 5 completes the registry with the
-options family (vrp, hedge, excite, atm_iv, smile, atm_spread) and the
-fundamentals family (gross_profitability, earnings_yield, book_to_market).
+The 16 seed signals (Piece 1) are followed by the 21 Tier-1 batch signals
+(docs/superpowers/specs/2026-07-09-tier1-signal-batch-design.md section 2):
+9 price/volume, 5 options (cp_vol/osv gated on requires_option_volume),
+5 fundamentals (300-calendar-day YoY filing rule), 2 industry-relative
+(the 10 frozen SEGMENTS sectors). All formulas, windows, floors, and signs
+are frozen pre-registration.
 """
 
 from __future__ import annotations
@@ -473,3 +476,55 @@ _register("roa", _roa, requires_fundamentals=True)
 _register("droa", _droa, requires_fundamentals=True)
 # Growth: rising trailing revenue.
 _register("rev_growth", _yoy_growth("revenue_ttm", +1.0), requires_fundamentals=True)
+
+
+# --------------------------------------------------------------------------- #
+# Tier-1 industry-relative family (spec 2026-07-09 section 2): the 10 frozen
+# SEGMENTS sectors are the industry partition (via the committed sic_map,
+# threaded onto the panel as PanelData.sectors). Sector stats come ONLY from
+# symbols present in the date's cross-section; unmapped symbols score NaN.
+# --------------------------------------------------------------------------- #
+def _sector_means(view: PanelView, values: dict[str, float]) -> dict[str, float]:
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for symbol in view.symbols:
+        sector = view.sector(symbol)
+        value = values[symbol]
+        if sector is None or math.isnan(value):
+            continue
+        sums[sector] = sums.get(sector, 0.0) + value
+        counts[sector] = counts.get(sector, 0) + 1
+    return {sector: sums[sector] / counts[sector] for sector in sums}
+
+
+def _ind_mom(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    values = {s: _mom_12_2(view.closes(s)) for s in view.symbols}
+    means = _sector_means(view, values)
+    scores = {
+        s: (means.get(sector, math.nan)
+            if (sector := view.sector(s)) is not None else math.nan)
+        for s in view.symbols
+    }
+    return pd.Series(scores, dtype="float64")
+
+
+def _ind_rel_rev(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    values = {s: _trail(view.closes(s), 21) for s in view.symbols}
+    means = _sector_means(view, values)
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        sector = view.sector(symbol)
+        own = values[symbol]
+        if sector is None or sector not in means or math.isnan(own):
+            scores[symbol] = math.nan
+        else:
+            scores[symbol] = -(own - means[sector])
+    return pd.Series(scores, dtype="float64")
+
+
+# Industry momentum (Moskowitz-Grinblatt): a hot sector lifts every member.
+_register("ind_mom", _ind_mom)
+# Within-industry reversal (Da-Liu-Schaumburg, 21d at monthly cadence):
+# laggards vs their sector mean recover -- the minus lives IN the formula,
+# so registration is raw (spec section 2 defines the signal WITH the minus).
+_register("ind_rel_rev", _ind_rel_rev)

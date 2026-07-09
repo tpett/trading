@@ -620,3 +620,28 @@ def test_option_volume_signal_refused_on_a_volume_less_universe(tmp_path):
                         signals={"fake_vol": fake}, window=WINDOW,
                         panel_factory=lambda _u, _f: midcap_like)
     assert n == 1 and rows[0].error is None
+
+
+def test_build_universe_panel_derives_sectors_from_the_sic_map(tmp_path):
+    from trading.alphasearch.sweep import build_universe_panel
+
+    idx = pd.date_range("2020-01-02", periods=5, freq="B", tz="UTC")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for sym in ("AAA", "BBB", "CCC"):
+        pd.DataFrame(
+            {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+            index=idx,
+        ).to_parquet(cache / f"{sym}.parquet")
+    sic = tmp_path / "sic.csv"
+    sic.write_text(
+        "symbol,cik,sic,sic_description,fetched_at\n"
+        "AAA,1,2836,biotech,2026-07-09\n"   # pharma-chemicals sector (+biotech industry)
+        "BBB,2,6022,bank,2026-07-09\n"      # finance sector (+banks industry)
+        "CCC,3,700,farm,2026-07-09\n"       # covered by no segment
+    )
+    uspec = UniverseSpec("u", cache, None, None, symbols=("AAA", "BBB", "CCC"),
+                         sic_map_path=sic)
+    panel = build_universe_panel(uspec, make_factors())
+    # Sectors only (the 10-way partition); industries never masquerade as one.
+    assert panel.sectors == {"AAA": "pharma-chemicals", "BBB": "finance"}

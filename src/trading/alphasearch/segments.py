@@ -128,6 +128,8 @@ def segment_universes(
     samples file has not been gathered). A missing sic_map raises
     SegmentError naming the exact build command.
     """
+    if sic_map_path is None:
+        sic_map_path = DEFAULT_SIC_MAP_CSV
     sic_by_symbol = load_sic_map(sic_map_path)
     if membership_path is None:
         membership_path = DEFAULT_MEMBERSHIP_CSV
@@ -169,6 +171,7 @@ def segment_universes(
                         fundamentals_dir if fundamentals_dir.is_dir() else None
                     ),
                     symbols=deep,
+                    sic_map_path=sic_map_path,
                 )
             else:
                 excluded.append(
@@ -184,6 +187,7 @@ def segment_universes(
                     samples=samples,
                     fundamentals_dir=fundamentals_dir,
                     symbols=opt,
+                    sic_map_path=sic_map_path,
                 )
             else:
                 excluded.append(

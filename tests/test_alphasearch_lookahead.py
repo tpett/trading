@@ -53,7 +53,10 @@ def _perturb_after(panel: PanelData, cutoff: pd.Timestamp) -> PanelData:
     factors = panel.factors.copy()
     late = factors.index > cutoff
     factors.loc[late] = factors.loc[late] * 3.0 + 0.001
-    return assemble_panel(bars, options, fundamentals, factors)
+    return assemble_panel(
+        bars, options, fundamentals, factors,
+        has_option_volume=panel.has_option_volume, sectors=panel.sectors,
+    )
 
 
 def test_fixture_actually_has_data_after_the_cutoff():

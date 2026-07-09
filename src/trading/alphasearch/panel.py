@@ -335,6 +335,9 @@ class PanelView:
     def has_option_volume(self) -> bool:
         return self._panel.has_option_volume
 
+    def sector(self, symbol: str) -> str | None:
+        return self._panel.sectors.get(symbol)
+
     def option_row_prior(
         self, symbol: str, max_age_days: int = MAX_PRIOR_OPTION_AGE_DAYS
     ) -> pd.Series | None:
@@ -458,6 +461,9 @@ class PanelData:
     # True when ANY gathered options cell carries leg volume (mid-cap gather).
     # Drives the requires_option_volume assembly-time refusal (sweep.py).
     has_option_volume: bool = False
+    # symbol -> frozen SEGMENTS sector (the 10-way partition); absent =
+    # unmapped, and industry-relative signals then score NaN, never a guess.
+    sectors: dict[str, str] = field(default_factory=dict)
 
     def view(self, as_of: pd.Timestamp) -> PanelView:
         if as_of.tzinfo is None:
@@ -490,6 +496,7 @@ def build_panel(
     *,
     symbols: tuple[str, ...] | None = None,
     factors: pd.DataFrame | None = None,
+    sectors: dict[str, str] | None = None,
 ) -> PanelData:
     """Assemble one universe's PanelData.
 
@@ -550,4 +557,5 @@ def build_panel(
         factors=pd.DataFrame() if factors is None else factors,
         features={s: features[s] for s in universe if s in features},
         has_option_volume=has_volume,
+        sectors={} if sectors is None else {s: sectors[s] for s in universe if s in sectors},
     )

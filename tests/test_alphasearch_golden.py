@@ -59,7 +59,7 @@ def test_golden_sweep_end_to_end(tmp_path):
                                ts="t1", window=WINDOW)
 
     # Every registered signal became exactly one journaled trial.
-    assert n_trials == len(SIGNALS) == 35
+    assert n_trials == len(SIGNALS) == 37
     assert {(r.signal, r.universe) for r in rows} == {
         (s, "largecap") for s in SIGNALS
     }
@@ -89,5 +89,5 @@ def test_golden_sweep_end_to_end(tmp_path):
     assert [(r.signal, r.alpha_t, r.p) for r in rows2] == [
         (r.signal, r.alpha_t, r.p) for r in rows
     ]
-    assert len(list(journal.events())) == 70
-    assert len(discovery_trials(journal)) == 35
+    assert len(list(journal.events())) == 74
+    assert len(discovery_trials(journal)) == 37

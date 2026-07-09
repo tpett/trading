@@ -348,4 +348,73 @@ def test_fundamentals_family_nan_without_a_store():
     })})
     bare = PanelData(closes=panel.closes, bars=panel.bars, symbols=panel.symbols)
     for name in ("asset_growth", "net_issuance", "roa", "droa", "rev_growth"):
-        assert _score(name, bare, as_of).isna().all(), name
+        assert _score(name, bare, as_of).isna().all()
+
+
+# --------------------------------------------------------------------------- #
+# Industry-relative family (10 frozen SEGMENTS sectors via sic_map)
+# --------------------------------------------------------------------------- #
+
+
+def _sector_panel() -> tuple[PanelData, pd.Timestamp]:
+    frames = {
+        "FIN1": _bar_frame(_geometric_close(0.001, 300)),
+        "FIN2": _bar_frame(_geometric_close(0.003, 300)),
+        "TRD1": _bar_frame(_geometric_close(0.002, 300)),
+        "UNMAPPED": _bar_frame(_geometric_close(0.004, 300)),
+    }
+    panel = _bar_panel(
+        frames,
+        sectors={"FIN1": "finance", "FIN2": "finance", "TRD1": "trade"},
+    )
+    return panel, frames["FIN1"].index[-1]
+
+
+def _mom(rate: float) -> float:
+    return (1 + rate) ** 231 - 1
+
+
+def _trail21(rate: float) -> float:
+    return (1 + rate) ** 21 - 1
+
+
+def test_ind_mom_assigns_the_sector_mean_and_nan_to_unmapped():
+    panel, as_of = _sector_panel()
+    scores = _score("ind_mom", panel, as_of)
+    finance_mean = (_mom(0.001) + _mom(0.003)) / 2
+    assert math.isclose(scores["FIN1"], finance_mean, rel_tol=1e-9)
+    assert math.isclose(scores["FIN2"], finance_mean, rel_tol=1e-9)
+    assert math.isclose(scores["TRD1"], _mom(0.002), rel_tol=1e-9)
+    assert math.isnan(scores["UNMAPPED"])  # never guessed
+
+
+def test_ind_rel_rev_rewards_within_sector_laggards():
+    panel, as_of = _sector_panel()
+    scores = _score("ind_rel_rev", panel, as_of)
+    finance_mean = (_trail21(0.001) + _trail21(0.003)) / 2
+    assert math.isclose(scores["FIN1"], -(_trail21(0.001) - finance_mean),
+                        rel_tol=1e-9)
+    assert scores["FIN1"] > 0 > scores["FIN2"]  # laggard attractive, leader not
+    # A one-member sector sits exactly at its own mean.
+    assert math.isclose(scores["TRD1"], 0.0, abs_tol=1e-12)
+    assert math.isnan(scores["UNMAPPED"])
+
+
+def test_sector_stats_use_only_the_dates_cross_section():
+    # A finance member with too little history for mom_12_2 contributes
+    # NOTHING to the sector mean, but (mapped) still receives ind_mom's mean.
+    frames = {
+        "FIN1": _bar_frame(_geometric_close(0.001, 300)),
+        "FIN2": _bar_frame(_geometric_close(0.003, 300)),
+        "FINYOUNG": _bar_frame(_geometric_close(0.05, 30, start="2020-01-02")),
+    }
+    sectors = {s: "finance" for s in frames}
+    panel = _bar_panel(frames, sectors=sectors)
+    as_of = frames["FIN1"].index[-1]
+    scores = _score("ind_mom", panel, as_of)
+    finance_mean = (_mom(0.001) + _mom(0.003)) / 2  # FINYOUNG's NaN excluded
+    assert math.isclose(scores["FIN1"], finance_mean, rel_tol=1e-9)
+    assert math.isclose(scores["FINYOUNG"], finance_mean, rel_tol=1e-9)
+    # ind_rel_rev needs the symbol's OWN trail21 too.
+    rel = _score("ind_rel_rev", panel, as_of)
+    assert not math.isnan(rel["FINYOUNG"])  # 30 bars >= 22: trail21 exists
