@@ -123,18 +123,20 @@ def _json_safe(value: object) -> object:
 # Keys log_trial itself controls; a result payload containing any of these
 # would silently clobber journal-controlled fields if merged in last.
 RESERVED_RESULT_KEYS = frozenset(
-    {"event", "kind", "config_hash", "ts", "error", "signal", "universe", "window", "params"}
+    {"event", "kind", "config_hash", "ts", "error", "signal", "universe",
+     "window", "params", "battery"}
 )
 
 
 def log_trial(
     journal: Journal,
     *,
-    kind: str,  # "discovery" | "holdout"
+    kind: str,  # "discovery" | "holdout" | "battery"
     config: dict,
     ts: str,  # ISO-8601 UTC, supplied by the CLI (the only clock reader)
     result: dict | None = None,
     error: str | None = None,
+    battery: str | None = None,  # Piece 3: display/grouping tag, NEVER hashed
 ) -> dict:
     """Append one trial event (spec section 4 schema) and return it."""
     result = result or {}
@@ -152,6 +154,11 @@ def log_trial(
         "error": error,
         **result,
     }
+    if battery is not None:
+        # On the EVENT only (spec Piece 3 section 5): the hash comes from
+        # `config` above, so an identical evaluation made inside or outside
+        # a battery stays ONE trial -- the tag is for display and grouping.
+        event["battery"] = battery
     event = _json_safe(event)
     journal.append(event)
     return event

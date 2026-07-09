@@ -200,3 +200,31 @@ def test_subset_and_offset_change_the_hash_when_set():
     assert off["calendar_offset"] == 1
     off_hash = trial_config_hash(trial_config("mom21", "largecap", window, params=off))
     assert len({base, sub_hash, off_hash}) == 3      # three distinct trials
+
+
+def test_battery_tag_rides_on_the_event_never_the_hash(tmp_path):
+    from trading.alphasearch.sweep import discovery_trials, trials_journal
+
+    journal = trials_journal(tmp_path / "journal")
+    config = trial_config("mom21", "largecap", "2020-01-01..2020-06-30")
+    tagged = log_trial(journal, kind="discovery", config=config, ts="t1",
+                       result=None, error="SortError: x",
+                       battery="amihud:midcap")
+    assert tagged["battery"] == "amihud:midcap"
+    assert tagged["config_hash"] == trial_config_hash(config)  # tag not hashed
+    # The identical config outside a battery dedupes INTO the same trial
+    # (spec section 5: one trial, never two) -- and the latest event wins.
+    log_trial(journal, kind="discovery", config=config, ts="t2")
+    trials = discovery_trials(journal)
+    assert len(trials) == 1
+    assert "battery" not in trials[0]          # latest (untagged) event won
+
+
+def test_result_payload_cannot_clobber_the_battery_tag(tmp_path):
+    from trading.alphasearch.sweep import SweepError, trials_journal
+
+    journal = trials_journal(tmp_path / "journal")
+    with pytest.raises(SweepError):
+        log_trial(journal, kind="discovery",
+                  config=trial_config("mom21", "largecap", "2020-01-01..2020-06-30"),
+                  ts="t1", result={"battery": "sneaky"})
