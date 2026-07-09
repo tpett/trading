@@ -188,6 +188,39 @@ def test_sweep_segments_missing_sic_map_is_an_actionable_error(
     assert "build_sic_map.py" in capsys.readouterr().err
 
 
+def test_sweep_segments_refusal_prints_signal_family_hint(tmp_path, monkeypatch, capsys):
+    from trading.alphasearch import sweep as engine
+
+    _stub_segments(monkeypatch, tmp_path)
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        raise engine.SweepError("mismatches: largecap:banks wants options, has none")
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--segments", "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "hint:" in err
+    assert "mom21,mom63,mom126,mom252,rev5,rvol21,disthigh" in err
+    assert "opt-largecap:<segment>" in err
+
+
+def test_sweep_refusal_without_segments_has_no_hint(tmp_path, monkeypatch, capsys):
+    from trading.alphasearch import sweep as engine
+
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        raise engine.SweepError("boom")
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    assert "hint:" not in capsys.readouterr().err
+
+
 def test_holdout_resolves_segment_universe_names_without_a_flag(
     tmp_path, monkeypatch, capsys
 ):

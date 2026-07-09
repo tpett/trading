@@ -906,6 +906,25 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
             )
         except (engine.SweepError, PanelError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
+            if args.segments and isinstance(exc, engine.SweepError):
+                # Deep-pool segments (samples=None, fundamentals_dir=None)
+                # can't run the options/fundamentals families, so the
+                # all-or-nothing cross-product refuses out-of-the-box.
+                # Point at the fix instead of leaving a bare error.
+                from trading.alphasearch.spec import SIGNALS
+
+                price_signals = ",".join(
+                    name
+                    for name, s in SIGNALS.items()
+                    if not s.requires_options and not s.requires_fundamentals
+                )
+                print(
+                    "hint: deep-pool segments carry only price data — pair "
+                    f"--segments with --signals {price_signals} (price family), "
+                    "or target options segments individually via --universe "
+                    "opt-largecap:<segment>",
+                    file=sys.stderr,
+                )
             return 1
         _print_alphasearch_leaderboard(rows, count, as_json=args.json)
         return 0
