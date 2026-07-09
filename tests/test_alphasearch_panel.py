@@ -9,12 +9,14 @@ import pandas as pd
 import pytest
 
 from trading.alphasearch.panel import (
+    BAR_COLUMNS,
     MAX_OPTION_AGE_DAYS,
     OPTION_COLUMNS,
     PanelData,
     PanelError,
     build_panel,
     cell_metrics,
+    load_bars,
     load_closes,
     load_options,
     options_from_cells,
@@ -271,3 +273,79 @@ def test_build_panel_empty_symbols_tuple_refused(tmp_path):
 def test_build_panel_without_any_universe_source_refused(tmp_path):
     with pytest.raises(PanelError, match="universe source"):
         build_panel(tmp_path, None, None)
+
+
+def test_load_bars_reads_full_schema_and_nan_fills_legacy_columns(tmp_path):
+    idx = pd.date_range("2020-01-02", periods=3, freq="B", tz="UTC")
+    wide = pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5, "close": [1.5, 1.6, 1.7],
+         "volume": 10.0, "div_cash": [0.0, 0.25, 0.0], "split_factor": 1.0,
+         "close_raw": 1.5},
+        index=idx,
+    )
+    narrow = pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+        index=idx,
+    )
+    wide.to_parquet(tmp_path / "WIDE.parquet")
+    narrow.to_parquet(tmp_path / "NARROW.parquet")
+    got = load_bars(tmp_path, ["WIDE", "NARROW", "NOPE"])
+    assert set(got) == {"WIDE", "NARROW"}
+    assert list(got["WIDE"].columns) == BAR_COLUMNS      # close_raw dropped
+    assert got["WIDE"]["div_cash"].iloc[1] == 0.25
+    # A legacy narrow cache cannot claim "no dividends": NaN, never 0.0/1.0.
+    assert got["NARROW"]["div_cash"].isna().all()
+    assert got["NARROW"]["split_factor"].isna().all()
+
+
+def test_view_bars_truncates_at_as_of_and_is_empty_for_unknown_symbol():
+    idx = pd.date_range("2020-01-06", periods=5, freq="B", tz="UTC")
+    frame = pd.DataFrame(
+        {c: float(i) for i, c in enumerate(BAR_COLUMNS)}, index=idx
+    )
+    panel = PanelData(closes={"AAA": frame["close"]}, bars={"AAA": frame},
+                      symbols=("AAA",))
+    view = panel.view(idx[2])
+    assert len(view.bars("AAA")) == 3
+    assert view.bars("AAA").index.max() == idx[2]
+    empty = view.bars("NOPE")
+    assert empty.empty and list(empty.columns) == BAR_COLUMNS
+
+
+def test_view_factors_truncates_at_as_of():
+    idx = pd.date_range("2020-01-06", periods=5, freq="B", tz="UTC")
+    factors = pd.DataFrame(
+        {"Mkt-RF": 0.001, "SMB": 0.0, "HML": 0.0, "RF": 0.0001}, index=idx
+    )
+    panel = PanelData(closes={}, factors=factors, symbols=())
+    got = panel.view(idx[1]).factors()
+    assert len(got) == 2 and got.index.max() == idx[1]
+    before = pd.Timestamp("2019-12-31", tz="UTC")
+    assert panel.view(before).factors().empty
+
+
+def test_build_panel_derives_closes_from_bars_and_stores_factors(tmp_path):
+    idx = pd.date_range("2020-01-02", periods=4, freq="B", tz="UTC")
+    pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5, "close": [1.0, 2.0, 3.0, 4.0],
+         "volume": 10.0},
+        index=idx,
+    ).to_parquet(tmp_path / "AAA.parquet")
+    factors = pd.DataFrame(
+        {"Mkt-RF": 0.001, "SMB": 0.0, "HML": 0.0, "RF": 0.0001, "Mom": 0.0},
+        index=idx,
+    )
+    panel = build_panel(tmp_path, None, None, symbols=("AAA",), factors=factors)
+    assert list(panel.bars["AAA"].columns) == BAR_COLUMNS
+    assert panel.closes["AAA"].tolist() == [1.0, 2.0, 3.0, 4.0]
+    assert panel.factors.equals(factors)
+
+
+def test_build_panel_without_factors_stores_an_empty_frame(tmp_path):
+    idx = pd.date_range("2020-01-02", periods=4, freq="B", tz="UTC")
+    pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+        index=idx,
+    ).to_parquet(tmp_path / "AAA.parquet")
+    panel = build_panel(tmp_path, None, None, symbols=("AAA",))
+    assert panel.factors.empty

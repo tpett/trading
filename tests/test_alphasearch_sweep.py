@@ -43,7 +43,7 @@ def test_sweep_journals_every_trial_and_ranks_by_abs_t(tmp_path):
     rows, n_trials = run_sweep(
         _universe(tmp_path), journal, make_factors(), ts="t1",
         signals=_subset("mom21", "rev5", "rvol21"), window=WINDOW,
-        panel_factory=lambda _u: panel,
+        panel_factory=lambda _u, _f: panel,
     )
     assert n_trials == 3
     assert len(discovery_trials(journal)) == 3      # journaled, not just returned
@@ -63,7 +63,7 @@ def test_sweep_rerun_is_idempotent_for_trial_count(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel()
     kwargs = dict(signals=_subset("mom21"), window=WINDOW,
-                  panel_factory=lambda _u: panel)
+                  panel_factory=lambda _u, _f: panel)
     _, first = run_sweep(_universe(tmp_path), journal, make_factors(), "t1", **kwargs)
     _, second = run_sweep(_universe(tmp_path), journal, make_factors(), "t2", **kwargs)
     assert first == second == 1                     # identical config: ONE trial
@@ -77,7 +77,7 @@ def test_error_trial_is_journaled_flagged_and_counted(tmp_path):
     rows, n_trials = run_sweep(
         _universe(tmp_path), journal, make_factors(), ts="t1",
         signals=_subset("mom21", "mom252"), window=WINDOW,
-        panel_factory=lambda _u: panel,
+        panel_factory=lambda _u, _f: panel,
     )
     assert n_trials == 2                            # the failure still counts
     failed = next(r for r in rows if r.signal == "mom252")
@@ -95,7 +95,7 @@ def test_options_signal_without_cells_refused_before_any_trial(tmp_path):
         run_sweep(
             _universe(tmp_path), journal, make_factors(), ts="t1",
             signals=_subset("mom21", "hedge"), window=WINDOW,
-            panel_factory=lambda _u: panel,
+            panel_factory=lambda _u, _f: panel,
         )
     assert list(journal.events()) == []             # refused at assembly: no trials
     # Actionable: how to gather it, and the zero-setup workaround.
@@ -111,7 +111,7 @@ def test_fundamentals_signal_without_store_refused(tmp_path):
         run_sweep(
             _universe(tmp_path), journal, make_factors(), ts="t1",
             signals=_subset("earnings_yield"), window=WINDOW,
-            panel_factory=lambda _u: panel,
+            panel_factory=lambda _u, _f: panel,
         )
     # Actionable: the expected store path, how to populate it, and the
     # zero-setup workaround -- not just "has none".
@@ -131,7 +131,7 @@ def test_discovery_trial_with_stale_factors_is_journaled_as_error(tmp_path):
     rows, n_trials = run_sweep(
         _universe(tmp_path), journal, stale_factors, ts="t1",
         signals=_subset("mom21"), window=WINDOW,
-        panel_factory=lambda _u: panel,
+        panel_factory=lambda _u, _f: panel,
     )
     assert n_trials == 1                             # the failure still counts
     row = rows[0]
@@ -147,7 +147,7 @@ def test_leaderboard_recomputes_from_journal_alone(tmp_path):
     rows, n_trials = run_sweep(
         _universe(tmp_path), journal, make_factors(), ts="t1",
         signals=_subset("mom21", "rev5"), window=WINDOW,
-        panel_factory=lambda _u: panel,
+        panel_factory=lambda _u, _f: panel,
     )
     again, n_again = build_leaderboard(journal)     # no panels, no factors
     assert n_again == n_trials
@@ -184,7 +184,7 @@ def test_incompatible_universe_refuses_the_whole_sweep_either_order(
         run_sweep(
             universes, journal, make_factors(), ts="t1",
             signals=_subset("mom21", "hedge"), window=WINDOW,
-            panel_factory=lambda u: panels[u.name],
+            panel_factory=lambda u, _f: panels[u.name],
         )
     assert bad_name in str(excinfo.value)           # names the offending pair
     assert list(journal.events()) == []             # zero trials, deterministically
@@ -198,7 +198,7 @@ def test_empty_signal_selection_is_refused(tmp_path):
     with pytest.raises(SweepError):
         run_sweep(
             _universe(tmp_path), journal, make_factors(), ts="t1",
-            signals={}, window=WINDOW, panel_factory=lambda _u: make_panel(),
+            signals={}, window=WINDOW, panel_factory=lambda _u, _f: make_panel(),
         )
     assert list(journal.events()) == []
 
@@ -208,7 +208,7 @@ def test_signals_none_runs_the_full_registry(tmp_path):
     panel = make_panel()
     _, n_trials = run_sweep(
         _universe(tmp_path), journal, make_factors(), ts="t1",
-        signals=None, window=WINDOW, panel_factory=lambda _u: panel,
+        signals=None, window=WINDOW, panel_factory=lambda _u, _f: panel,
     )
     assert n_trials == len(SIGNALS)
 
@@ -219,7 +219,7 @@ def test_min_names_change_is_a_new_trial(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel()
     kwargs = dict(signals=_subset("mom21"), window=WINDOW,
-                  panel_factory=lambda _u: panel)
+                  panel_factory=lambda _u, _f: panel)
     _, first = run_sweep(_universe(tmp_path), journal, make_factors(), "t1", **kwargs)
     _, second = run_sweep(_universe(tmp_path), journal, make_factors(), "t2",
                           min_names=10, **kwargs)
@@ -230,7 +230,7 @@ def test_tercile_below_change_is_a_new_trial(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel()
     kwargs = dict(signals=_subset("mom21"), window=WINDOW,
-                  panel_factory=lambda _u: panel)
+                  panel_factory=lambda _u, _f: panel)
     _, first = run_sweep(_universe(tmp_path), journal, make_factors(), "t1", **kwargs)
     _, second = run_sweep(_universe(tmp_path), journal, make_factors(), "t2",
                           tercile_below=40, **kwargs)
@@ -244,10 +244,10 @@ def test_bh_gate_spans_the_whole_journal_not_one_sweep(tmp_path):
     panel = make_panel()
     run_sweep(_universe(tmp_path), journal, make_factors(), "t1",
               signals=_subset("mom21"), window=WINDOW,
-              panel_factory=lambda _u: panel)
+              panel_factory=lambda _u, _f: panel)
     _, n_trials = run_sweep(_universe(tmp_path), journal, make_factors(), "t2",
                             signals=_subset("rev5"), window=WINDOW,
-                            panel_factory=lambda _u: panel)
+                            panel_factory=lambda _u, _f: panel)
     assert n_trials == 2  # the gate sees ALL journaled discovery trials
 
 
@@ -270,7 +270,7 @@ def _sweep_then_holdout_setup(tmp_path):
     factors = make_factors()
     run_sweep(_universe(tmp_path), journal, factors, ts="t1",
               signals=_subset("mom21"), window=DISCOVERY,
-              panel_factory=lambda _u: panel)
+              panel_factory=lambda _u, _f: panel)
     return journal, panel, factors
 
 
@@ -290,7 +290,7 @@ def test_holdout_runs_once_and_journals_with_end_date(tmp_path):
     outcome = run_holdout(
         _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
         holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
+        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u, _f: panel,
     )
     # Fixture factors outlast the bars, so the clamped end IS the latest bar.
     latest = max(s.index.max() for s in panel.closes.values())
@@ -315,7 +315,7 @@ def test_holdout_clamps_window_end_to_factor_coverage(tmp_path):
     outcome = run_holdout(
         _universe(tmp_path)["largecap"], journal, lagged, "t2", "mom21",
         holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
+        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u, _f: panel,
     )
     factors_end = lagged.index.max().date().isoformat()
     assert outcome.window == f"{HOLDOUT_FROM}..{factors_end}"
@@ -328,7 +328,7 @@ def test_holdout_clamps_window_end_to_factor_coverage(tmp_path):
 def test_holdout_double_touch_refused_without_literal_confirmation(tmp_path):
     journal, panel, factors = _sweep_then_holdout_setup(tmp_path)
     kwargs = dict(holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-                  min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel)
+                  min_factor_span_days=MIN_SPAN, panel_factory=lambda _u, _f: panel)
     run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
                 "mom21", **kwargs)
     events_before = len(list(journal.events()))
@@ -352,7 +352,7 @@ def test_holdout_refused_without_discovery_trial(tmp_path):
     with pytest.raises(SweepError):
         run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
                     "t1", "mom21", holdout_start=HOLDOUT_FROM,
-                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+                    discovery_window=DISCOVERY, panel_factory=lambda _u, _f: panel)
     assert list(journal.events()) == []
 
 
@@ -372,7 +372,7 @@ def test_holdout_refused_for_non_bh_survivor(tmp_path):
     with pytest.raises(SweepError):
         run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
                     "rvol21", holdout_start=HOLDOUT_FROM,
-                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+                    discovery_window=DISCOVERY, panel_factory=lambda _u, _f: panel)
 
 
 def _result_like(*, alpha_annual_pct: float, alpha_t: float, p: float) -> dict:
@@ -415,7 +415,7 @@ def test_holdout_survivor_gate_binds_to_the_exact_discovery_trial(tmp_path):
     with pytest.raises(SweepError):
         run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
                     "t2", "mom21", holdout_start=HOLDOUT_FROM,
-                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+                    discovery_window=DISCOVERY, panel_factory=lambda _u, _f: panel)
     assert all(e.get("kind") != "holdout" for e in journal.events())
 
 
@@ -430,11 +430,11 @@ def test_holdout_journals_the_actual_params(tmp_path):
     factors = make_factors()
     run_sweep(_universe(tmp_path), journal, factors, ts="t1",
               signals=_subset("mom21"), window=DISCOVERY, quantiles=4,
-              panel_factory=lambda _u: panel)
+              panel_factory=lambda _u, _f: panel)
     outcome = run_holdout(
         _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
         holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY, quantiles=4,
-        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
+        min_factor_span_days=MIN_SPAN, panel_factory=lambda _u, _f: panel,
     )
     assert outcome.event["params"]["quantiles"] == 4
     default_hash = trial_config_hash(
@@ -457,7 +457,7 @@ def test_holdout_refused_before_touch_when_factors_stale(tmp_path):
         run_holdout(
             _universe(tmp_path)["largecap"], journal, stale_factors, "t2", "mom21",
             holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-            panel_factory=lambda _u: panel,
+            panel_factory=lambda _u, _f: panel,
         )
     assert "--refresh-factors" in str(excinfo.value)  # names the fix
     assert all(e.get("kind") != "holdout" for e in journal.events())  # untouched
@@ -483,7 +483,7 @@ def test_holdout_journals_error_event_before_reraising_unexpected_exception(
         run_holdout(
             _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
             holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY,
-            min_factor_span_days=MIN_SPAN, panel_factory=lambda _u: panel,
+            min_factor_span_days=MIN_SPAN, panel_factory=lambda _u, _f: panel,
         )
     holdout_events = [e for e in journal.events() if e.get("kind") == "holdout"]
     assert len(holdout_events) == 1                  # journaled despite the raise
@@ -507,7 +507,7 @@ def test_holdout_refused_when_discovery_alpha_missing(tmp_path):
     with pytest.raises(SweepError):
         run_holdout(_universe(tmp_path)["largecap"], journal, make_factors(),
                     "t2", "mom21", holdout_start=HOLDOUT_FROM,
-                    discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
+                    discovery_window=DISCOVERY, panel_factory=lambda _u, _f: panel)
     assert all(e.get("kind") != "holdout" for e in journal.events())
 
 
@@ -581,3 +581,18 @@ def test_universespec_symbols_defaults_none_for_piece1_call_sites():
     got = default_universes(Path("."))
     assert got["largecap"].symbols is None
     assert got["midcap"].symbols is None
+
+
+def test_run_sweep_passes_factors_to_the_panel_factory(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    seen: list = []
+
+    def factory(_u, f):
+        seen.append(f)
+        return panel
+
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW, panel_factory=factory)
+    assert len(seen) == 1 and seen[0] is factors

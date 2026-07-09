@@ -150,6 +150,30 @@ def load_closes(cache_dir: Path, symbols: Iterable[str]) -> dict[str, pd.Series]
     return out
 
 
+# Full bar schema served to signals. Legacy largecap caches predate the
+# extended columns; load_bars NaN-fills them (see docstring) rather than
+# fabricating "no dividends / no splits".
+BAR_COLUMNS = ["open", "high", "low", "close", "volume", "div_cash", "split_factor"]
+
+
+def load_bars(cache_dir: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame]:
+    """Full bar frames (BAR_COLUMNS) per symbol from a Tiingo parquet cache.
+
+    A symbol without a cached parquet is absent from the result (missing-data
+    rule, spec section 5.5). A legacy narrow cache (OHLCV only) gets NaN
+    div_cash/split_factor -- NOT the venue layer's 0.0/1.0 migration
+    defaults: a cache that never stored dividends cannot claim "no
+    dividends", so div_yield/net_issuance go honestly NaN there instead of
+    scoring fabricated zeros. Extra columns (close_raw) are dropped.
+    """
+    out: dict[str, pd.DataFrame] = {}
+    for symbol in sorted(set(symbols)):
+        path = cache_dir / f"{symbol}.parquet"
+        if path.exists():
+            out[symbol] = pd.read_parquet(path).reindex(columns=BAR_COLUMNS)
+    return out
+
+
 class PanelView:
     """Read-only as-of window onto a PanelData.
 
@@ -205,6 +229,24 @@ class PanelView:
         window = frame.loc[: self.as_of]
         return None if window.empty else window.iloc[-1]
 
+    def bars(self, symbol: str) -> pd.DataFrame:
+        """The symbol's bars (BAR_COLUMNS) up to and including as_of; an
+        empty BAR_COLUMNS frame when the symbol has none."""
+        frame = self._panel.bars.get(symbol)
+        if frame is None:
+            return pd.DataFrame(columns=BAR_COLUMNS, dtype="float64")
+        pos = frame.index.searchsorted(self.as_of, side="right")
+        return frame.iloc[:pos]
+
+    def factors(self) -> pd.DataFrame:
+        """Factor rows dated at or before as_of (empty frame when the panel
+        carries no factors)."""
+        frame = self._panel.factors
+        if frame.empty:
+            return frame
+        pos = frame.index.searchsorted(self.as_of, side="right")
+        return frame.iloc[:pos]
+
 
 @dataclass(frozen=True)
 class PanelData:
@@ -220,6 +262,11 @@ class PanelData:
     fundamentals: dict[str, pd.DataFrame] = field(default_factory=dict)
     symbols: tuple[str, ...] = ()
     corrupt_cells: int = 0
+    bars: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # Daily Ken French factor frame (Mkt-RF, SMB, HML, RF[, Mom]; decimals,
+    # UTC index) from evaluate.load_factors. Published history: PIT holds by
+    # truncation like every other store (spec section 3, item 1).
+    factors: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def view(self, as_of: pd.Timestamp) -> PanelView:
         if as_of.tzinfo is None:
@@ -251,6 +298,7 @@ def build_panel(
     fundamentals_dir: Path | None,
     *,
     symbols: tuple[str, ...] | None = None,
+    factors: pd.DataFrame | None = None,
 ) -> PanelData:
     """Assemble one universe's PanelData.
 
@@ -289,18 +337,21 @@ def build_panel(
         allowlist = sorted(symbols)
     else:
         allowlist = sorted(load_symbol_allowlist(samples))
-    closes = load_closes(cache_dir, allowlist)
-    if not closes:
+    bars = load_bars(cache_dir, allowlist)
+    if not bars:
         raise PanelError(f"no bar caches under {cache_dir} for the requested universe")
+    closes = {s: frame["close"] for s, frame in bars.items()}
     options, corrupt = load_options(samples) if samples is not None else ({}, 0)
     fundamentals = (
         load_fundamentals(fundamentals_dir, closes) if fundamentals_dir is not None else {}
     )
-    universe = tuple(s for s in allowlist if s in closes)
+    universe = tuple(s for s in allowlist if s in bars)
     return PanelData(
         closes={s: closes[s] for s in universe},
         options={s: options[s] for s in universe if s in options},
         fundamentals={s: fundamentals[s] for s in universe if s in fundamentals},
         symbols=universe,
         corrupt_cells=corrupt,
+        bars={s: bars[s] for s in universe},
+        factors=pd.DataFrame() if factors is None else factors,
     )

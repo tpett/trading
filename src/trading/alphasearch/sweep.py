@@ -221,9 +221,12 @@ def default_universes(root: Path) -> dict[str, UniverseSpec]:
     }
 
 
-def build_universe_panel(spec: UniverseSpec) -> PanelData:
+def build_universe_panel(
+    spec: UniverseSpec, factors: pd.DataFrame | None = None
+) -> PanelData:
     return build_panel(
-        spec.cache_dir, spec.samples, spec.fundamentals_dir, symbols=spec.symbols
+        spec.cache_dir, spec.samples, spec.fundamentals_dir,
+        symbols=spec.symbols, factors=factors,
     )
 
 
@@ -490,7 +493,9 @@ def run_sweep(
     quantiles: int = QUANTILES,
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
-    panel_factory: Callable[[UniverseSpec], PanelData] = build_universe_panel,
+    panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
+        build_universe_panel
+    ),
 ) -> tuple[list[LeaderboardRow], int]:
     """Enumerate signals x universes serially; build each panel once; journal
     EVERY trial BEFORE the leaderboard is computed (spec 3.6) so a crash
@@ -509,7 +514,7 @@ def run_sweep(
     panels: dict[str, PanelData] = {}
     mismatches: list[str] = []
     for uname, uspec in sorted(universes.items()):
-        panels[uname] = panel_factory(uspec)
+        panels[uname] = panel_factory(uspec, factors)
         for name in sorted(chosen):
             try:
                 _check_universe_supports(panels[uname], chosen[name], uspec.name)
@@ -598,7 +603,9 @@ def run_holdout(
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
     min_factor_span_days: int = HOLDOUT_MIN_FACTOR_SPAN_DAYS,
-    panel_factory: Callable[[UniverseSpec], PanelData] = build_universe_panel,
+    panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
+        build_universe_panel
+    ),
 ) -> HoldoutOutcome:
     """Evaluate ONE BH survivor on the reserved holdout window.
 
@@ -654,7 +661,7 @@ def run_holdout(
             f"{prior['ts']}; rerunning invalidates the evidence — aborted"
         )
 
-    panel = panel_factory(uspec)
+    panel = panel_factory(uspec, factors)
     spec = SIGNALS[signal_name]
     _check_universe_supports(panel, spec, uspec.name)
     # The FF publication lag means the factor cache routinely ends before the

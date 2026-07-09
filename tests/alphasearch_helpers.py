@@ -46,6 +46,23 @@ def month_firsts(idx: pd.DatetimeIndex) -> list[pd.Timestamp]:
     return [firsts[m] for m in sorted(firsts)]
 
 
+def assemble_panel(
+    bars: dict[str, pd.DataFrame],
+    options: dict[str, pd.DataFrame],
+    fundamentals: dict[str, pd.DataFrame],
+    factors: pd.DataFrame,
+) -> PanelData:
+    """PanelData from raw stores, deriving what build_panel derives (closes
+    from bars). The lookahead test perturbs RAW stores and reassembles
+    through here, so derived state (Task 2: precomputed rolling features) is
+    recomputed from the perturbed inputs, never perturbed directly."""
+    closes = {s: frame["close"] for s, frame in bars.items()}
+    return PanelData(
+        closes=closes, options=options, fundamentals=fundamentals,
+        symbols=tuple(sorted(bars)), bars=bars, factors=factors,
+    )
+
+
 def make_panel(
     n_symbols: int = 16,
     start: str = "2020-01-02",
@@ -53,19 +70,35 @@ def make_panel(
     seed: int = 7,
     with_options: bool = True,
     with_fundamentals: bool = True,
+    factors: pd.DataFrame | None = None,
 ) -> PanelData:
-    """Symbol S<i> drifts at (i - n/2)*2bp/day plus small seeded noise: momentum
-    ranks are stable (so a momentum L/S spread has a large true alpha), values
-    are bit-reproducible across runs, and 16 names >= MIN_NAMES=15 so default
-    sort parameters trade every eligible date (as terciles, being < 50)."""
+    """Symbol S<i> drifts at (i - n/2)*2bp/day plus small seeded noise (same
+    recipe/rng order as ever: closes are bit-identical to the pre-bars
+    fixture). Bars extend the closes deterministically: open gaps up
+    1bp*(i+1) from the prior close (a per-symbol overnight drift), high/low
+    bracket the close at +-(0.2+0.05i)%, volume 1e5*(i+1), div_cash
+    0.01*(i+1) daily, split_factor 1.0. Fundamentals file THREE times so the
+    300-day YoY rule and the post-cutoff perturbation are both exercised on
+    long fixtures (positions 0 / 63% / 95% of the index)."""
     rng = np.random.default_rng(seed)
     idx = pd.date_range(start, periods=periods, freq="B", tz="UTC")
     names = [f"S{i:02d}" for i in range(n_symbols)]
-    closes: dict[str, pd.Series] = {}
+    bars: dict[str, pd.DataFrame] = {}
     for i, sym in enumerate(names):
         drift = (i - n_symbols / 2) * 2e-4
         rets = drift + rng.normal(0.0, 0.002, size=periods)
-        closes[sym] = pd.Series(100.0 * np.cumprod(1 + rets), index=idx)
+        close = pd.Series(100.0 * np.cumprod(1 + rets), index=idx)
+        open_ = close.shift(1) * (1 + 1e-4 * (i + 1))
+        open_.iloc[0] = close.iloc[0]
+        span = 0.002 + 0.0005 * i
+        bars[sym] = pd.DataFrame(
+            {"open": open_, "high": close * (1 + span), "low": close * (1 - span),
+             "close": close, "volume": 1e5 * (i + 1), "div_cash": 0.01 * (i + 1),
+             "split_factor": 1.0},
+            index=idx,
+        )
+    if factors is None:
+        factors = make_factors()
     options: dict[str, pd.DataFrame] = {}
     if with_options:
         cells = []
@@ -83,22 +116,27 @@ def make_panel(
         options = options_from_cells(cells)
     fundamentals: dict[str, pd.DataFrame] = {}
     if with_fundamentals:
-        # Two filings (initial + mid-fixture) so the no-look-ahead test has
-        # post-cutoff fundamentals to perturb -- one filing would make that
-        # family's check vacuous.
-        filed = pd.DatetimeIndex([idx[0], idx[len(idx) // 2]])
+        filed = pd.DatetimeIndex(
+            [idx[0], idx[(63 * len(idx)) // 100], idx[(95 * len(idx)) // 100]]
+        )
         for i, sym in enumerate(names):
             fundamentals[sym] = pd.DataFrame(
                 {
-                    "gross_profitability": [0.10 + 0.02 * i, 0.12 + 0.02 * i],
-                    "ttm_net_income": [1e6 * (i + 1), 1.1e6 * (i + 1)],
-                    "book_equity": [5e6 * (i + 1), 5.2e6 * (i + 1)],
-                    "shares_outstanding": [1e6, 1e6],
+                    "gross_profitability": [0.10 + 0.02 * i, 0.12 + 0.02 * i,
+                                            0.13 + 0.02 * i],
+                    "ttm_net_income": [1e6 * (i + 1), 1.1e6 * (i + 1),
+                                       1.2e6 * (i + 1)],
+                    "book_equity": [5e6 * (i + 1), 5.2e6 * (i + 1),
+                                    5.3e6 * (i + 1)],
+                    "shares_outstanding": [1e6 * (i + 1), 1.02e6 * (i + 1),
+                                           1.04e6 * (i + 1)],
+                    "assets": [1e7 * (i + 1), 1.1e7 * (i + 1), 1.15e7 * (i + 1)],
+                    "revenue_ttm": [2e7 * (i + 1), 2.2e7 * (i + 1),
+                                    2.3e7 * (i + 1)],
                 },
                 index=filed,
             )
-    return PanelData(closes=closes, options=options, fundamentals=fundamentals,
-                     symbols=tuple(names))
+    return assemble_panel(bars, options, fundamentals, factors)
 
 
 def make_factors(
