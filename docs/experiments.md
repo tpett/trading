@@ -340,15 +340,25 @@ universe cross-product, the sweep runs as separate passes: price signals over
 everything (`--segments --signals
 mom21,mom63,mom126,mom252,rev5,rvol21,disthigh`), then the options/
 fundamentals families per options-pool segment (`--segments --universe
-opt-largecap:biotech --signals vrp,hedge,excite,atm_iv,smile,atm_spread,...`).
+opt-largecap:manufacturing-tech --signals vrp,hedge,excite,atm_iv,smile,atm_spread,...`).
 Disclosed caveats on every segment result (spec §4 rule 5): (a) SIC is each
 filer's **current** code applied backward over the window (no PIT
 reclassification); (b) segment membership is static across the window; (c)
 fine industries double-count names with their parent sector — distinct,
 honestly-counted trials; (d) a symbol without a SIC mapping belongs to no
-segment (never guessed; see `sic_map.csv` provenance). Below-threshold
-segments (< 15 names) are excluded at build time and printed, never silently
-dropped.
+segment (never guessed; see `sic_map.csv` provenance); (e) biotech (SIC
+2836/8731) emits no universes under current data and the 15-name floor — the
+charter hypothesis is structurally untestable as pre-registered, since large
+biotechs file under 2834, which is fused into pharma-chemicals; any
+redefinition must be a written prospective amendment filed *before* a biotech
+sweep runs (none has run; nothing is spent); (f) the banks segment is
+failure-censored — FRC and SBNY, two of the three 2023 bank failures, are FDIC
+filers with no EDGAR presence and are structurally absent from the SIC map,
+while SIVB is included, so banks-segment results are measured on a partially
+failure-censored cross-section; (g) one mapped symbol (CTVA, SIC 0100
+agriculture) falls in no segment's ranges — mapped-but-unsegmented is a known
+small residual alongside the ~2% unmapped. Below-threshold segments (< 15
+names) are excluded at build time and printed, never silently dropped.
 
 **Operator recipe (the two canonical invocations).** In practice the pass
 split above means two shapes of command cover the whole table without ever
@@ -361,7 +371,7 @@ mom21,mom63,mom126,mom252,rev5,rvol21,disthigh`. Options/fundamentals family,
 one options-pool segment at a time — repeat per `opt-largecap:<segment>` /
 `opt-midcap:<segment>` name (the run's stderr prints the excluded segments, so
 below-threshold ones are never silently skipped):
-`trading alphasearch sweep --segments --universe opt-largecap:biotech
+`trading alphasearch sweep --segments --universe opt-largecap:manufacturing-tech
 --signals vrp,hedge,excite,atm_iv,smile,atm_spread,gross_profitability,earnings_yield,book_to_market`.
 Running `--segments` bare against the full default registry is a deliberate
 refusal, not a bug — deep pools have no options or fundamentals store, so the
