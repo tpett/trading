@@ -337,3 +337,49 @@ momentum.
 
 **Within-industry reversal** — a stock's SHORT-term return relative to its sector
 mean reverses (Da-Liu-Schaumburg): sector-adjusted laggards bounce, leaders fade.
+
+## The robustness battery (Piece 3)
+
+- **Robustness battery** — the pre-registered, frozen set of seven checks a
+  BH survivor must face before it may spend its once-only holdout touch
+  (`trading alphasearch robustness <signal>:<universe>`). Pre-committed
+  interrogation instead of ad-hoc survivor-poking: the checks and thresholds
+  were written down before any survivor was examined, so passing them can't
+  be the product of tweaking the exam after seeing the student.
+- **Sub-period halves (check 1)** — re-run the discovery evaluation on each
+  half of the window (2019-01..2021-06 / 2021-07..2023-12). A real effect
+  shows the same sign in both halves with |t| ≥ 1; a one-regime wonder
+  doesn't.
+- **Universe-subset draws (check 2)** — five seeded random half-universes
+  (seed 42+i, sorted draws). An alpha carried by the breadth of the
+  cross-section survives ≥ 4 of 5; one carried by a few lucky names doesn't.
+- **Parameter jitter (check 3)** — the same evaluation at quantiles {4, 6} ×
+  min_names {10, 20}. Real effects don't care exactly where the bucket
+  boundaries fall.
+- **Decision-date offset (check 4)** — rebalance on the second trading
+  session of each month instead of the first. Guards against calendar-turn
+  artifacts; the alpha must keep its sign and half its magnitude.
+- **Name concentration (check 5)** — recompute the L/S series with the top-3
+  contributors to the long leg removed. A "three-name alpha" collapses; a
+  broad one retains ≥ half its point estimate.
+- **Month concentration (check 6)** — the top-3 calendar months' share of
+  the cumulative L/S log return must be ≤ 60%; otherwise the "alpha" is a
+  couple of episodes, not a process.
+- **Factor-proxy flag (check 7)** — warning-only: any factor loading with
+  |t| more than twice the alpha's |t| while regression R² > 0.5. The §9
+  SMB-costume detector — the series is mostly a factor bet wearing an alpha
+  costume.
+- **Cost-adjusted alpha** — the L/S series re-regressed after charging
+  parametric one-way costs (10/30/50 bps × turnover × both legs) at every
+  rebalance. The promotion rule requires t ≥ 2.0 at 30 bps.
+- **Amihud λ (price impact)** — |daily return| / dollar volume, averaged
+  over 252 days: the price move a dollar of trading buys. The amihud
+  signal's own construction, reused as an impact price.
+- **Capacity curve** — net alpha at book sizes $10k/$100k/$1M per side,
+  charging each rebalanced name its own λ × (book / names-per-leg) on entry
+  and exit. First-order model — an honest sketch of how fast paper alpha
+  drowns in impact, not a fill simulator.
+- **Holdout-eligible** — the battery's verdict (checks 1-6 pass AND the
+  30 bps cost row keeps t ≥ 2.0), journaled as one `kind="battery"` event
+  per candidate. The holdout command refuses candidates without it — a
+  written prospective amendment to the Piece 1 holdout protocol.
