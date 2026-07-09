@@ -191,9 +191,12 @@ def _max5(closes: pd.Series) -> float:
     return float(np.sort(rets)[-5:].mean())
 
 
-def _amihud(bars: pd.DataFrame) -> float:
+def amihud_lambda(bars: pd.DataFrame) -> float:
     """Mean |ret| / dollar volume over the last 252 bars; min 126 valid terms
-    (non-positive dollar volume or NaN return terms are skipped, never 0)."""
+    (non-positive dollar volume or NaN return terms are skipped, never 0).
+    Doubles as Piece 3's capacity-curve impact price: for an illiquidity
+    signal, the names' own lambda is the most self-consistent EOD impact
+    estimate available (robustness.capacity_curve)."""
     window = bars.iloc[-252:]
     rets = window["close"].pct_change().to_numpy()
     dollar = (window["close"] * window["volume"]).to_numpy()
@@ -273,7 +276,7 @@ _register("max5", _price_signal(lambda c: -_max5(c)))
 # Betting-against-beta (Frazzini-Pedersen) -> negate.
 _register("beta", _feature_signal("beta", -1.0))
 # Illiquidity premium (Amihud): harder-to-trade names pay more.
-_register("amihud", _bar_signal(_amihud))
+_register("amihud", _bar_signal(amihud_lambda))
 # High-volume return premium (Gervais-Kaniel-Mingelgrin).
 _register("vol_trend", _bar_signal(_vol_trend))
 # Income/value tilt: cash actually paid out over the trailing year.

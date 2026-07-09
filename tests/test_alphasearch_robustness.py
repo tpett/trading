@@ -504,3 +504,134 @@ def test_factor_proxy_flag_is_the_smb_costume_detector():
     assert factor_proxy_flag(mild)["flagged"] is False
     # Missing stats (errored trial): never flags, never crashes.
     assert factor_proxy_flag({})["flagged"] is False
+
+
+def test_apply_rebalance_charges_lands_on_the_first_following_day():
+    from trading.alphasearch.robustness import apply_rebalance_charges
+
+    idx = pd.date_range("2020-01-06", periods=10, freq="B", tz="UTC")
+    ls = pd.Series(0.001, index=idx)
+    charged = apply_rebalance_charges(
+        ls, [(idx[0], 0.003), (idx[5], 0.003), (idx[-1], 0.5)]
+    )
+    assert charged.iloc[1] == pytest.approx(0.001 - 0.003)
+    assert charged.iloc[6] == pytest.approx(0.001 - 0.003)
+    # A charge dated on the last day has no following return day: dropped.
+    # Untouched entries are copies, bit-identical to the input.
+    assert charged.drop(charged.index[[1, 6]]).eq(0.001).all()
+    assert ls.eq(0.001).all()                        # input never mutated
+
+
+def test_cost_adjusted_table_hand_arithmetic_and_monotone(tmp_path):
+    from trading.alphasearch.robustness import apply_rebalance_charges, cost_adjusted_table
+    from trading.alphasearch.sort import portfolio_sort
+
+    panel = make_panel(n_symbols=40)
+    factors = make_factors()
+    idx = panel.closes[panel.symbols[0]].index
+    dates = panel.decision_dates(idx[0], idx[-1])
+    sort = portfolio_sort(panel, SIGNALS["mom21"], dates, idx[-1])
+    rows = cost_adjusted_table(sort.ls, sort.rebalances,
+                               sort.turnover_monthly, factors)
+    assert [r["cost_bps"] for r in rows] == [10, 30, 50]        # FROZEN
+    # Hand check the 30 bps charge: 2 legs x turnover x 0.003 per rebalance.
+    per_rebalance = 2.0 * sort.turnover_monthly * 30 / 1e4
+    charged = apply_rebalance_charges(
+        sort.ls, [(d, per_rebalance) for d, _t, _b in sort.rebalances]
+    )
+    from trading.alphasearch.evaluate import evaluate_alpha
+    expected = evaluate_alpha(charged, factors, self_financing=True)
+    row30 = rows[1]
+    assert row30["alpha_annual_pct"] == pytest.approx(expected.alpha_annual_pct)
+    assert row30["alpha_t"] == pytest.approx(expected.alpha_tstat)
+    # Costs only ever hurt: alpha decreases with c.
+    alphas = [r["alpha_annual_pct"] for r in rows]
+    assert alphas[0] > alphas[1] > alphas[2]
+
+
+def test_cost_adjusted_table_without_turnover_reports_error():
+    from trading.alphasearch.robustness import cost_adjusted_table
+
+    idx = pd.date_range("2020-01-06", periods=10, freq="B", tz="UTC")
+    ls = pd.Series(0.001, index=idx)
+    rows = cost_adjusted_table(ls, ((idx[0], ("A",), ("B",)),),
+                               float("nan"), make_factors())
+    assert all(r["alpha_t"] is None for r in rows)
+    assert all("turnover" in r["error"] for r in rows)
+
+
+def _lambda_bars(n: int, daily_ret: float, dollar: float) -> pd.DataFrame:
+    """Bars with constant pct return and constant dollar volume, so
+    amihud_lambda == daily_ret / dollar exactly (the tier1 closed form)."""
+    idx = pd.date_range("2020-01-02", periods=n, freq="B", tz="UTC")
+    close = pd.Series(100.0 * (1 + daily_ret) ** np.arange(n), index=idx)
+    return pd.DataFrame({
+        "open": close, "high": close, "low": close, "close": close,
+        "volume": dollar / close, "div_cash": 0.0, "split_factor": 1.0,
+        "close_raw": close,
+    })
+
+
+def test_capacity_curve_two_name_hand_computed():
+    from trading.alphasearch.robustness import capacity_curve
+
+    # lambda_A = .01/1e6 = 1e-8, lambda_B = .01/5e5 = 2e-8 (known lambdas).
+    # 200 bars so the formation date sees >= 126 valid return terms (the
+    # amihud_lambda floor) -- at idx[130] each name has 130 valid terms.
+    bars = {"A": _lambda_bars(200, 0.01, 1e6), "B": _lambda_bars(200, 0.01, 5e5)}
+    closes = {s: f["close"] for s, f in bars.items()}
+    panel = PanelData(closes=closes, bars=bars, symbols=("A", "B"))
+    idx = closes["A"].index
+    factors = make_factors(periods=300)
+    # One formation: both names enter 1-name legs; 69 held days follow.
+    date = idx[130]
+    rebalances = ((date, ("A",), ("B",)),)
+    ls = pd.Series(0.001, index=idx[131:])
+    rows = capacity_curve(panel, rebalances, ls, factors)
+    assert [r["book_usd"] for r in rows] == [1e4, 1e5, 1e6]     # FROZEN
+    # Entry drag per $1 of book: lambda_A/1^2 + lambda_B/1^2 = 3e-8.
+    assert rows[2]["total_impact_charge"] == pytest.approx(3e-8 * 1e6, rel=1e-6)
+    assert rows[0]["total_impact_charge"] == pytest.approx(3e-8 * 1e4, rel=1e-6)
+    assert all(r["skipped_no_lambda"] == 0 for r in rows)
+    # More book, more impact, less alpha.
+    alphas = [r["alpha_annual_pct"] for r in rows]
+    assert alphas[0] > alphas[1] > alphas[2]
+
+
+def test_capacity_curve_charges_exits_at_the_old_leg_size():
+    from trading.alphasearch.robustness import capacity_curve
+
+    # 200 bars: both rebalance dates clear the 126-valid-term lambda floor.
+    bars = {"A": _lambda_bars(200, 0.01, 1e6), "B": _lambda_bars(200, 0.01, 1e6),
+            "C": _lambda_bars(200, 0.01, 1e6), "D": _lambda_bars(200, 0.01, 1e6)}
+    closes = {s: f["close"] for s, f in bars.items()}
+    panel = PanelData(closes=closes, bars=bars, symbols=("A", "B", "C", "D"))
+    idx = closes["A"].index
+    lam = 1e-8
+    # Formation: top=(A,B) bottom=(C,) -- then A,B exit for (D,) top.
+    rebalances = (
+        (idx[130], ("A", "B"), ("C",)),
+        (idx[140], ("D",), ("C",)),
+    )
+    ls = pd.Series(0.001, index=idx[131:])
+    rows = capacity_curve(panel, rebalances, ls, make_factors(periods=300))
+    # Formation: A,B enter n=2 legs (2 x lam/4), C enters n=1 (lam).
+    # Rebalance 2: D enters n=1 (lam); A,B exit at OLD n=2 (2 x lam/4).
+    per_dollar = (2 * lam / 4 + lam) + (lam + 2 * lam / 4)
+    assert rows[2]["total_impact_charge"] == pytest.approx(per_dollar * 1e6,
+                                                           rel=1e-6)
+
+
+def test_capacity_curve_counts_missing_lambda_names():
+    from trading.alphasearch.robustness import capacity_curve
+
+    bars = {"A": _lambda_bars(130, 0.01, 1e6),
+            "B": _lambda_bars(60, 0.01, 1e6)}      # < 126 valid terms -> NaN
+    closes = {s: f["close"] for s, f in bars.items()}
+    panel = PanelData(closes=closes, bars=bars, symbols=("A", "B"))
+    idx = closes["A"].index
+    rebalances = ((idx[128], ("A",), ("B",)),)
+    ls = pd.Series(0.001, index=idx[129:])
+    rows = capacity_curve(panel, rebalances, ls, make_factors(periods=200))
+    assert all(r["skipped_no_lambda"] == 1 for r in rows)
+    assert rows[2]["total_impact_charge"] == pytest.approx(1e-8 * 1e6, rel=1e-6)

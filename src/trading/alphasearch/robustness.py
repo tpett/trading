@@ -22,7 +22,7 @@ import pandas as pd
 from trading.alphasearch.evaluate import evaluate_alpha
 from trading.alphasearch.panel import PanelData
 from trading.alphasearch.sort import Membership, SortError, SortResult
-from trading.alphasearch.spec import SIGNALS, SignalSpec
+from trading.alphasearch.spec import SIGNALS, SignalSpec, amihud_lambda
 from trading.alphasearch.sweep import (
     BH_Q,
     SweepError,
@@ -406,3 +406,113 @@ def factor_proxy_flag(ls_stats: dict) -> dict:
                 offenders[name] = float(t)
     return {"flagged": len(offenders) > 0, "offenders": offenders,
             "alpha_t": alpha_t, "r2": r2}
+
+
+# ---------------------------------------------------------------------------#
+# Cost & capacity analysis (spec section 4): arithmetic, NO new trials.
+# ---------------------------------------------------------------------------#
+def apply_rebalance_charges(
+    ls: pd.Series, charges: list[tuple[pd.Timestamp, float]]
+) -> pd.Series:
+    """Deduct each charge from the first daily return strictly after its
+    rebalance date (the first day the traded book exists). A charge dated at
+    or after the last return day has no day to land on and is dropped (a
+    final-day rebalance is never held). Returns a copy."""
+    charged = ls.copy()
+    for date, charge in charges:
+        pos = int(charged.index.searchsorted(date, side="right"))
+        if pos < len(charged):
+            charged.iloc[pos] -= charge
+    return charged
+
+
+def _regress_charged(charged: pd.Series, factors: pd.DataFrame, row: dict) -> dict:
+    try:
+        alpha = evaluate_alpha(charged, factors, self_financing=True)
+        row["alpha_annual_pct"] = alpha.alpha_annual_pct
+        row["alpha_t"] = alpha.alpha_tstat
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        row["error"] = f"{type(exc).__name__}: {exc}"
+    return row
+
+
+def cost_adjusted_table(
+    ls: pd.Series,
+    rebalances: tuple[Membership, ...],
+    turnover_monthly: float,
+    factors: pd.DataFrame,
+) -> list[dict]:
+    """Cost-adjusted alpha (spec section 4, frozen reading): for each one-way
+    cost c in COST_BPS, EVERY rebalance (formation included) charges
+    2 x turnover_monthly x c -- both legs trade -- against the L/S series on
+    the first return day after that decision date, and the charged series is
+    re-regressed. turnover_monthly is exactly the leaderboard's measurement;
+    charging its mean per rebalance totals the same as charging actuals."""
+    rows: list[dict] = []
+    dates = [date for date, _top, _bottom in rebalances]
+    usable = turnover_monthly is not None and not math.isnan(turnover_monthly)
+    for bps in COST_BPS:
+        row: dict = {"cost_bps": bps, "alpha_annual_pct": None, "alpha_t": None}
+        if usable:
+            per_rebalance = 2.0 * float(turnover_monthly) * bps / 1e4
+            charged = apply_rebalance_charges(
+                ls, [(d, per_rebalance) for d in dates]
+            )
+            row = _regress_charged(charged, factors, row)
+        else:
+            row["error"] = "turnover unavailable (single rebalance?)"
+        rows.append(row)
+    return rows
+
+
+def capacity_curve(
+    panel: PanelData,
+    rebalances: tuple[Membership, ...],
+    ls: pd.Series,
+    factors: pd.DataFrame,
+) -> list[dict]:
+    """Amihud-implied capacity (spec section 4, frozen reading): for each
+    book size B per side, every name ENTERING a leg is charged its own
+    lambda x (B / n_new) impact on its 1/n_new-weight position -- a
+    leg-return drag of lambda x B / n_new^2 -- and every EXITING name the
+    analogue at the OLD leg's size (the position actually liquidated).
+    lambda = spec.amihud_lambda(view.bars(sym)) at the rebalance date (PIT).
+    NaN-lambda names are skipped and counted, never fabricated; final
+    holdings are never charged an exit. This is a FIRST-ORDER impact model
+    -- honest about being a model; for an illiquidity signal the names' own
+    lambda is the most self-consistent EOD impact estimate available."""
+    unit_charges: list[tuple[pd.Timestamp, float]] = []  # per $1 of book
+    skipped = 0
+    prev: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+    for date, top, bottom in rebalances:
+        view = panel.view(date)
+        unit = 0.0
+        for leg_index, current in enumerate((top, bottom)):
+            previous = prev[leg_index] if prev is not None else ()
+            cur_set, prev_set = set(current), set(previous)
+            for sym in sorted(cur_set - prev_set):        # entries
+                lam = amihud_lambda(view.bars(sym))
+                if math.isnan(lam):
+                    skipped += 1
+                    continue
+                unit += lam / (len(current) * len(current))
+            for sym in sorted(prev_set - cur_set):        # exits
+                lam = amihud_lambda(view.bars(sym))
+                if math.isnan(lam):
+                    skipped += 1
+                    continue
+                unit += lam / (len(previous) * len(previous))
+        unit_charges.append((date, unit))
+        prev = (top, bottom)
+    rows: list[dict] = []
+    for book in BOOK_SIZES:
+        row: dict = {
+            "book_usd": book, "alpha_annual_pct": None, "alpha_t": None,
+            "total_impact_charge": sum(u for _d, u in unit_charges) * book,
+            "skipped_no_lambda": skipped,
+        }
+        charged = apply_rebalance_charges(
+            ls, [(d, u * book) for d, u in unit_charges]
+        )
+        rows.append(_regress_charged(charged, factors, row))
+    return rows
