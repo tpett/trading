@@ -448,6 +448,56 @@ in the glossary ("The anomaly zoo" section). NOTE: the largecap bar cache is
 the legacy narrow schema (no `div_cash`/`split_factor`), so `div_yield` and
 `net_issuance` journal honest error trials there until it is re-backfilled.
 
+## 11. Tier-1 batch sweep — FIRST BH SURVIVORS: the amihud family (799 trials)
+
+**Ran 2026-07-09 (master 6ac8427 + ops).** Pre-sweep ops completed first:
+fundamentals store rsynced from the mini (1,110 symbol files) and the
+largecap bar cache re-backfilled to the extended schema (728/729 = 99.9%
+coverage, only FRC unavailable; the refetch also recovered 15 previously
+missing rename symbols, growing the cache 713→728 — which changed segment
+emission vs. the §10 sweep's universe set, see reconciliation).
+
+**Execution:** the plan's five-invocation run-book, one leaderboard read at
+the end. Reconciliation: journal landed at exactly **799 discovery trials**
+(238 prior + 561 new), matching the re-derived arithmetic (the run-book's
+printed ranges were computed against a 26-universe assumption; the actual
+emitted set is 28 universes — 2 flat + 21 deep + 5 options — and observed
+per-invocation deltas were exact under that correction: +28, +2, +286, +21,
++224). All flat-pool overlaps deduped by config hash as designed.
+
+**RESULT — three BH survivors at q=0.10, all one signal family (amihud,
+long-illiquid/short-liquid, monthly, equal weight):**
+
+| signal | universe | 4F α/yr | t | p | DSR |
+|---|---|---:|---:|---:|---:|
+| amihud | midcap (flat, 137 names) | +61.5% | +8.34 | ≈0 | 0.999 |
+| amihud | opt-midcap:trade (26) | +42.5% | +3.87 | 0.0001 | 0.679 |
+| amihud | midcap:trade (61) | +37.2% | +3.69 | 0.0002 | 0.584 |
+
+Nothing else passed (next best: droa largecap:finance t=−3.05 — wrong-signed
+fundamental momentum, p=0.0023, below the m=799 bar).
+
+**Read this skeptically before celebrating (the pre-registered caveats bite
+hardest exactly here):**
+1. **The cheap series carries NO transaction costs**, and amihud's long leg
+   is by construction the most illiquid mid-caps — the exact names where
+   costs, spreads, and capacity destroy paper alpha. The illiquidity premium
+   is the classic "real on paper, unharvestable in size" anomaly. Mitigant:
+   measured monthly one-way turnover is tiny (~4-6%), so the cost drag is
+   bounded; a cost-realistic full backtest is the required next test.
+2. Classical OLS SEs on daily data (t inflated 10-30% vs HAC) — though
+   t=8.3 survives any plausible haircut.
+3. Universe caveats: pool survivorship tilts (§10), and the 2019-2023 window
+   includes the 2020-21 small/mid-cap liquidity mania.
+4. Positive SMB (+0.48) and HML (+0.69) loadings on the flat-midcap trial —
+   the 4F regression already nets these out, but the strategy is
+   structurally a small/value-tilted book; capacity is small.
+
+**The holdout (2024+) has NOT been touched** — the three survivors are
+eligible for their once-only re-prove, but that decision (and whether
+robustness/cost tests should come first, i.e., Piece 3) belongs to the
+developer. Nothing is spent.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
