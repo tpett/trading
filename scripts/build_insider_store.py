@@ -13,7 +13,9 @@ tmp+os.replace writes, and a .source marker ("form345") like the bar caches.
 
 Error handling (spec section 5): a quarter whose download or parse fails is
 a NAMED coverage GAP -- the build continues, the gap is printed loudly in
-the final report, and the exit code is 1 so the orchestrator cannot miss it.
+the final report, the exit code is 1 so the orchestrator cannot miss it, and
+the .source marker becomes "form345 GAPS:<quarters>" so the incomplete build
+is detectable from disk after the launch log is gone.
 The NEWEST quarter 404ing is publication lag, not a gap. The store must be
 empty before a rebuild (whole-regeneration semantics: a rebuild on top of an
 older build could leave stale symbols behind) -- delete its contents first.
@@ -128,18 +130,28 @@ def map_to_symbols(
     return frames, unmapped_rows, unmapped_ciks
 
 
-def write_store(frames: dict[str, pd.DataFrame], store_root: Path) -> None:
+def write_store(
+    frames: dict[str, pd.DataFrame],
+    store_root: Path,
+    gap_quarters: list[str] | None = None,
+) -> None:
     """Whole-store write: per-symbol parquet, atomic tmp+os.replace, then the
-    .source marker (the bar-cache convention)."""
+    .source marker (the bar-cache convention). A gapped build stamps
+    "form345 GAPS:<quarters>" instead of plain "form345": incomplete builds
+    must be detectable from DISK, not just the launch log's exit code (the
+    load path warns on a GAPS marker)."""
     store_root.mkdir(parents=True, exist_ok=True)
     for symbol in sorted(frames):
         path = store_root / f"{symbol.replace('/', '-')}.parquet"
         tmp = path.with_suffix(".parquet.tmp")
         frames[symbol].to_parquet(tmp)
         os.replace(tmp, path)
+    text = "form345"
+    if gap_quarters:
+        text += " GAPS:" + ",".join(gap_quarters)
     marker = store_root / SOURCE_MARKER
     tmp = marker.with_suffix(".tmp")
-    tmp.write_text("form345")
+    tmp.write_text(text)
     os.replace(tmp, marker)
 
 
@@ -157,10 +169,19 @@ def ensure_empty(store_root: Path) -> None:
 
 
 def window_members(membership_path: Path) -> set[str]:
-    """Membership symbols whose interval overlaps the discovery window."""
+    """Membership symbols whose interval overlaps the discovery window.
+    An empty result means a broken membership CSV, not a real universe:
+    refuse loudly rather than divide by zero in the coverage report."""
     df = pd.read_csv(membership_path, comment="#", dtype=str).fillna("")
     overlap = (df["start"] <= WINDOW_END) & ((df["end"] == "") | (df["end"] > WINDOW_START))
-    return set(df.loc[overlap, "symbol"])
+    members = set(df.loc[overlap, "symbol"])
+    if not members:
+        raise SystemExit(
+            f"ERROR: no membership symbol in {membership_path} overlaps the "
+            f"discovery window {WINDOW_START}..{WINDOW_END}; the membership "
+            "CSV is broken or empty (the coverage denominator would be zero)."
+        )
+    return members
 
 
 def main() -> None:
@@ -171,6 +192,7 @@ def main() -> None:
 
     quarter_frames: list[pd.DataFrame] = []
     gaps: list[str] = []
+    gap_quarters: list[str] = []
     total_skipped = 0
     for quarter in quarters:
         try:
@@ -180,6 +202,7 @@ def main() -> None:
             tx, skipped = parse_quarter(zip_path)
         except (OSError, zipfile.BadZipFile, ValueError, KeyError) as exc:
             gaps.append(gap_line(quarter, exc))
+            gap_quarters.append(quarter)
             print(f"ERROR: {quarter} failed ({exc}); continuing -- GAP RECORDED")
             continue
         total_skipped += skipped
@@ -193,7 +216,7 @@ def main() -> None:
 
     transactions = pd.concat(quarter_frames, ignore_index=True)
     frames, unmapped_rows, unmapped_ciks = map_to_symbols(transactions, cik_map)
-    write_store(frames, STORE_DIR)
+    write_store(frames, STORE_DIR, gap_quarters)
 
     # ---- coverage report (spec section 4) ----
     n_p = int((transactions["code"] == "P").sum())

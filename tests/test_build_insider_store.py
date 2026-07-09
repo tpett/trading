@@ -41,17 +41,23 @@ def _cik_map(rows: list[tuple]) -> pd.DataFrame:
 
 def test_map_to_symbols_uses_filed_date_intervals():
     # FB/META shape: one cik, two symbol intervals; the FILED date selects.
+    # Intervals are start-inclusive / end-exclusive: a filing exactly AT the
+    # rename boundary and one AFTER it both land on the NEW symbol.
     tx = _tx([
         ("a1", 1326801, "2021-06-01", "P", 100.0, 10.0, 9001, True),
         ("a2", 1326801, "2022-06-01", "P", 200.0, 10.0, 9002, False),
+        ("a3", 1326801, "2022-06-09", "P", 300.0, 10.0, 9003, True),   # at boundary
+        ("a4", 1326801, "2022-07-01", "S", 400.0, 10.0, 9004, False),  # post-rename
     ])
     cmap = _cik_map([
         ("FB", 1326801, "2017-01-01", "2022-06-09"),
         ("META", 1326801, "2022-06-09", ""),
     ])
     frames, unmapped_rows, unmapped_ciks = bis.map_to_symbols(tx, cmap)
-    assert set(frames) == {"FB"}             # both filings pre-rename
-    assert len(frames["FB"]) == 2
+    assert set(frames) == {"FB", "META"}
+    assert len(frames["FB"]) == 2            # pre-rename filings: old symbol
+    assert len(frames["META"]) == 2          # boundary + later: new symbol
+    assert frames["META"].index.min() == pd.Timestamp("2022-06-09", tz="UTC")
     assert unmapped_rows == 0 and unmapped_ciks == 0
     assert list(frames["FB"].columns) == INSIDER_COLUMNS
     assert frames["FB"].index.name == "filed"
@@ -101,6 +107,28 @@ def test_write_store_atomic_layout_and_marker(tmp_path):
     assert got.index.is_monotonic_increasing  # sorted by filed
     assert (store / ".source").read_text() == "form345"
     assert not list(store.glob("*.tmp"))     # atomic: no torn files left
+
+
+def test_write_store_gapped_build_stamps_gaps_into_marker(tmp_path):
+    # Incomplete builds must be detectable from DISK, not just the launch
+    # log's exit code: gaps go into the .source marker; a clean build stays
+    # exactly "form345" (test above pins that).
+    tx = _tx([("a1", 55, "2021-06-01", "P", 100.0, 10.0, 9001, True)])
+    frames, _, _ = bis.map_to_symbols(tx, _cik_map([("XCO", 55, "2017-01-01", "")]))
+    store = tmp_path / "equities"
+    bis.write_store(frames, store, gap_quarters=["2020q2", "2021q4"])
+    assert (store / ".source").read_text() == "form345 GAPS:2020q2,2021q4"
+    bis.write_store(frames, store, gap_quarters=[])  # no gaps: clean marker
+    assert (store / ".source").read_text() == "form345"
+
+
+def test_window_members_refuses_empty_membership(tmp_path):
+    csv = tmp_path / "membership.csv"
+    csv.write_text("symbol,start,end\nOLD,2015-01-01,2016-01-01\n")  # pre-window
+    with pytest.raises(SystemExit, match="no membership symbol"):
+        bis.window_members(csv)
+    csv.write_text("symbol,start,end\nNEW,2020-01-01,\n")            # in-window
+    assert bis.window_members(csv) == {"NEW"}
 
 
 def test_ensure_empty_refuses_a_populated_store(tmp_path):
