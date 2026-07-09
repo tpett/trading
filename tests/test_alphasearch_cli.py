@@ -28,6 +28,10 @@ def _seed_journal(journal_dir, *, with_holdout: bool = False) -> None:
     log_trial(journal, kind="discovery",
               config=trial_config("mom21", "largecap", DISCOVERY_WINDOW),
               ts="t1", result=result)
+    # Piece 3: the holdout now requires a battery-passed verdict.
+    log_trial(journal, kind="battery",
+              config=trial_config("mom21", "largecap", DISCOVERY_WINDOW),
+              ts="t1b", result={"eligible": True})
     if with_holdout:
         log_trial(journal, kind="holdout",
                   config=trial_config("mom21", "largecap", "2024-01-01..2026-07-07"),

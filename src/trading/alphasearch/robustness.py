@@ -14,6 +14,7 @@ This module never reads the clock: `ts` always arrives from the CLI.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,14 +22,27 @@ import pandas as pd
 
 from trading.alphasearch.evaluate import evaluate_alpha
 from trading.alphasearch.panel import PanelData
-from trading.alphasearch.sort import Membership, SortError, SortResult
+from trading.alphasearch.sort import (
+    MIN_NAMES,
+    QUANTILES,
+    TERCILE_BELOW,
+    Membership,
+    SortError,
+    SortResult,
+    portfolio_sort,
+)
 from trading.alphasearch.spec import SIGNALS, SignalSpec, amihud_lambda
 from trading.alphasearch.sweep import (
     BH_Q,
+    DISCOVERY_WINDOW,
     SweepError,
+    UniverseSpec,
     _bh_survivor_hashes,
+    _check_factor_coverage,
+    _check_universe_supports,
     _hashed_params,
     _window_bounds,
+    build_universe_panel,
     discovery_trials,
     evaluate_trial,
     find_discovery_trial,
@@ -516,3 +530,122 @@ def capacity_curve(
         )
         rows.append(_regress_charged(charged, factors, row))
     return rows
+
+
+# ---------------------------------------------------------------------------#
+# The battery runner: refusal gate -> checks 1-4 (journaled re-evaluations)
+# -> checks 5-7 + cost/capacity (arithmetic) -> journaled verdict.
+# ---------------------------------------------------------------------------#
+@dataclass(frozen=True)
+class BatteryOutcome:
+    signal: str
+    universe: str
+    window: str
+    checks: tuple[CheckResult, ...]   # checks 1-6, spec order
+    factor_proxy: dict                # check 7: warning only, never blocks
+    cost_table: list[dict]
+    capacity_curve: list[dict]
+    eligible: bool                    # the frozen promotion rule
+    event: dict                       # the journaled kind="battery" verdict
+
+
+def run_battery(
+    uspec: UniverseSpec,
+    journal: Journal,
+    factors: pd.DataFrame,
+    ts: str,
+    signal_name: str,
+    *,
+    discovery_window: str = DISCOVERY_WINDOW,
+    quantiles: int = QUANTILES,
+    tercile_below: int = TERCILE_BELOW,
+    min_names: int = MIN_NAMES,
+    panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
+        build_universe_panel
+    ),
+) -> BatteryOutcome:
+    """Run the frozen battery on ONE current BH survivor (spec section 3).
+
+    Refuses non-survivors BEFORE journaling anything (require_survivor).
+    Checks 1-4 journal battery-tagged, BH-counted discovery trials; checks
+    5-7 and the cost/capacity analysis are arithmetic on a locally
+    recomputed full-window sort (identical config to the journaled discovery
+    trial -- deliberately NOT journaled again). The verdict is one
+    kind="battery" event per (signal, universe); re-runs replace by config
+    hash. The promotion rule (frozen): eligible iff checks 1-6 all pass AND
+    the 30 bps cost row retains t >= ELIGIBLE_MIN_COST_T. Never touches
+    holdout state."""
+    params = _hashed_params(quantiles, tercile_below, min_names)
+    discovery = require_survivor(journal, signal_name, uspec.name,
+                                 discovery_window, params)
+    full_alpha = float(discovery["ls"]["alpha_annual_pct"])
+    start, end = _window_bounds(discovery_window)
+    # Stale factors refuse HERE, before the first re-evaluation journals:
+    # letting evaluate_trial hit the coverage check inside the loop would
+    # journal 12 predictable error trials for one fixable cache problem.
+    try:
+        _check_factor_coverage(factors, end)
+    except ValueError as exc:
+        raise SweepError(str(exc)) from exc
+    panel = panel_factory(uspec, factors)
+    spec = SIGNALS[signal_name]
+    _check_universe_supports(panel, spec, uspec.name)
+    ctx = BatteryContext(
+        journal=journal, panel=panel, spec=spec, factors=factors, ts=ts,
+        universe=uspec.name, window=discovery_window, full_alpha=full_alpha,
+        quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+        tag=f"{signal_name}:{uspec.name}",
+    )
+    checks = [check_subperiods(ctx), check_subsets(ctx), check_jitter(ctx),
+              check_offset(ctx)]
+    # Full-window sort recomputed ONCE for checks 5-6 and cost/capacity --
+    # same config as the journaled discovery trial, so journaling it again
+    # would only append a duplicate; spec: checks 5-7 journal no new trials.
+    try:
+        sort = portfolio_sort(
+            panel, spec, panel.decision_dates(start, end), end,
+            quantiles=quantiles, tercile_below=tercile_below,
+            min_names=min_names,
+        )
+    except SortError as exc:
+        # The journaled discovery trial was clean, so current caches must
+        # have drifted from the evidence. Refuse loudly; journal nothing new.
+        raise SweepError(
+            f"full-window sort failed against current data ({exc}) although "
+            f"the journaled discovery trial is clean; re-run the sweep before "
+            f"the battery"
+        ) from exc
+    checks.append(check_name_concentration(ctx, sort))
+    checks.append(check_month_concentration(sort.ls))
+    proxy = factor_proxy_flag(discovery.get("ls") or {})
+    cost_rows = cost_adjusted_table(sort.ls, sort.rebalances,
+                                    sort.turnover_monthly, factors)
+    capacity_rows = capacity_curve(panel, sort.rebalances, sort.ls, factors)
+    cost_t = next(
+        (r["alpha_t"] for r in cost_rows if r["cost_bps"] == ELIGIBLE_COST_BPS),
+        None,
+    )
+    eligible = (
+        all(c.passed for c in checks)
+        and cost_t is not None
+        and float(cost_t) >= ELIGIBLE_MIN_COST_T
+    )
+    config = trial_config(signal_name, uspec.name, discovery_window,
+                          params=params)
+    verdict = {
+        "checks": {
+            c.name: {"number": c.number, "passed": c.passed, **c.detail}
+            for c in checks
+        },
+        "factor_proxy": proxy,
+        "cost_table": cost_rows,
+        "capacity_curve": capacity_rows,
+        "eligible": eligible,
+    }
+    event = log_trial(journal, kind="battery", config=config, ts=ts,
+                      result=verdict)
+    return BatteryOutcome(
+        signal=signal_name, universe=uspec.name, window=discovery_window,
+        checks=tuple(checks), factor_proxy=proxy, cost_table=cost_rows,
+        capacity_curve=capacity_rows, eligible=eligible, event=event,
+    )

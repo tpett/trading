@@ -635,3 +635,113 @@ def test_capacity_curve_counts_missing_lambda_names():
     rows = capacity_curve(panel, rebalances, ls, make_factors(periods=200))
     assert all(r["skipped_no_lambda"] == 1 for r in rows)
     assert rows[2]["total_impact_charge"] == pytest.approx(1e-8 * 1e6, rel=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# run_battery composition + verdict event
+# --------------------------------------------------------------------------- #
+def _swept_survivor(tmp_path, n_symbols=40):
+    """A real BH survivor: mom21 swept on the wide fixture panel."""
+    from trading.alphasearch.sweep import UniverseSpec, run_sweep
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel(n_symbols=n_symbols)
+    factors = make_factors()
+    uspec = UniverseSpec("largecap", tmp_path, tmp_path / "s.jsonl", None)
+    run_sweep({"largecap": uspec}, journal, factors, ts="t0",
+              signals={"mom21": SIGNALS["mom21"]}, window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    return journal, panel, factors, uspec
+
+
+def test_run_battery_refuses_nonsurvivor_before_journaling(tmp_path):
+    from trading.alphasearch.robustness import run_battery
+    from trading.alphasearch.sweep import UniverseSpec
+
+    journal = trials_journal(tmp_path / "journal")
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap", WINDOW), ts="t1",
+              result=_result_like(alpha_annual_pct=12.0, alpha_t=8.0, p=1e-8))
+    log_trial(journal, kind="discovery",
+              config=trial_config("rvol21", "largecap", WINDOW), ts="t1",
+              result=_result_like(alpha_annual_pct=0.3, alpha_t=0.1, p=0.92))
+    uspec = UniverseSpec("largecap", tmp_path, tmp_path / "s.jsonl", None)
+    before = len(list(journal.events()))
+    with pytest.raises(SweepError, match="not a current BH survivor"):
+        run_battery(uspec, journal, make_factors(), "t2", "rvol21",
+                    discovery_window=WINDOW,
+                    panel_factory=lambda _u, _f: make_panel())
+    assert len(list(journal.events())) == before      # journaled NOTHING
+
+
+def test_run_battery_journals_tagged_trials_and_a_verdict(tmp_path):
+    from trading.alphasearch.robustness import run_battery
+    from trading.alphasearch.sweep import discovery_trials
+
+    journal, panel, factors, uspec = _swept_survivor(tmp_path)
+    outcome = run_battery(uspec, journal, factors, "t1", "mom21",
+                          discovery_window=WINDOW,
+                          panel_factory=lambda _u, _f: panel)
+    # 2 halves + 5 draws + 4 jitter + 1 offset = 12 tagged re-evaluations,
+    # all BH-counted discovery trials on top of the 1 swept trial.
+    trials = discovery_trials(journal)
+    assert len(trials) == 13
+    tagged = [t for t in trials if t.get("battery") == "mom21:largecap"]
+    assert len(tagged) == 12
+    # Checks 1-6 in spec order; 7 is the warning dict.
+    assert [c.number for c in outcome.checks] == [1, 2, 3, 4, 5, 6]
+    assert [c.name for c in outcome.checks] == [
+        "sub_period_halves", "universe_subsets", "parameter_jitter",
+        "decision_offset", "name_concentration", "month_concentration",
+    ]
+    assert isinstance(outcome.eligible, bool)
+    assert set(outcome.factor_proxy) == {"flagged", "offenders", "alpha_t", "r2"}
+    assert [r["cost_bps"] for r in outcome.cost_table] == [10, 30, 50]
+    assert [r["book_usd"] for r in outcome.capacity_curve] == [1e4, 1e5, 1e6]
+    # The verdict event: kind="battery", SAME config hash as the discovery
+    # trial (default params), full payload, json-safe.
+    event = outcome.event
+    assert event["kind"] == "battery"
+    discovery = next(t for t in trials if t.get("battery") is None
+                     and t["signal"] == "mom21" and t["window"] == WINDOW)
+    assert event["config_hash"] == discovery["config_hash"]
+    assert event["eligible"] == outcome.eligible
+    assert set(event["checks"]) == {c.name for c in outcome.checks}
+
+
+def test_run_battery_rerun_replaces_the_verdict_and_double_counts_nothing(tmp_path):
+    from trading.alphasearch.robustness import run_battery
+    from trading.alphasearch.sweep import battery_verdict, discovery_trials
+
+    journal, panel, factors, uspec = _swept_survivor(tmp_path)
+    kwargs = dict(discovery_window=WINDOW, panel_factory=lambda _u, _f: panel)
+    first = run_battery(uspec, journal, factors, "t1", "mom21", **kwargs)
+    events_after_first = len(list(journal.events()))
+    second = run_battery(uspec, journal, factors, "t2", "mom21", **kwargs)
+    assert len(discovery_trials(journal)) == 13          # identical configs dedupe
+    # Verdict replaced by config hash: ONE battery event survives dedupe,
+    # and it is the LATEST.
+    verdict = battery_verdict(journal, first.event["config_hash"])
+    assert verdict is not None and verdict["ts"] == "t2"
+    # ...but the journal itself is append-only (both runs appended).
+    assert len(list(journal.events())) > events_after_first
+    assert second.eligible == first.eligible             # deterministic
+
+
+def test_run_battery_narrow_universe_fails_check2_via_error_trials(tmp_path):
+    # 16 names: half-draws of 8 < min_names 15 -> the five subset trials are
+    # honest SortError error trials, the check fails, the battery still
+    # completes and journals its verdict (an uncomputable perturbation is a
+    # FAIL, not a crash).
+    from trading.alphasearch.robustness import run_battery
+
+    journal, panel, factors, uspec = _swept_survivor(tmp_path, n_symbols=16)
+    outcome = run_battery(uspec, journal, factors, "t1", "mom21",
+                          discovery_window=WINDOW,
+                          panel_factory=lambda _u, _f: panel)
+    subsets = next(c for c in outcome.checks if c.name == "universe_subsets")
+    assert not subsets.passed and subsets.detail["n_pass"] == 0
+    assert not outcome.eligible
+    errored = [e for e in journal.events()
+               if e.get("battery") is not None and e.get("error") is not None]
+    assert len(errored) >= 5

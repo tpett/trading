@@ -281,15 +281,74 @@ HOLDOUT_FROM = "2020-04-01"
 MIN_SPAN = 30
 
 
-def _sweep_then_holdout_setup(tmp_path):
-    """Discovery on Q1 2020; the fixture's remaining bars are the holdout."""
+def _log_battery_verdict(journal, signal, universe, window, *, eligible,
+                         params=None):
+    """Fabricate a Piece 3 battery verdict for the (default-params) config."""
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    log_trial(journal, kind="battery",
+              config=trial_config(signal, universe, window, params=params),
+              ts="tb", result={"eligible": eligible})
+
+
+def _sweep_then_holdout_setup(tmp_path, with_battery: bool = True):
+    """Discovery on Q1 2020; the fixture's remaining bars are the holdout.
+    with_battery fabricates the Piece 3 battery-passed verdict the holdout
+    now requires (its own tests set False to exercise the refusal)."""
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel()
     factors = make_factors()
     run_sweep(_universe(tmp_path), journal, factors, ts="t1",
               signals=_subset("mom21"), window=DISCOVERY,
               panel_factory=lambda _u, _f: panel)
+    if with_battery:
+        _log_battery_verdict(journal, "mom21", "largecap", DISCOVERY,
+                             eligible=True)
     return journal, panel, factors
+
+
+def test_holdout_refused_for_battery_less_survivor(tmp_path):
+    # Prospective amendment to Piece 1 spec 3.6 (Piece 3 design spec): no
+    # holdout may be spent on a survivor that has not passed its battery.
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path,
+                                                        with_battery=False)
+    with pytest.raises(SweepError) as excinfo:
+        run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
+                    "mom21", holdout_start=HOLDOUT_FROM,
+                    discovery_window=DISCOVERY, min_factor_span_days=MIN_SPAN,
+                    panel_factory=lambda _u, _f: panel)
+    # The refusal names the command that fixes it, and journals no touch.
+    assert "trading alphasearch robustness mom21:largecap" in str(excinfo.value)
+    assert all(e.get("kind") != "holdout" for e in journal.events())
+
+
+def test_holdout_refused_for_battery_failed_survivor(tmp_path):
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path,
+                                                        with_battery=False)
+    _log_battery_verdict(journal, "mom21", "largecap", DISCOVERY,
+                         eligible=False)
+    with pytest.raises(SweepError, match="did not pass"):
+        run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
+                    "mom21", holdout_start=HOLDOUT_FROM,
+                    discovery_window=DISCOVERY, min_factor_span_days=MIN_SPAN,
+                    panel_factory=lambda _u, _f: panel)
+    assert all(e.get("kind") != "holdout" for e in journal.events())
+
+
+def test_holdout_battery_gate_binds_to_the_exact_config(tmp_path):
+    # A battery verdict for DIFFERENT params must not qualify the default-
+    # params holdout (hash-keyed, like the BH survivor gate).
+    journal, panel, factors = _sweep_then_holdout_setup(tmp_path,
+                                                        with_battery=False)
+    other_params = {"quantiles": 4, "weighting": "equal", "cadence": "monthly",
+                    "tercile_below": 50, "min_names": 15}
+    _log_battery_verdict(journal, "mom21", "largecap", DISCOVERY,
+                         eligible=True, params=other_params)
+    with pytest.raises(SweepError, match="robustness"):
+        run_holdout(_universe(tmp_path)["largecap"], journal, factors, "t2",
+                    "mom21", holdout_start=HOLDOUT_FROM,
+                    discovery_window=DISCOVERY, min_factor_span_days=MIN_SPAN,
+                    panel_factory=lambda _u, _f: panel)
 
 
 def test_holdout_pass_rule_is_signed_ratio():
@@ -449,6 +508,11 @@ def test_holdout_journals_the_actual_params(tmp_path):
     run_sweep(_universe(tmp_path), journal, factors, ts="t1",
               signals=_subset("mom21"), window=DISCOVERY, quantiles=4,
               panel_factory=lambda _u, _f: panel)
+    _log_battery_verdict(
+        journal, "mom21", "largecap", DISCOVERY, eligible=True,
+        params={"quantiles": 4, "weighting": "equal", "cadence": "monthly",
+                "tercile_below": 50, "min_names": 15},
+    )
     outcome = run_holdout(
         _universe(tmp_path)["largecap"], journal, factors, "t2", "mom21",
         holdout_start=HOLDOUT_FROM, discovery_window=DISCOVERY, quantiles=4,

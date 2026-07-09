@@ -543,6 +543,16 @@ def _bh_survivor_hashes(journal: Journal) -> set[str]:
     return {t["config_hash"] for t, ok in zip(trials, mask, strict=True) if ok}
 
 
+def battery_verdict(journal: Journal, config_hash: str) -> dict | None:
+    """The latest kind="battery" verdict event for a discovery config hash
+    (Piece 3). load_trials' (config_hash, kind) dedupe makes re-runs replace
+    in place; None when the battery has never been run for this config."""
+    for event in load_trials(journal):
+        if event.get("kind") == "battery" and event.get("config_hash") == config_hash:
+            return event
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # The sweep runner (spec 3.6)
 # --------------------------------------------------------------------------- #
@@ -678,9 +688,9 @@ def run_holdout(
     (by config hash, never merely the (signal, universe) pair) not a current
     BH survivor; already holdout-touched unless confirm() returns the literal
     RERUN_CONFIRMATION; factor cache covering < min_factor_span_days of the
-    holdout. The realized window end -- min(latest bar, factor end), i.e.
-    exactly what evaluate_trial sees -- is journaled so the evaluation is
-    exactly reproducible.
+    holdout; battery not passed (Piece 3). The realized window end --
+    min(latest bar, factor end), i.e. exactly what evaluate_trial sees -- is
+    journaled so the evaluation is exactly reproducible.
     """
     if signal_name not in SIGNALS:
         known = ", ".join(sorted(SIGNALS))
@@ -717,6 +727,22 @@ def run_holdout(
             f"{signal_name}:{uspec.name} over {discovery_window} is not a "
             f"current BH survivor (q={BH_Q}); the once-only holdout is "
             f"reserved for survivors"
+        )
+    # Piece 3 battery gate -- a WRITTEN PROSPECTIVE AMENDMENT to Piece 1 spec
+    # 3.6, recorded in docs/superpowers/specs/2026-07-09-robustness-battery-
+    # design.md section 3: no holdout may be spent on a survivor that has not
+    # passed its robustness battery. No holdout had ever been spent when this
+    # gate was added, so nothing is affected retroactively. Hash-keyed to the
+    # EXACT discovery trial, like the BH gate above.
+    verdict = battery_verdict(journal, discovery["config_hash"])
+    if verdict is None or verdict.get("eligible") is not True:
+        state = ("has not been run" if verdict is None
+                 else "did not pass (not holdout-eligible)")
+        raise SweepError(
+            f"robustness battery for {signal_name}:{uspec.name} {state}; the "
+            f"once-only holdout is reserved for battery-passed survivors. "
+            f"Run `trading alphasearch robustness {signal_name}:{uspec.name}` "
+            f"first"
         )
     prior = prior_holdout_trial(journal, signal_name, uspec.name)
     if prior is not None and confirm() != RERUN_CONFIRMATION:
