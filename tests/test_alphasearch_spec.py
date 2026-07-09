@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 
 import pandas as pd
+import pytest
 
 from trading.alphasearch.panel import PanelData, options_from_cells
-from trading.alphasearch.spec import SIGNALS
+from trading.alphasearch.spec import SIGNALS, _register
 
 
 def _geometric_panel(n_days: int = 300, rates: dict[str, float] | None = None) -> PanelData:
@@ -185,3 +186,15 @@ def test_registry_is_complete_with_correct_requirements():
         assert spec.requires_options == (name in options_family)
         assert spec.requires_option_volume == (name in volume_family)
         assert spec.requires_fundamentals == (name in fundamentals_family)
+
+
+def test_register_enforces_option_volume_implies_options():
+    # Leg volume lives on option cells; requires_option_volume without
+    # requires_options would slip past the options-store refusal in
+    # sweep._check_universe_supports and hit missing cells directly.
+    with pytest.raises(AssertionError):
+        _register(
+            "bogus", lambda view, as_of: pd.Series(dtype="float64"),
+            requires_option_volume=True, requires_options=False,
+        )
+    assert "bogus" not in SIGNALS  # the failed registration never landed

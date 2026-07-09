@@ -57,6 +57,12 @@ def _register(
     requires_fundamentals: bool = False,
     requires_option_volume: bool = False,
 ) -> None:
+    # Leg volume lives on option cells; a signal that reads it without also
+    # requiring options would slip past the options-store refusal in
+    # sweep._check_universe_supports and hit missing cells directly.
+    assert not requires_option_volume or requires_options, (
+        f"{name}: requires_option_volume=True must also set requires_options=True"
+    )
     SIGNALS[name] = SignalSpec(
         name,
         fn,

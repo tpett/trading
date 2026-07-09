@@ -202,6 +202,12 @@ def test_sweep_segments_refusal_prints_signal_family_hint(tmp_path, monkeypatch,
     err = capsys.readouterr().err
     assert "hint:" in err
     assert "mom21,mom63,mom126,mom252,rev5,rvol21,disthigh" in err
+    assert "segment-safe signals" in err
+    assert "ind_rel_rev" in err  # within-sector demeaning still varies -> safe
+    # ind_mom is structurally degenerate on single-sector segments (fix 2):
+    # excluded from the suggestion so the hint never steers an operator into
+    # a predictable SortError/skip.
+    assert "ind_mom" not in err
     assert "opt-largecap:<segment>" in err
 
 

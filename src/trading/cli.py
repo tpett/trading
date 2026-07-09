@@ -913,16 +913,26 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
                 # out-of-the-box. Point at the fix instead of a bare error.
                 from trading.alphasearch.spec import SIGNALS
 
-                price_signals = ",".join(
+                # ind_mom is excluded here (not just "price family" anymore):
+                # it assigns every symbol in a single-sector segment the SAME
+                # sector-mean score, a structurally degenerate cross-section
+                # (fix: sort.py's distinct-score guard journals an honest
+                # SortError there) -- steering the operator at a segment
+                # ONLY that signal would just collect predictable error
+                # trials. ind_rel_rev is fine: within-sector demeaning still
+                # varies name to name.
+                segment_safe_signals = ",".join(
                     name
                     for name, s in SIGNALS.items()
-                    if not s.requires_options and not s.requires_fundamentals
+                    if not s.requires_options
+                    and not s.requires_fundamentals
+                    and name != "ind_mom"
                 )
                 print(
                     "hint: deep-pool segments carry no options data (and "
                     "fundamentals only once data/fundamentals/equities is "
-                    f"synced) — pair --segments with --signals {price_signals} "
-                    "(price family), or target options segments individually "
+                    f"synced) — pair --segments with --signals {segment_safe_signals} "
+                    "(segment-safe signals), or target options segments individually "
                     "via --universe opt-largecap:<segment>",
                     file=sys.stderr,
                 )
