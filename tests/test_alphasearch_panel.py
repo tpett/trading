@@ -37,6 +37,29 @@ def _panel(closes: dict[str, pd.Series]) -> PanelData:
     )
 
 
+def test_fundamentals_row_prior_300_day_boundary():
+    base = pd.Timestamp("2019-01-10", tz="UTC")
+    as_of = pd.Timestamp("2020-01-15", tz="UTC")
+    ok = pd.DataFrame(
+        {"assets": [100.0, 110.0]},
+        index=pd.DatetimeIndex([base, base + pd.Timedelta(300, unit="D")]),
+    )
+    panel = PanelData(closes={}, fundamentals={"AAA": ok}, symbols=("AAA",))
+    prior = panel.view(as_of).fundamentals_row_prior("AAA")
+    assert prior is not None and prior["assets"] == 100.0  # exactly 300d: counts
+    close_call = pd.DataFrame(
+        {"assets": [100.0, 110.0]},
+        index=pd.DatetimeIndex([base, base + pd.Timedelta(299, unit="D")]),
+    )
+    panel299 = PanelData(closes={}, fundamentals={"AAA": close_call}, symbols=("AAA",))
+    assert panel299.view(as_of).fundamentals_row_prior("AAA") is None  # 299d: no
+    # The rule anchors on the CURRENT filing: before the second filing is
+    # visible, the first IS current and has no prior.
+    early = base + pd.Timedelta(10, unit="D")
+    assert panel.view(early).fundamentals_row_prior("AAA") is None
+    assert panel.view(as_of).fundamentals_row_prior("NOPE") is None
+
+
 def test_view_truncates_closes_at_as_of():
     s = _closes(["2020-01-02", "2020-01-03", "2020-01-06"], [1.0, 2.0, 3.0])
     panel = _panel({"AAA": s})

@@ -114,12 +114,13 @@ def segment_universes(
 
     Deep pools per cap (`largecap:<segment>` / `midcap:<segment>`): membership
     symbols overlapping the discovery window intersected with cached bar
-    parquets intersected with segment SIC ranges; samples=None and
-    fundamentals_dir=None, so the sweep's assembly-time checks confine them to
-    price signals. Options pools (`opt-<cap>:<segment>`): the gathered samples
-    allowlist intersected with segment ranges, emitted only at >= min_names
-    gathered names, with the samples path and fundamentals store attached
-    (full signal registry, like Piece 1 pools).
+    parquets intersected with segment SIC ranges; samples=None (options
+    signals refused); fundamentals_dir attaches when the local store exists
+    (Tier-1 spec section 3.4 amendment), else None. Options pools
+    (`opt-<cap>:<segment>`): the gathered samples allowlist intersected with
+    segment ranges, emitted only at >= min_names gathered names, with the
+    samples path and fundamentals store attached (full signal registry, like
+    Piece 1 pools).
 
     Every non-emitted (cap, pool, segment) slot lands in the report -- spec
     section 3.2: excluded segments are REPORTED, never silently dropped.
@@ -158,7 +159,15 @@ def segment_universes(
                     name=name,
                     cache_dir=cache_dir,
                     samples=None,
-                    fundamentals_dir=None,
+                    # Piece 2 section 3.2 as amended by the Tier-1 batch spec
+                    # section 3.4 (2026-07-09, prospective, pre-registered):
+                    # None only ever meant "no store backfilled yet". With a
+                    # local store the fundamentals family sweeps deep
+                    # segments too; no fundamentals segment trial predates
+                    # this, so nothing is spent.
+                    fundamentals_dir=(
+                        fundamentals_dir if fundamentals_dir.is_dir() else None
+                    ),
                     symbols=deep,
                 )
             else:

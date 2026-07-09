@@ -111,6 +111,7 @@ def options_from_cells(cells: Iterable[dict]) -> dict[str, pd.DataFrame]:
 
 
 MAX_PRIOR_OPTION_AGE_DAYS = 45  # spec section 2: iv_change/dskew staleness cap
+MIN_YOY_AGE_DAYS = 300  # spec section 2: the YoY filing rule
 
 
 def cells_have_volume(cells: Iterable[dict]) -> bool:
@@ -380,6 +381,26 @@ class PanelView:
             return None
         window = frame.loc[: self.as_of]
         return None if window.empty else window.iloc[-1]
+
+    def fundamentals_row_prior(
+        self, symbol: str, min_age_days: int = MIN_YOY_AGE_DAYS
+    ) -> pd.Series | None:
+        """The 'one-year-prior filing' of the YoY rule (spec section 2): the
+        latest row FILED at least min_age_days calendar days before the
+        CURRENT filing's filed date (current = fundamentals_row's cut).
+        Exactly-min_age_days qualifies. None when no current filing is
+        visible or no filing is old enough -- YoY signals then go NaN,
+        dropped, never imputed."""
+        frame = self._panel.fundamentals.get(symbol)
+        if frame is None or frame.empty:
+            return None
+        window = frame.loc[: self.as_of]
+        if window.empty:
+            return None
+        current_filed = window.index[-1]
+        cutoff = current_filed - pd.Timedelta(min_age_days, unit="D")
+        prior = window.loc[:cutoff]
+        return None if prior.empty else prior.iloc[-1]
 
     def bars(self, symbol: str) -> pd.DataFrame:
         """The symbol's bars (BAR_COLUMNS) up to and including as_of; an

@@ -261,3 +261,91 @@ def test_options_family_nan_without_cells():
     bare = _bar_panel(bars)
     for name in ("cp_vol", "osv", "otm_put_iv", "iv_change", "dskew"):
         assert _score(name, bare, idx[-1]).isna().all(), name
+
+
+# --------------------------------------------------------------------------- #
+# Fundamentals family (300-calendar-day YoY filing rule)
+# --------------------------------------------------------------------------- #
+
+FILED_2019 = pd.Timestamp("2019-01-10", tz="UTC")
+FILED_2019_Q4 = pd.Timestamp("2019-11-30", tz="UTC")  # 324d later: YoY-eligible
+
+
+def _fund_frame(values_by_column: dict[str, list[float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        values_by_column, index=pd.DatetimeIndex([FILED_2019, FILED_2019_Q4])
+    )
+
+
+def _fund_panel(fundamentals: dict[str, pd.DataFrame],
+                 split_factor: pd.Series | float = 1.0) -> tuple[PanelData, pd.Timestamp]:
+    idx = pd.date_range("2019-01-02", periods=300, freq="B", tz="UTC")
+    bars = {s: _bar_frame(pd.Series(100.0, index=idx), split_factor=split_factor)
+            for s in fundamentals}
+    panel = PanelData(
+        closes={s: f["close"] for s, f in bars.items()}, bars=bars,
+        fundamentals=fundamentals, symbols=tuple(sorted(fundamentals)),
+    )
+    return panel, pd.Timestamp("2020-01-15", tz="UTC")
+
+
+def test_asset_growth_rev_growth_roa_droa_hand_values():
+    fund = {
+        "AAA": _fund_frame({
+            "assets": [100.0, 110.0],
+            "revenue_ttm": [200.0, 260.0],
+            "ttm_net_income": [8.0, 13.2],
+            "shares_outstanding": [1e6, 1e6],
+        }),
+        # Single YoY-ineligible filer: everything YoY-based is NaN.
+        "BBB": pd.DataFrame(
+            {"assets": [50.0], "revenue_ttm": [10.0], "ttm_net_income": [5.0],
+             "shares_outstanding": [1e6]},
+            index=pd.DatetimeIndex([FILED_2019_Q4]),
+        ),
+    }
+    panel, as_of = _fund_panel(fund)
+    ag = _score("asset_growth", panel, as_of)
+    assert math.isclose(ag["AAA"], -(110.0 / 100.0 - 1), rel_tol=1e-12)  # negated
+    assert math.isnan(ag["BBB"])
+    rg = _score("rev_growth", panel, as_of)
+    assert math.isclose(rg["AAA"], 260.0 / 200.0 - 1, rel_tol=1e-12)
+    roa = _score("roa", panel, as_of)
+    assert math.isclose(roa["AAA"], 13.2 / 110.0, rel_tol=1e-12)
+    assert math.isclose(roa["BBB"], 5.0 / 50.0, rel_tol=1e-12)  # roa needs no prior
+    droa = _score("droa", panel, as_of)
+    assert math.isclose(droa["AAA"], 13.2 / 110.0 - 8.0 / 100.0, rel_tol=1e-12)
+    assert math.isnan(droa["BBB"])
+
+
+def test_net_issuance_is_split_adjusted_and_negated():
+    fund = {"AAA": _fund_frame({
+        "assets": [100.0, 110.0], "revenue_ttm": [200.0, 260.0],
+        "ttm_net_income": [8.0, 13.2],
+        "shares_outstanding": [1e6, 2.1e6],   # 2:1 split + 5% true issuance
+    })}
+    idx = pd.date_range("2019-01-02", periods=300, freq="B", tz="UTC")
+    split = pd.Series(1.0, index=idx)
+    split.loc[pd.Timestamp("2019-06-03", tz="UTC")] = 2.0  # between the filings
+    panel, as_of = _fund_panel(fund, split_factor=split)
+    got = _score("net_issuance", panel, as_of)["AAA"]
+    assert math.isclose(got, -(2.1e6 / (1e6 * 2.0) - 1), rel_tol=1e-12)  # -0.05
+
+
+def test_net_issuance_nan_when_split_history_is_unknown():
+    fund = {"AAA": _fund_frame({
+        "assets": [100.0, 110.0], "revenue_ttm": [200.0, 260.0],
+        "ttm_net_income": [8.0, 13.2], "shares_outstanding": [1e6, 1.05e6],
+    })}
+    panel, as_of = _fund_panel(fund, split_factor=float("nan"))  # legacy cache
+    assert math.isnan(_score("net_issuance", panel, as_of)["AAA"])
+
+
+def test_fundamentals_family_nan_without_a_store():
+    panel, as_of = _fund_panel({"AAA": _fund_frame({
+        "assets": [100.0, 110.0], "revenue_ttm": [200.0, 260.0],
+        "ttm_net_income": [8.0, 13.2], "shares_outstanding": [1e6, 1e6],
+    })})
+    bare = PanelData(closes=panel.closes, bars=panel.bars, symbols=panel.symbols)
+    for name in ("asset_growth", "net_issuance", "roa", "droa", "rev_growth"):
+        assert _score(name, bare, as_of).isna().all(), name

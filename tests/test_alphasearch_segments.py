@@ -216,3 +216,17 @@ def test_every_segment_matches_at_least_one_committed_symbol():
     sics = set(load_sic_map(DEFAULT_SIC_MAP_CSV).values())
     for name in SEGMENTS:
         assert any(name in segments_for(s) for s in sics), f"{name} matches no symbol"
+
+
+def test_deep_segments_carry_fundamentals_dir_when_the_store_exists(tmp_path):
+    # Tier-1 batch spec section 3.4: pre-registered prospective amendment to
+    # Piece 2 section 3.2. fundamentals_dir=None on deep pools only ever
+    # meant "no store backfilled yet", never a design choice; with a local
+    # store the fundamentals family sweeps segments too. No fundamentals
+    # segment trial ever ran before this amendment, so nothing is spent.
+    _pharma, _banks, sic, membership = _fixture_root(tmp_path)
+    store = tmp_path / "data" / "fundamentals" / "equities"
+    store.mkdir(parents=True)
+    universes, _ = segment_universes(tmp_path, sic, membership_path=membership)
+    assert universes["largecap:biotech"].fundamentals_dir == store
+    assert universes["opt-largecap:biotech"].fundamentals_dir == store

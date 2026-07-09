@@ -384,3 +384,92 @@ def _value_ratio(numerator: str) -> SignalFn:
 _register("gross_profitability", _gross_profitability, requires_fundamentals=True)
 _register("earnings_yield", _value_ratio("ttm_net_income"), requires_fundamentals=True)
 _register("book_to_market", _value_ratio("book_equity"), requires_fundamentals=True)
+
+
+# --------------------------------------------------------------------------- #
+# Tier-1 fundamentals family (spec 2026-07-09 section 2). YoY = latest filing
+# vs the latest filing FILED >= 300 calendar days earlier
+# (PanelView.fundamentals_row_prior); missing/ineligible -> NaN, dropped.
+# --------------------------------------------------------------------------- #
+def _fund_value(row: pd.Series | None, key: str) -> float:
+    if row is None or key not in row.index:
+        return math.nan
+    return float(row[key])
+
+
+def _yoy_growth(key: str, sign: float) -> SignalFn:
+    """sign * (current/prior - 1) of one stored primitive; NaN unless both
+    filings carry a value and the prior is strictly positive (a ratio against
+    a non-positive base has no growth interpretation)."""
+
+    def fn(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+        scores: dict[str, float] = {}
+        for symbol in view.symbols:
+            now = _fund_value(view.fundamentals_row(symbol), key)
+            then = _fund_value(view.fundamentals_row_prior(symbol), key)
+            score = math.nan
+            if not math.isnan(now) and not math.isnan(then) and then > 0:
+                score = sign * (now / then - 1.0)
+            scores[symbol] = score
+        return pd.Series(scores, dtype="float64")
+
+    return fn
+
+
+def _roa_of(row: pd.Series | None) -> float:
+    ni = _fund_value(row, "ttm_net_income")
+    assets = _fund_value(row, "assets")
+    if math.isnan(ni) or not assets > 0:
+        return math.nan
+    return ni / assets
+
+
+def _roa(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    scores = {s: _roa_of(view.fundamentals_row(s)) for s in view.symbols}
+    return pd.Series(scores, dtype="float64")
+
+
+def _droa(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    scores = {
+        s: _roa_of(view.fundamentals_row(s)) - _roa_of(view.fundamentals_row_prior(s))
+        for s in view.symbols
+    }  # NaN propagates from either leg
+    return pd.Series(scores, dtype="float64")
+
+
+def _net_issuance(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """Split-adjusted shares_outstanding YoY, NEGATED (issuers underperform,
+    Pontiff-Woodgate). Comparable prior shares = prior * product of
+    split_factor over bar dates in (prior_filed, current_filed]. ANY NaN
+    split_factor in that window -> NaN: a legacy narrow cache cannot claim
+    "no splits", and prod()'s skipna would fabricate exactly that."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        current = view.fundamentals_row(symbol)
+        prior = view.fundamentals_row_prior(symbol)
+        score = math.nan
+        if current is not None and prior is not None:
+            shares_now = _fund_value(current, "shares_outstanding")
+            shares_then = _fund_value(prior, "shares_outstanding")
+            if not math.isnan(shares_now) and shares_then > 0:
+                factors = view.bars(symbol)["split_factor"]
+                window = factors[(factors.index > prior.name)
+                                 & (factors.index <= current.name)]
+                if not window.isna().any():
+                    adjustment = float(window.prod()) if len(window) else 1.0
+                    if adjustment > 0:
+                        score = -(shares_now / (shares_then * adjustment) - 1.0)
+        scores[symbol] = score
+    return pd.Series(scores, dtype="float64")
+
+
+# Investment factor: asset growers underperform (Cooper-Gulen-Schill) -> negate.
+_register("asset_growth", _yoy_growth("assets", -1.0), requires_fundamentals=True)
+# Issuance anomaly (Pontiff-Woodgate): negation lives inside _net_issuance.
+_register("net_issuance", _net_issuance, requires_fundamentals=True)
+# Quality: profitable-per-asset names outperform.
+_register("roa", _roa, requires_fundamentals=True)
+# Fundamental momentum: improving profitability.
+_register("droa", _droa, requires_fundamentals=True)
+# Growth: rising trailing revenue.
+_register("rev_growth", _yoy_growth("revenue_ttm", +1.0), requires_fundamentals=True)
