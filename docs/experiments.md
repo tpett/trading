@@ -498,6 +498,21 @@ eligible for their once-only re-prove, but that decision (and whether
 robustness/cost tests should come first, i.e., Piece 3) belongs to the
 developer. Nothing is spent.
 
+**Developer decision (2026-07-09): PARKED, not promoted.** This is the
+program's second illiquidity finding. The first (§9: mid-cap option
+illiquidity, the `illiquidity_veto_v1` ranker family) looked real until it
+decomposed into the size factor (SMB loading t=13.1, four-factor alpha ≈ 0 —
+a plain size sort beat it), and its tradeable form needed 15 bps costs it
+couldn't pay. The amihud result is NOT the same decomposition story — its
++61.5%/yr alpha survives a regression that already includes SMB (+0.48
+loading netted out) — but it shares the same tradability profile: the long
+leg is the most illiquid names in the book, where quoted alpha and
+realizable alpha diverge most. Given that history, amihud is parked pending
+cost-realistic backtesting and robustness interrogation (Piece 3 machinery);
+the holdout stays reserved, and no live promotion path is open for this
+family until it survives realistic costs. Recorded so a future sweep doesn't
+"rediscover" illiquidity as a novel finding.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
