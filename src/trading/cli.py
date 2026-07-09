@@ -158,9 +158,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     alphasearch.add_argument(
         "--universe",
-        choices=["largecap", "midcap", "all"],
         default="all",
-        help="sweep scope (sweep only)",
+        help="sweep scope (sweep only): 'all', a flat pool (largecap/midcap), "
+        "or any segment universe name when --segments is set "
+        "(e.g. opt-largecap:biotech)",
+    )
+    alphasearch.add_argument(
+        "--segments",
+        action="store_true",
+        help="merge the pre-registered SIC segment universes "
+        "(trading.alphasearch.segments.SEGMENTS) into the sweep and print "
+        "the exclusions report (sweep only)",
     )
     alphasearch.add_argument(
         "--signals",
@@ -866,7 +874,31 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
         if factors is None:
             return 1
         universes = engine.default_universes(Path("."))
+        if args.segments:
+            from trading.alphasearch.segments import segment_universes
+
+            try:
+                seg_universes, excluded = segment_universes(Path("."))
+            except engine.SweepError as exc:  # SegmentError included
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 1
+            universes = {**universes, **seg_universes}
+            # Spec 3.2: below-threshold segments are REPORTED, never silent.
+            for row in excluded:
+                print(
+                    f"segment excluded: {row['cap']}:{row['segment']} "
+                    f"({row['count']} names, {row['reason']})",
+                    file=sys.stderr,
+                )
         if args.universe != "all":
+            if args.universe not in universes:
+                known = ", ".join(sorted(universes))
+                print(
+                    f"ERROR: unknown universe {args.universe!r}; choose from "
+                    f"{known} (or 'all'; segment names need --segments)",
+                    file=sys.stderr,
+                )
+                return 1
             universes = {args.universe: universes[args.universe]}
         try:
             rows, count = engine.run_sweep(
@@ -887,6 +919,19 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
         return 1
     signal_name, _, universe = args.trial.partition(":")
     universes = engine.default_universes(Path("."))
+    if universe not in universes:
+        # Segment holdouts need no flag (spec 3.3: journal-derived targets);
+        # resolving specs from the committed CSVs is cheap and touches no
+        # panel. A missing sic_map only errors when a segment name actually
+        # needs it -- flat-pool holdouts never reach this branch.
+        from trading.alphasearch.segments import segment_universes
+
+        try:
+            seg_universes, _excluded = segment_universes(Path("."))
+        except engine.SweepError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        universes = {**universes, **seg_universes}
     if universe not in universes:
         print(
             f"ERROR: unknown universe {universe!r}; choose from "

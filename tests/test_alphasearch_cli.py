@@ -97,3 +97,113 @@ def test_holdout_double_touch_refused_via_prompt(tmp_path, capsys, monkeypatch):
                    "--journal-dir", str(tmp_path)])
     assert rc == 1
     assert "already evaluated" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# --segments (Piece 2)
+# --------------------------------------------------------------------------- #
+
+
+def _stub_segments(monkeypatch, tmp_path):
+    from trading.alphasearch.sweep import UniverseSpec
+
+    seg = UniverseSpec("largecap:banks", tmp_path, None, None, symbols=("A", "B"))
+    monkeypatch.setattr(
+        "trading.alphasearch.segments.segment_universes",
+        lambda root, sic_map_path=None, **kwargs: (
+            {"largecap:banks": seg},
+            [{"segment": "construction", "cap": "opt-largecap", "count": 3,
+              "reason": "below-min"}],
+        ),
+    )
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    return seg
+
+
+def test_sweep_segments_merges_universes_and_prints_exclusions(
+    tmp_path, monkeypatch, capsys
+):
+    _stub_segments(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        captured["names"] = set(universes)
+        return [], len(universes)
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--segments",
+                   "--journal-dir", str(tmp_path), "--json"])
+    assert rc == 0
+    assert captured["names"] == {"largecap", "midcap", "largecap:banks"}
+    err = capsys.readouterr().err
+    assert "opt-largecap:construction" in err   # the exclusions report, on stderr
+    assert "3 names" in err and "below-min" in err
+
+
+def test_sweep_universe_flag_selects_a_single_segment(tmp_path, monkeypatch, capsys):
+    _stub_segments(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        captured["names"] = set(universes)
+        return [], len(universes)
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--segments",
+                   "--universe", "largecap:banks",
+                   "--journal-dir", str(tmp_path), "--json"])
+    assert rc == 0
+    assert captured["names"] == {"largecap:banks"}
+
+
+def test_sweep_unknown_universe_lists_known_names(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    rc = cli.main(["alphasearch", "sweep", "--universe", "nope",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "unknown universe" in err and "largecap" in err
+
+
+def test_sweep_segments_missing_sic_map_is_an_actionable_error(
+    tmp_path, monkeypatch, capsys
+):
+    from trading.alphasearch.segments import SegmentError
+
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+
+    def boom(root, sic_map_path=None, **kwargs):
+        raise SegmentError("SIC map not found; build it with "
+                           "`uv run python scripts/build_sic_map.py`")
+
+    monkeypatch.setattr("trading.alphasearch.segments.segment_universes", boom)
+    rc = cli.main(["alphasearch", "sweep", "--segments", "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    assert "build_sic_map.py" in capsys.readouterr().err
+
+
+def test_holdout_resolves_segment_universe_names_without_a_flag(
+    tmp_path, monkeypatch, capsys
+):
+    from trading.alphasearch import sweep as engine
+
+    _stub_segments(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run_holdout(uspec, journal, factors, ts, signal_name, **kwargs):
+        captured["universe"] = uspec.name
+        raise engine.SweepError("stub refusal after resolution")
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_holdout", fake_run_holdout)
+    # partition(":") splits at the FIRST colon: mom21 / largecap:banks.
+    rc = cli.main(["alphasearch", "holdout", "mom21:largecap:banks",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    assert captured["universe"] == "largecap:banks"
+    assert "stub refusal" in capsys.readouterr().err
