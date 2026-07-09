@@ -142,6 +142,66 @@ def test_unjoinable_rows_are_skipped_and_counted(tmp_path):
     assert list(tx.columns) == TRANSACTION_COLUMNS
 
 
+def test_missing_accession_is_skipped_and_counted(tmp_path):
+    # A P/S row without an accession has an unusable join key: it must feed
+    # the skipped counter, never be dropped silently.
+    path = tmp_path / "q.zip"
+    _write_zip(
+        path,
+        sub_rows=[("acc-1", "05-FEB-2024", "", "1750", "X")],
+        trans_rows=[
+            ("acc-1", "1", "01-FEB-2024", "P", "0", "10", "1.0", "A"),
+            (None, "2", "01-FEB-2024", "P", "0", "10", "1.0", "A"),
+        ],
+        owner_rows=[("acc-1", "9001", "X", "Officer")],
+    )
+    tx, skipped = parse_quarter(path)
+    assert len(tx) == 1
+    assert skipped == 1
+
+
+def test_trans_code_is_normalized_before_the_ps_filter(tmp_path):
+    # Padded / lowercase codes in a future vintage must not silently vanish.
+    path = tmp_path / "q.zip"
+    _write_zip(
+        path,
+        sub_rows=[("acc-1", "05-FEB-2024", "", "1750", "X")],
+        trans_rows=[("acc-1", "1", "01-FEB-2024", "p ", "0", "10", "1.0", "A")],
+        owner_rows=[("acc-1", "9001", "X", "Officer")],
+    )
+    tx, skipped = parse_quarter(path)
+    assert skipped == 0
+    assert len(tx) == 1
+    assert tx.iloc[0]["code"] == "P"
+
+
+def test_multi_owner_collapse_with_multiple_trans_rows(tmp_path):
+    # Owners collapse BEFORE the merge: 2 owners x 2 transaction rows on one
+    # accession -> 2 output rows (one per transaction), each carrying the
+    # OR-ed flags and the lowest-cik representative -- never 4 rows.
+    path = tmp_path / "q.zip"
+    _write_zip(
+        path,
+        sub_rows=[("acc-9", "20-MAR-2024", "18-MAR-2024", "55", "XCO")],
+        trans_rows=[
+            ("acc-9", "1", "18-MAR-2024", "P", "0", "10", "5.0", "A"),
+            ("acc-9", "2", "18-MAR-2024", "S", "0", "4", "6.0", "D"),
+        ],
+        owner_rows=[
+            ("acc-9", "7002", "SMITH TRUST", "TenPercentOwner"),
+            ("acc-9", "7001", "SMITH SAM", "Officer"),
+        ],
+    )
+    tx, skipped = parse_quarter(path)
+    assert skipped == 0
+    assert len(tx) == 2                      # one row per transaction, not per owner
+    assert sorted(tx["code"]) == ["P", "S"]
+    for _, row in tx.iterrows():
+        assert row["owner_cik"] == 7001
+        assert bool(row["is_officer"]) and bool(row["is_ten_pct"])
+        assert not bool(row["is_director"])
+
+
 def test_schema_drift_fails_loudly(tmp_path):
     # A renamed DERA column must raise (usecols mismatch), never mis-parse.
     path = tmp_path / "q.zip"

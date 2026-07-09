@@ -27,8 +27,9 @@ buying when ANY reporting owner is an officer.
 Missing TRANS_SHARES / TRANS_PRICEPERSHARE (footnote-priced rows) keep the
 row with value=NaN: the transaction is real (cluster_buys counts it) but its
 dollar value is unmeasured, never fabricated. Rows are SKIPPED and COUNTED
-only when join keys are unusable: no valid SUBMISSION row (missing or
-unparseable FILING_DATE / ISSUERCIK) or no REPORTINGOWNER row.
+only when join keys are unusable: missing ACCESSION_NUMBER, no valid
+SUBMISSION row (missing or unparseable FILING_DATE / ISSUERCIK), or no
+REPORTINGOWNER row.
 
 Column names and the %d-%b-%Y date format (e.g. 02-JAN-2024) were pinned
 against the real 2024q1 ZIP by the plan's discovery step; a drifted schema
@@ -124,10 +125,18 @@ def parse_quarter(zip_path: Path) -> tuple[pd.DataFrame, int]:
         trans = _read_table(zf, _TRANS_FILE, _TRANS_COLS)
         owners = _read_table(zf, _OWNER_FILE, _OWNER_COLS)
 
+    # Defensive normalization: padded / lowercase codes in a future vintage
+    # must match the P/S filter, never silently vanish.
+    trans = trans.copy()
+    trans["TRANS_CODE"] = trans["TRANS_CODE"].fillna("").str.strip().str.upper()
     trans = trans[trans["TRANS_CODE"].isin(["P", "S"])]
-    trans = trans.dropna(subset=["ACCESSION_NUMBER"]).copy()
+    # A P/S row without an accession has an unusable join key: skipped AND
+    # counted (spec section 5), same as any other unjoinable row.
+    no_accession = trans["ACCESSION_NUMBER"].isna()
+    skipped = int(no_accession.sum())
+    trans = trans[~no_accession].copy()
     if trans.empty:
-        return empty_transactions(), 0
+        return empty_transactions(), skipped
 
     sub = sub.dropna(subset=_SUB_COLS).copy()
     sub["filed"] = pd.to_datetime(sub["FILING_DATE"], format=_DATE_FORMAT, errors="coerce")
@@ -144,7 +153,7 @@ def parse_quarter(zip_path: Path) -> tuple[pd.DataFrame, int]:
         sub[["ACCESSION_NUMBER", "filed", "issuer_cik"]], on="ACCESSION_NUMBER", how="left"
     ).merge(_collapse_owners(owners), on="ACCESSION_NUMBER", how="left")
     unjoined = merged["filed"].isna() | merged["owner_cik"].isna()
-    skipped = int(unjoined.sum())
+    skipped += int(unjoined.sum())
     merged = merged[~unjoined].copy()
     if merged.empty:
         return empty_transactions(), skipped
