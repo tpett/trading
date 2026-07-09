@@ -159,3 +159,83 @@ def test_bh_mask_spans_combined_journal_not_per_segment(tmp_path):
     seg = next(r for r in rows if r.universe == "largecap:biotech")
     assert seg.p == 0.08 and not seg.bh_pass
     assert not any(r.bh_pass for r in rows)
+
+
+# --------------------------------------------------------------------------- #
+# Tier-1 batch golden coverage: one signal per new family through the REAL
+# file path (extended bar schema + fundamentals store + factor threading).
+# --------------------------------------------------------------------------- #
+
+
+def _write_tier1_root(tmp_path):
+    """_write_root plus: extended bar schema (per-symbol overnight drift,
+    real high/low span, div_cash, split_factor), a fundamentals store (so
+    the Tier-1 spec section 3.4 amendment attaches it to deep pools), and a
+    SECOND two-sector sic map for the flat pool's industry signals (the
+    original all-2836 map keeps the segment expectations intact)."""
+    panel, samples, sic, membership = _write_root(tmp_path)
+    cache = tmp_path / "data" / "equities-tiingo"
+    store = tmp_path / "data" / "fundamentals" / "equities"
+    store.mkdir(parents=True)
+    for i, sym in enumerate(panel.symbols):
+        closes = panel.closes[sym]
+        opens = closes.shift(1) * (1 + 1e-4 * (i + 1))
+        opens.iloc[0] = closes.iloc[0]
+        pd.DataFrame(
+            {"open": opens, "high": closes * 1.01, "low": closes * 0.99,
+             "close": closes, "volume": 1000.0, "div_cash": 0.001 * (i + 1),
+             "split_factor": 1.0},
+            index=closes.index,
+        ).to_parquet(cache / f"{sym}.parquet")
+        pd.DataFrame(
+            {"gross_profitability": [0.10 + 0.02 * i],
+             "ttm_net_income": [1e6 * (i + 1)], "book_equity": [5e6 * (i + 1)],
+             "shares_outstanding": [1e6], "assets": [1e7 * (i + 1)],
+             "revenue_ttm": [2e7 * (i + 1)]},
+            index=pd.DatetimeIndex([closes.index[0]], name="filed"),
+        ).to_parquet(store / f"{sym}.parquet")
+    sic_split = tmp_path / "sic_split.csv"
+    sic_split.write_text(
+        "symbol,cik,sic,sic_description,fetched_at\n"
+        + "".join(
+            f"{s},{i + 1},{2836 if i % 2 == 0 else 6022},d,2026-07-09\n"
+            for i, s in enumerate(panel.symbols)
+        )
+    )
+    return panel, samples, sic, membership, sic_split
+
+
+def test_tier1_families_sweep_the_flat_pool_end_to_end(tmp_path):
+    _panel, samples, _sic, _membership, sic_split = _write_tier1_root(tmp_path)
+    flat = UniverseSpec(
+        "largecap", tmp_path / "data" / "equities-tiingo", samples,
+        tmp_path / "data" / "fundamentals" / "equities", sic_map_path=sic_split,
+    )
+    journal = trials_journal(tmp_path / "journal")
+    names = ("overnight", "ivol", "cp_vol", "iv_change", "roa", "ind_rel_rev")
+    rows, n_trials = run_sweep(
+        {"largecap": flat}, journal, make_factors(), ts="t1",
+        signals={n: SIGNALS[n] for n in names}, window=WINDOW,
+    )
+    assert n_trials == 6
+    assert {r.signal for r in rows} == set(names)
+    # Every new family produced a CLEAN trial on real files: bars (overnight),
+    # factor-threaded features (ivol), option-volume cells (cp_vol), prior
+    # cells (iv_change), the store (roa), and two sic sectors (ind_rel_rev).
+    assert all(r.error is None for r in rows)
+    assert len({e["config_hash"] for e in discovery_trials(journal)}) == 6
+
+
+def test_fundamentals_signal_sweeps_a_deep_segment_after_the_amendment(tmp_path):
+    _panel, _samples, sic, membership, _split = _write_tier1_root(tmp_path)
+    seg_universes, _ = segment_universes(tmp_path, sic, membership_path=membership)
+    deep = seg_universes["largecap:biotech"]
+    assert deep.samples is None  # still a deep pool: options stay refused
+    assert deep.fundamentals_dir == tmp_path / "data" / "fundamentals" / "equities"
+    journal = trials_journal(tmp_path / "journal")
+    rows, n = run_sweep(
+        {deep.name: deep}, journal, make_factors(), ts="t1",
+        signals={"roa": SIGNALS["roa"]}, window=WINDOW,
+    )
+    assert n == 1
+    assert rows[0].universe == "largecap:biotech" and rows[0].error is None
