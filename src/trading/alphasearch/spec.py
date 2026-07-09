@@ -332,7 +332,8 @@ _register("atm_spread", _option_signal("atm_spread", +1.0), requires_options=Tru
 def _osv(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
     """Option/stock dollar-volume ratio: the cell's opt_dollar_vol over the
     decision-day stock dollar volume (close*volume of the last bar <= as_of),
-    one cell vs one day. NEGATED at registration below."""
+    one cell vs one day. Negation is inline (`score = -(...)` below), not a
+    sign multiplier applied at `_register`."""
     scores: dict[str, float] = {}
     for symbol in view.symbols:
         row = view.option_row(symbol)

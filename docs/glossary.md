@@ -294,6 +294,16 @@ traded. Illiquid names earn a premium for being hard to trade.
 baseline) attracts attention and predicts higher returns
 (Gervais-Kaniel-Mingelgrin).
 
+**Dividend yield (`div_yield`)** — trailing 12-month cash dividends per share
+over price; an income/value tilt. Point-in-time subtlety (2026-07-09 fix):
+divided by `close_raw` (the RAW, never-retroactively-adjusted close), not
+Tiingo's `close`, because `close` is adjusted using the FULL downloaded
+history and so bakes in FUTURE splits at any given as-of date — raw
+div_cash / adjusted close would look-ahead-inflate the yield for a future
+splitter (a 4:1 split after a $1 dividend reads 4x too high beforehand).
+Each trailing payment is itself split-adjusted into as-of terms using only
+the VISIBLE (<=as-of) split_factor history.
+
 **Asset growth / investment factor** — firms that grow total assets fastest
 subsequently underperform (Cooper-Gulen-Schill); empire-building is expensive.
 The CMA factor's characteristic cousin.
@@ -308,6 +318,13 @@ improving firms keep outperforming beyond what the level explains.
 **Option-to-stock volume ratio (O/S)** — option dollar volume relative to stock
 dollar volume; high O/S marks informed (disproportionately bearish) positioning
 ahead of returns (Johnson-So).
+
+**Call-put volume skew (`cp_vol`)** — log(1 + ATM+call leg volume) − log(1 +
+put leg volume) on the day's options cell; informed call demand predicts
+positive returns (Pan-Poteshman). Requires per-leg volume (mid-cap gather
+only — `SignalSpec.requires_option_volume`); a cell where NO leg carries a
+"volume" key scores NaN rather than the fabricated log(1/1) = 0 a
+key-absent-defaults-to-zero read would produce (2026-07-09 fix).
 
 **Volatility smirk** — OTM-put implied vol above ATM implied vol; a steep or
 steepening smirk means crash protection is being bid, predicting negative

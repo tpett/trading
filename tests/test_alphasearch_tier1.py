@@ -398,7 +398,7 @@ def test_fundamentals_family_nan_without_a_store():
     })})
     bare = PanelData(closes=panel.closes, bars=panel.bars, symbols=panel.symbols)
     for name in ("asset_growth", "net_issuance", "roa", "droa", "rev_growth"):
-        assert _score(name, bare, as_of).isna().all()
+        assert _score(name, bare, as_of).isna().all(), name
 
 
 # --------------------------------------------------------------------------- #
