@@ -2602,3 +2602,76 @@ git commit -m "Add Tier-1 golden sweep coverage and docs (pre-registration note,
 1. **Before the pre-registered sweep runs** (spec §4): rsync the fundamentals store from the mini (spec §5), and re-backfill `data/equities-tiingo` with the extended bar schema or accept honest `div_yield`/`net_issuance` error trials on largecap.
 2. The sweep itself is run ONCE by the operator after merge — it is deliberately NOT part of this plan.
 3. `ivol`/`beta` precompute cost: ~1,400 symbols × ~1,800 joint days with batched det+solve is seconds per universe panel; the segment sweep builds ~30 panels, still minutes overall, dominated as before by trial evaluation.
+
+## Sweep-day run-book (added 2026-07-09, final-review fix 5)
+
+The all-or-nothing assembly refusal (spec section 6) means the Tier-1
+registry cannot be swept in one call: options-volume signals need leg volume
+(mid-cap-gathered universes only), fundamentals signals need a local store,
+and `ind_mom` is structurally degenerate on single-sector segments (§2 note
+above — it still journals honest `SortError` trials there, it just isn't
+worth *steering* an operator at). Five invocations cover the full pre-
+registered grid (spec §4) without ever tripping that refusal. Signal-family
+shorthand used below (registry names, `src/trading/alphasearch/spec.py`):
+
+- `PRICE` (16): `mom21,mom63,mom126,mom252,rev5,rvol21,disthigh,mom_12_2,overnight,park_vol,ivol,max5,beta,amihud,vol_trend,div_yield`
+- `OPT_NONVOL` (9): `vrp,hedge,excite,atm_iv,smile,atm_spread,otm_put_iv,iv_change,dskew`
+- `OPT_VOL` (2): `cp_vol,osv`
+- `FUND` (8): `gross_profitability,earnings_yield,book_to_market,asset_growth,net_issuance,roa,droa,rev_growth`
+- `INDUSTRY` (2): `ind_mom,ind_rel_rev`
+
+Registry check: `PRICE(16) + OPT_NONVOL(9) + OPT_VOL(2) + FUND(8) + INDUSTRY(2) = 37`, matching `test_registry_is_complete_with_correct_requirements`.
+
+### Operational prerequisites (both must be done BEFORE step (v), and the second before any largecap `div_yield`/`net_issuance` trial is trusted)
+
+1. **Fundamentals store rsync** (design spec §5): `ssh mac-m1` (repo `~/trading`, store at `data/fundamentals/equities`) → this machine's `data/fundamentals/equities`, before step (v).
+2. **Largecap cache re-backfill** for `close_raw`/`div_cash`/`split_factor` (the plan's "known data landmine", sharpened by fix 1): `data/equities-tiingo/*.parquet` is still the legacy narrow schema. Until it carries the extended columns, `div_yield` and `net_issuance` on every `largecap*` universe (flat and `largecap:<segment>`) journal honest all-NaN → `SortError` error trials — expected, not a bug, but counted against the BH bar for nothing. Re-backfill first if those two signals' largecap results are meant to be readable.
+
+### Invocations
+
+**(i) Flat pools, all non-fundamentals-non-optvol signals** — `PRICE + OPT_NONVOL + INDUSTRY` = 27 signals × 2 universes (`largecap`, `midcap`) = **54 trial-configs attempted**. Of these, the 13 pre-Tier-1 signals (7 price + 6 options) × 2 flat pools = 26 exactly re-hash the FIRST sweep's step (a) trials (idempotent dedup — journaled once, not double-counted); the remaining 14 Tier-1 signals (9 price + 3 opt-nonvol + 2 industry) × 2 = **28 genuinely new**.
+
+```
+trading alphasearch sweep --signals mom21,mom63,mom126,mom252,rev5,rvol21,disthigh,mom_12_2,overnight,park_vol,ivol,max5,beta,amihud,vol_trend,div_yield,vrp,hedge,excite,atm_iv,smile,atm_spread,otm_put_iv,iv_change,dskew,ind_mom,ind_rel_rev
+```
+
+**(ii) Midcap flat, option-volume family** — `OPT_VOL` = 2 signals × 1 universe (`midcap` only — `largecap`'s `samples.jsonl` carries no leg volume and would trip `requires_option_volume`) = **2 trial-configs, all new**.
+
+```
+trading alphasearch sweep --universe midcap --signals cp_vol,osv
+```
+
+**(iii) `--segments`, non-options families** — `PRICE + INDUSTRY` = 18 signals × 26 universes (2 flat + 24 emitted deep-pool segments, per the first sweep's count) = **468 trial-configs attempted**. Of these, 7 pre-Tier-1 price signals × 26 = 182 re-hash the first sweep's step (b) exactly (dedup); the rest — 11 Tier-1 signals (9 price + 2 industry) × 26 = **286 genuinely new**. Expect `ind_mom` to journal an honest `SortError` on every single-sector segment (§2 note, fix 2) — that is the guard working, not a run failure.
+
+```
+trading alphasearch sweep --segments --signals mom21,mom63,mom126,mom252,rev5,rvol21,disthigh,mom_12_2,overnight,park_vol,ivol,max5,beta,amihud,vol_trend,div_yield,ind_mom,ind_rel_rev
+```
+
+**(iv) Per opt-segment, options families** — the all-or-nothing refusal forbids combining `OPT_VOL` with an `opt-largecap:*` universe in one call (no leg volume there), so this runs once per one of the 5 viable opt-segment universes (first sweep's count; enumerate the current set from this run's own `segment excluded:` stderr lines from step (iii), or a throwaway `--universe bogus` unknown-universe error, which lists every known name). For each `opt-largecap:<segment>` universe: `OPT_NONVOL` only (9 trials). For each `opt-midcap:<segment>` universe (the only cap whose gather carries leg volume): `OPT_NONVOL + OPT_VOL` (11 trials).
+
+```
+trading alphasearch sweep --segments --universe opt-largecap:<segment> --signals vrp,hedge,excite,atm_iv,smile,atm_spread,otm_put_iv,iv_change,dskew
+trading alphasearch sweep --segments --universe opt-midcap:<segment> --signals vrp,hedge,excite,atm_iv,smile,atm_spread,otm_put_iv,iv_change,dskew,cp_vol,osv
+```
+
+Arithmetic: letting `k` = the number of the 5 opt segments that are `opt-midcap:*`, step (iv) attempts `9×5 + 2×k = 45 + 2k` trial-configs; of these `6×5 = 30` (the pre-Tier-1 options family) re-hash the first sweep's step (c) (dedup), leaving `3×5 + 2×k = 15 + 2k` **genuinely new** (`0 <= k <= 5`).
+
+**(v) Fundamentals family, everywhere a store is attached** — run AFTER prerequisite 1. Post-amendment (spec §3, item 4 / segments.py §3.4), every universe carries `fundamentals_dir`: 2 flat + 24 deep segments + 5 opt segments = 31 universes. `FUND` (8 signals, all NEW — no fundamentals trial predates this batch) × 31 = **248 trial-configs, all new**. One call covers every universe (fundamentals eligibility isn't cap-split like leg volume, so it needs none of step (iv)'s per-universe treatment):
+
+```
+trading alphasearch sweep --segments --signals gross_profitability,earnings_yield,book_to_market,asset_growth,net_issuance,roa,droa,rev_growth
+```
+
+**Partial-store abort behavior:** if the rsync in prerequisite 1 is incomplete such that even ONE targeted universe's member symbols have zero overlap with what's locally present, `panel.fundamentals` is empty for that universe and the all-or-nothing assembly check folds it into ONE combined `SweepError` naming every incompatible (signal, universe) pair — the entire step (v) call refuses with the store message (`"... has none. Expected store: data/fundamentals/equities ... Populate it with scripts/backfill_fundamentals.py"`), not just that universe. Fix: complete the rsync, or fall back to per-universe calls (like step (iv)) excluding the uncovered universe.
+
+**Plain-command refusal:** `trading alphasearch sweep --segments` with NO `--signals` (the full default registry) is a deliberate refusal, not a bug — deep-pool segments carry no options data and (pre-rsync) no fundamentals store, so the all-or-nothing cross-product check catches the mismatch before any trial journals. The CLI prints an actionable `hint:` line naming a segment-safe signal subset (fix 4b: labeled "segment-safe signals", excludes `ind_mom`) and the `--universe opt-largecap:<segment>` per-universe workaround — this run-book's five-call split IS that hint's recipe, generalized to the full Tier-1 registry.
+
+### Reconciliation
+
+Sum the "genuinely new" counts above: `28 (i) + 2 (ii) + 286 (iii) + (15 + 2k) (iv) + 248 (v) = 579 + 2k` new discovery trials, `k` in `[0, 5]` → **579 to 589 new trials**, for a grand total of **817 to 827** discovery trials once combined with the first sweep's 238 (one BH computation spans all of them, spec 3.5). After all five invocations, reconcile:
+
+```
+trading alphasearch leaderboard --json | python3 -c "import json,sys; print(json.load(sys.stdin)['trials'])"
+```
+
+against the expected range above. A mismatch means either a universe emitted differently than the first sweep recorded (re-check `segment excluded:` stderr against experiments.md's count) or an invocation was skipped/repeated outside this run-book — investigate before trusting the leaderboard's BH gate. The estimate binds nothing (as the design spec itself notes for its own ~450 figure) — the journal's count is the only authority; this arithmetic exists to catch a materially wrong run, not to substitute for reading the journal.
