@@ -2668,7 +2668,14 @@ trading alphasearch sweep --segments --signals gross_profitability,earnings_yiel
 
 ### Reconciliation
 
-Sum the "genuinely new" counts above: `28 (i) + 2 (ii) + 286 (iii) + (15 + 2k) (iv) + 248 (v) = 579 + 2k` new discovery trials, `k` in `[0, 5]` → **579 to 589 new trials**, for a grand total of **817 to 827** discovery trials once combined with the first sweep's 238 (one BH computation spans all of them, spec 3.5). After all five invocations, reconcile:
+Sum the "genuinely new" counts above, minus the overlap between (i) and (iii):
+step (iii)'s 286 includes the 11 price+industry signals × 2 flat pools = 22
+trial-configs that step (i) already journaled — identical config hashes, so
+they dedupe rather than double-count. `28 (i) + 2 (ii) + 286 (iii) − 22
+(flat-pool configs (iii) re-hashes from (i)) + (15 + 2k) (iv) + 248 (v) =
+557 + 2k` new discovery trials, `k` in `[0, 5]` → **557 to 567 new trials**,
+for a grand total of **795 to 805** discovery trials once combined with the
+first sweep's 238 (one BH computation spans all of them, spec 3.5). After all five invocations, reconcile:
 
 ```
 trading alphasearch leaderboard --json | python3 -c "import json,sys; print(json.load(sys.stdin)['trials'])"
