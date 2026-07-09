@@ -416,6 +416,40 @@ def test_cell_metrics_opt_dollar_vol_sums_legs_with_both_volume_and_mid():
     assert math.isclose(got, 100 * 100 * 4.1 + 25 * 100 * 1.5, rel_tol=1e-12)
 
 
+def test_cell_metrics_volume_columns_nan_when_no_leg_carries_a_volume_key():
+    # A largecap cell (no "volume" key on ANY leg): key-absent means
+    # unmeasured, never a fabricated log(1/1)=0 or zero total (2026-07-09 fix).
+    m = cell_metrics(make_cell("AAA", "2020-01-06", with_volume=False))
+    assert math.isnan(m["cp_vol"])
+    assert math.isnan(m["wing_vol"])
+    assert math.isnan(m["tot_vol"])
+    assert math.isnan(m["opt_dollar_vol"])  # already NaN pre-fix (no mid+volume leg)
+
+
+def test_cell_metrics_volume_columns_honest_when_a_leg_reports_a_real_zero():
+    # A PRESENT volume of 0 is a real observation, not "unmeasured": the
+    # cell still carries the "volume" key elsewhere, so cp_vol/wing_vol/
+    # tot_vol come back as real (non-NaN) numbers reflecting that zero.
+    cell = make_cell("AAA", "2020-01-06")
+    cell["contracts"][1]["volume"] = 0  # otm_put leg: a real zero
+    m = cell_metrics(cell)
+    assert not math.isnan(m["cp_vol"])
+    assert not math.isnan(m["tot_vol"])
+    assert m["tot_vol"] == 100 + 0 + 25  # atm + real-zero otm_put + otm_call
+
+
+def test_cell_metrics_honesty_is_per_cell_not_file_level():
+    # A mixed samples.jsonl (one cell with leg volume, one without) must
+    # score each cell on its OWN merits -- load_options' file-level
+    # has_volume flag only gates assembly refusal, never per-cell scoring.
+    with_vol = cell_metrics(make_cell("AAA", "2020-01-06"))
+    without_vol = cell_metrics(make_cell("BBB", "2020-01-06", with_volume=False))
+    assert not math.isnan(with_vol["cp_vol"])
+    assert not math.isnan(with_vol["tot_vol"])
+    assert math.isnan(without_vol["cp_vol"])
+    assert math.isnan(without_vol["tot_vol"])
+
+
 def test_load_options_reports_leg_volume_presence(tmp_path):
     p1 = tmp_path / "with.jsonl"
     p1.write_text(json.dumps(make_cell("AAA", "2020-01-06")) + "\n")

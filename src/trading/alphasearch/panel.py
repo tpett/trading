@@ -49,11 +49,18 @@ def cell_metrics(cell: dict) -> dict:
     now imports it from here so there is exactly one definition.
     """
     d = {c["role"]: c for c in cell.get("contracts", [])}
+    # Leg volume ships only in the mid-cap gather; a largecap cell carries NO
+    # "volume" key on ANY leg. key-absent means unmeasured, not zero trades --
+    # a volume-less cell must never fabricate log(1/1)=0 (2026-07-09 fix).
+    has_volume = any("volume" in c for c in d.values())
 
     def iv(role):
         return d.get(role, {}).get("iv")
 
     def vol(role):
+        # A leg present without its OWN volume key (rare, partial gather) still
+        # defaults to 0 once has_volume gates the cell as measured -- a
+        # PRESENT volume of 0 on some other leg is a real observation.
         return d.get(role, {}).get("volume") or 0
 
     atm = d.get("atm", {})
@@ -80,9 +87,11 @@ def cell_metrics(cell: dict) -> dict:
         "otm_call_iv": call_iv,
         "smile": ((put_iv + call_iv) / 2 - atm_iv
                   if None not in (put_iv, call_iv, atm_iv) else np.nan),
-        "cp_vol": np.log((vol("atm") + vol("otm_call") + 1) / (vol("otm_put") + 1)),
-        "wing_vol": np.log((vol("otm_call") + 1) / (vol("otm_put") + 1)),
-        "tot_vol": vol("atm") + vol("otm_put") + vol("otm_call"),
+        "cp_vol": (np.log((vol("atm") + vol("otm_call") + 1) / (vol("otm_put") + 1))
+                   if has_volume else np.nan),
+        "wing_vol": (np.log((vol("otm_call") + 1) / (vol("otm_put") + 1))
+                     if has_volume else np.nan),
+        "tot_vol": (vol("atm") + vol("otm_put") + vol("otm_call")) if has_volume else np.nan,
         "atm_spread": spread,
         # Johnson-So O/S numerator: only legs carrying BOTH volume and mid
         # count; a cell with neither is missing, never $0.
