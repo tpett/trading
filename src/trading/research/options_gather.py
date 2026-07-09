@@ -89,6 +89,19 @@ QUOTE_WINDOW_DAYS = 3
 # are present in the Tiingo cache are candidates, ranked by dollar volume.
 UNIVERSE_MEMBERSHIP_WINDOW = ("2019-01-01", "2026-12-31")
 
+# --- v2 enrichment (open interest) -------------------------------------------
+# Endpoint path VERIFIED against the live Standard-tier terminal (options-gather-v2
+# plan Task 1 discovery, 2026-07): the EOD tape itself carries no inline
+# open_interest field, but this dedicated route serves it (HTTP 200, one row/day,
+# columns symbol,expiration,strike,right,timestamp,open_interest -- same query
+# params as history/eod). Greeks endpoints (`/v3/option/history/greeks`,
+# `/v3/option/history/implied_volatility`) both 404 on this tier, so no greeks
+# capture path exists here -- re-run discovery if the terminal build changes.
+OI_PATH = "/v3/option/history/open_interest"
+# Contract keys the gather may ADD to a leg; only extractor-vetted values ever
+# carry them (absent field -> absent key, never 0).
+_ENRICHMENT_KEYS = ("open_interest",)
+
 
 # --- HTTP client -----------------------------------------------------------
 
@@ -100,6 +113,15 @@ class OptionsClient(Protocol):
     def list_expirations(self, symbol: str) -> list[str]: ...
     def list_strikes(self, symbol: str, expiration: str) -> list[float]: ...
     def history_eod(
+        self,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        right: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict]: ...
+    def history_open_interest(
         self,
         symbol: str,
         expiration: str,
@@ -129,6 +151,37 @@ def _fmt_strike(strike: float) -> str:
 # OTM call) should be omitted, not sink the whole cell. Any OTHER non-200 stays
 # a retryable error.
 _THETA_NO_DATA_STATUS = 472
+
+
+def _contract_params(
+    symbol: str, expiration: str, strike: float, right: str, start_date: str, end_date: str
+) -> dict:
+    """The canonical per-contract query params every history endpoint takes."""
+    return {
+        "symbol": symbol,
+        "expiration": expiration,
+        "strike": _fmt_strike(strike),
+        "right": right,
+        "start_date": start_date,
+        "end_date": end_date,
+        "format": "json",
+    }
+
+
+def _flatten_rows(payload: dict) -> list[dict]:
+    """v3 envelope -> flat row list. Entries either nest rows under "data"
+    (the history/eod shape) or ARE the rows; tolerate both so the OI parser
+    survives either serialization."""
+    rows: list[dict] = []
+    for entry in payload.get("response", []):
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get("data")
+        if isinstance(data, list):
+            rows.extend(row for row in data if isinstance(row, dict))
+        else:
+            rows.append(entry)
+    return rows
 
 
 class ThetaClient:
@@ -207,15 +260,7 @@ class ThetaClient:
     ) -> list[dict]:
         payload = self._get_json(
             "/v3/option/history/eod",
-            {
-                "symbol": symbol,
-                "expiration": expiration,
-                "strike": _fmt_strike(strike),
-                "right": right,
-                "start_date": start_date,
-                "end_date": end_date,
-                "format": "json",
-            },
+            _contract_params(symbol, expiration, strike, right, start_date, end_date),
         )
         # One (strike,right) query returns a single contract entry, but flatten
         # defensively across all entries' bars.
@@ -223,6 +268,20 @@ class ThetaClient:
         for entry in payload.get("response", []):
             bars.extend(entry.get("data", []))
         return bars
+
+    def history_open_interest(
+        self,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        right: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict]:
+        payload = self._get_json(
+            OI_PATH, _contract_params(symbol, expiration, strike, right, start_date, end_date)
+        )
+        return _flatten_rows(payload)
 
 
 class _CachingClient:
@@ -261,6 +320,9 @@ class _CachingClient:
 
     def history_eod(self, *args, **kwargs) -> list[dict]:
         return self._client.history_eod(*args, **kwargs)
+
+    def history_open_interest(self, *args, **kwargs) -> list[dict]:
+        return self._client.history_open_interest(*args, **kwargs)
 
 
 # --- Calendar / spot helpers ----------------------------------------------
@@ -436,6 +498,51 @@ def select_bar_for_decision(
     if not prior:
         return None
     return by_date[max(prior)]
+
+
+# --- v2 enrichment row selection & extraction --------------------------------
+
+
+def row_trade_date(row: dict) -> date | None:
+    """Trade date of an enrichment/EOD row: ``date`` (the OI tape), else the
+    date part of ``last_trade`` (the EOD tape). None when neither parses -- an
+    undated row can never be matched to a decision bar."""
+    for key in ("date", "last_trade"):
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except ValueError:
+            continue
+    return None
+
+
+def select_row_for_date(rows: list[dict], trade_date: date) -> dict | None:
+    """The row stamped exactly ``trade_date`` (last one wins -- the tape
+    double-prints; same rationale as dedup_bars_by_trade_date). None when
+    absent: enrichment must describe the SAME session the quote came from,
+    so there is deliberately NO nearest-prior fallback here."""
+    out: dict | None = None
+    for row in rows:
+        if row_trade_date(row) == trade_date:
+            out = row
+    return out
+
+
+def extract_open_interest(row: dict | None) -> dict:
+    """``{"open_interest": int}`` when the row carries a finite value, else
+    ``{}``. A vendor-served 0 is a real observation and kept; an ABSENT field
+    yields no key -- the additive-schema rule (never fabricate a 0)."""
+    if row is None:
+        return {}
+    try:
+        number = float(row.get("open_interest"))
+    except (TypeError, ValueError):
+        return {}
+    if not math.isfinite(number):
+        return {}
+    return {"open_interest": int(number)}
 
 
 # --- Cell assembly ---------------------------------------------------------

@@ -17,18 +17,22 @@ import pandas as pd
 import pytest
 
 from trading.research.options_gather import (
+    OI_PATH,
     ThetaClient,
     build_cell,
     build_universe,
     build_work_items,
     dedup_bars_by_trade_date,
+    extract_open_interest,
     gather_cell,
     is_standard_monthly,
     load_existing_keys,
     rank_strikes_by_distance,
+    row_trade_date,
     run_gather,
     select_bar_for_decision,
     select_expiration,
+    select_row_for_date,
     snap_strikes,
 )
 from trading.research.options_iv import DIV_YIELD, RATE, bs_price
@@ -725,3 +729,103 @@ def test_theta_client_treats_472_as_empty_not_error(monkeypatch):
     assert bars == []  # empty, not an exception
     assert calls["n"] == 1  # 472 is NOT retried
     assert sleeps == []  # no backoff spent on a no-data response
+
+
+# --- OI endpoint & extraction (v2) ------------------------------------------
+#
+# Discovery verdict (2026-07, live Standard-tier terminal): the EOD tape carries
+# NO inline open_interest field, but `/v3/option/history/open_interest` (OI_PATH)
+# serves it -- HTTP 200, one row/day, columns
+# symbol,expiration,strike,right,timestamp,open_interest. Greeks endpoints
+# (`/v3/option/history/greeks`, `/v3/option/history/implied_volatility`) both
+# 404 on this tier, so the greeks capture path is omitted entirely (YAGNI --
+# nothing in this module references greeks).
+
+
+class _FakeResp:
+    """Minimal urlopen context-manager double serving one canned JSON body."""
+
+    status = 200
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode()
+
+
+def test_theta_client_history_open_interest_endpoint_and_parse(monkeypatch):
+    """history_open_interest hits the verified v3 OI route with the canonical
+    contract params and flattens the response envelope to rows."""
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        return _FakeResp(
+            {"response": [{"data": [{"date": "2019-03-01", "open_interest": 1523}]}]}
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = ThetaClient("http://x")
+    rows = client.history_open_interest(
+        "AAPL", "2019-04-18", 185.0, "C", "2019-02-25", "2019-03-05"
+    )
+    assert rows == [{"date": "2019-03-01", "open_interest": 1523}]
+    assert f"{OI_PATH}?" in captured["url"]  # tracks the discovery-verified route
+    assert "symbol=AAPL" in captured["url"]
+    assert "strike=185" in captured["url"]  # whole-dollar strike, canonical bare-int form
+    assert "right=C" in captured["url"]
+    assert "start_date=2019-02-25" in captured["url"]  # dashed dates
+
+
+def test_theta_client_history_open_interest_472_is_empty_not_error(monkeypatch):
+    """A 472 on the OI route is a normal empty (same semantics as history_eod):
+    one call, no retry, no exception -- a missing OI leg is simply absent."""
+    calls = {"n": 0}
+
+    def always_472(req, timeout):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 472, "No data", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", always_472)
+    client = ThetaClient("http://x", sleep=lambda _s: None)
+    rows = client.history_open_interest(
+        "AAPL", "2019-04-18", 185.0, "C", "2019-02-25", "2019-03-05"
+    )
+    assert rows == []
+    assert calls["n"] == 1  # the 472 was NOT retried
+
+
+def test_row_trade_date_reads_date_then_last_trade():
+    assert row_trade_date({"date": "2019-03-01"}) == date(2019, 3, 1)
+    assert row_trade_date({"last_trade": "2019-03-01T15:59:56.204"}) == date(2019, 3, 1)
+    assert row_trade_date({"date": "garbage"}) is None
+    assert row_trade_date({}) is None
+
+
+def test_select_row_for_date_exact_match_last_wins_no_fallback():
+    rows = [
+        {"date": "2019-03-01", "open_interest": 10},
+        {"date": "2019-03-01", "open_interest": 11},  # tape double-print: last wins
+        {"date": "2019-02-28", "open_interest": 9},
+    ]
+    assert select_row_for_date(rows, date(2019, 3, 1))["open_interest"] == 11
+    # NO nearest-prior fallback: enrichment must ride the SAME date as the bar.
+    assert select_row_for_date(rows, date(2019, 3, 4)) is None
+
+
+def test_extract_open_interest_absent_or_junk_yields_no_key():
+    assert extract_open_interest(None) == {}
+    assert extract_open_interest({"date": "2019-03-01"}) == {}  # field absent -> no key
+    assert extract_open_interest({"open_interest": None}) == {}
+    assert extract_open_interest({"open_interest": "junk"}) == {}
+    assert extract_open_interest({"open_interest": float("nan")}) == {}
+    # A vendor-SERVED zero is a real observation, kept (never fabricated, never dropped).
+    assert extract_open_interest({"open_interest": 0}) == {"open_interest": 0}
+    assert extract_open_interest({"open_interest": 1523.0}) == {"open_interest": 1523}
