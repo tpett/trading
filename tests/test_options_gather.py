@@ -760,28 +760,53 @@ class _FakeResp:
         return json.dumps(self._payload).encode()
 
 
+# One OI row exactly as the live tape serves it: the response header
+# (symbol,expiration,strike,right,timestamp,open_interest) becomes the row keys
+# verbatim, so the date-bearing key is `timestamp` -- NOT `date` -- and it
+# carries a time component. Fixtures below MUST use this shape or they test an
+# assumed schema instead of the discovered one.
+def _live_oi_row(timestamp: str, open_interest: int) -> dict:
+    return {
+        "symbol": "AAPL",
+        "expiration": "2023-06-16",
+        "strike": 180,
+        "right": "C",
+        "timestamp": timestamp,
+        "open_interest": open_interest,
+    }
+
+
 def test_theta_client_history_open_interest_endpoint_and_parse(monkeypatch):
     """history_open_interest hits the verified v3 OI route with the canonical
-    contract params and flattens the response envelope to rows."""
+    contract params and flattens the response envelope to rows whose keys are
+    the live header verbatim (`timestamp`, not `date`)."""
     captured = {}
+    live_row = _live_oi_row("2023-05-15T06:30:10.000", 54141)
 
     def fake_urlopen(req, timeout):
         captured["url"] = req.full_url
-        return _FakeResp(
-            {"response": [{"data": [{"date": "2019-03-01", "open_interest": 1523}]}]}
-        )
+        return _FakeResp({"response": [{"data": [dict(live_row)]}]})
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     client = ThetaClient("http://x")
     rows = client.history_open_interest(
-        "AAPL", "2019-04-18", 185.0, "C", "2019-02-25", "2019-03-05"
+        "AAPL", "2023-06-16", 180.0, "C", "2023-05-15", "2023-05-19"
     )
-    assert rows == [{"date": "2019-03-01", "open_interest": 1523}]
+    assert rows == [live_row]
+    # The parse preserves the live header keys: rows DO carry `timestamp`.
+    assert set(rows[0]) == {
+        "symbol",
+        "expiration",
+        "strike",
+        "right",
+        "timestamp",
+        "open_interest",
+    }
     assert f"{OI_PATH}?" in captured["url"]  # tracks the discovery-verified route
     assert "symbol=AAPL" in captured["url"]
-    assert "strike=185" in captured["url"]  # whole-dollar strike, canonical bare-int form
+    assert "strike=180" in captured["url"]  # whole-dollar strike, canonical bare-int form
     assert "right=C" in captured["url"]
-    assert "start_date=2019-02-25" in captured["url"]  # dashed dates
+    assert "start_date=2023-05-15" in captured["url"]  # dashed dates
 
 
 def test_theta_client_history_open_interest_472_is_empty_not_error(monkeypatch):
@@ -802,22 +827,28 @@ def test_theta_client_history_open_interest_472_is_empty_not_error(monkeypatch):
     assert calls["n"] == 1  # the 472 was NOT retried
 
 
-def test_row_trade_date_reads_date_then_last_trade():
-    assert row_trade_date({"date": "2019-03-01"}) == date(2019, 3, 1)
+def test_row_trade_date_reads_timestamp_then_date_then_last_trade():
+    # The live OI tape: `timestamp` with a time component -> date part only.
+    assert row_trade_date(_live_oi_row("2023-05-15T06:30:10.000", 54141)) == date(2023, 5, 15)
+    # The EOD tape keys `last_trade`; `date` is a defensive alias.
     assert row_trade_date({"last_trade": "2019-03-01T15:59:56.204"}) == date(2019, 3, 1)
-    assert row_trade_date({"date": "garbage"}) is None
+    assert row_trade_date({"date": "2019-03-01"}) == date(2019, 3, 1)
+    assert row_trade_date({"timestamp": "garbage"}) is None
     assert row_trade_date({}) is None
 
 
-def test_select_row_for_date_exact_match_last_wins_no_fallback():
+def test_select_row_for_date_matches_live_oi_rows_by_date_part():
+    """Matching is by CALENDAR DATE, never exact-timestamp equality -- the live
+    OI stamps carry 06:30-style times. Exact match only, last row wins on a
+    tape double-print, and NO nearest-neighbor fallback when the date is absent."""
     rows = [
-        {"date": "2019-03-01", "open_interest": 10},
-        {"date": "2019-03-01", "open_interest": 11},  # tape double-print: last wins
-        {"date": "2019-02-28", "open_interest": 9},
+        _live_oi_row("2023-05-15T06:30:10.000", 54141),
+        _live_oi_row("2023-05-15T06:30:11.000", 54142),  # double-print: last wins
+        _live_oi_row("2023-05-12T06:30:09.000", 53990),
     ]
-    assert select_row_for_date(rows, date(2019, 3, 1))["open_interest"] == 11
+    assert select_row_for_date(rows, date(2023, 5, 15))["open_interest"] == 54142
     # NO nearest-prior fallback: enrichment must ride the SAME date as the bar.
-    assert select_row_for_date(rows, date(2019, 3, 4)) is None
+    assert select_row_for_date(rows, date(2023, 5, 16)) is None
 
 
 def test_extract_open_interest_absent_or_junk_yields_no_key():

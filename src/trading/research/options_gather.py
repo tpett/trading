@@ -504,10 +504,13 @@ def select_bar_for_decision(
 
 
 def row_trade_date(row: dict) -> date | None:
-    """Trade date of an enrichment/EOD row: ``date`` (the OI tape), else the
-    date part of ``last_trade`` (the EOD tape). None when neither parses -- an
-    undated row can never be matched to a decision bar."""
-    for key in ("date", "last_trade"):
+    """Trade date of an enrichment/EOD row. The live OI tape stamps its rows
+    ``timestamp`` (e.g. ``2023-05-15T06:30:10.000`` -- per Task 1 discovery),
+    the EOD tape ``last_trade``; ``date`` is kept as a defensive alias. Only
+    the DATE part is used: matching is by calendar date, never exact-timestamp
+    equality. None when nothing parses -- an undated row can never be matched
+    to a decision bar."""
+    for key in ("timestamp", "date", "last_trade"):
         value = row.get(key)
         if value is None:
             continue
