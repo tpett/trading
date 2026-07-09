@@ -498,6 +498,28 @@ eligible for their once-only re-prove, but that decision (and whether
 robustness/cost tests should come first, i.e., Piece 3) belongs to the
 developer. Nothing is spent.
 
+**Robustness battery pilot (2026-07-09, Piece 3 at 3cdf017; journal now 835
+deduped discovery trials + 3 battery verdicts).** The frozen 7-check battery
+(spec `2026-07-09-robustness-battery-design.md` §3) ran on all three
+survivors — the program's first evidence-graded interrogation, no holdout
+touched:
+
+| target | verdict | what decided it |
+|---|---|---|
+| amihud:midcap | **HOLDOUT-ELIGIBLE** | all 6 checks pass — both halves strong (2019-21 a=+70.7 t=+6.15; 2021-23 a=+49.1 t=+5.60, NOT a one-regime wonder); 5/5 subset draws; 4/4 jitter; offset retention 1.00; survives GME/CELH/OVV exclusion at 0.90 retention; months 21%; 50 bps barely dents it (t=+8.27); capacity flat to $1M/side |
+| amihud:midcap:trade | NOT eligible | check 1 FAIL: one-regime (2019-21 a=+59.9 t=+3.60 vs 2021-23 a=+7.5 t=+0.67); name-concentration squeaked by at 0.53 excluding GME/BBBY/DDS — meme-era names |
+| amihud:opt-midcap:trade | NOT eligible | check 1 FAIL (same one-regime shape) + check 2 structurally infeasible (26-name universe; 13-name draws < 15 floor → 5 honest error trials, designed-in) |
+
+Reading: the battery killed both trade-sector echoes as 2019-21/meme-era
+artifacts and passed the broad mid-cap version with a surprisingly stable
+profile — both halves independently significant, tiny turnover (~5%/mo)
+making costs nearly irrelevant, and first-order Amihud impact negligible at
+personal book sizes. The pseudo-replication caveat (above) applies to the
+post-battery leaderboard: amihud:midcap's jitter variants now also display
+as BH passes (near-duplicates of the same effect, expected); any UNRELATED
+new PASS rows are artifacts of the enlarged m and earn nothing without
+their own battery.
+
 **Developer decision (2026-07-09): PARKED, not promoted.** This is the
 program's second illiquidity finding. The first (§9: mid-cap option
 illiquidity, the `illiquidity_veto_v1` ranker family) looked real until it
