@@ -61,6 +61,7 @@ import pandas as pd
 
 from trading.config import SignalConfig
 from trading.signals.engine import FeaturePanel, compute_features
+from trading.signals.illiquidity import amihud_v1
 from trading.signals.quality import quality_momentum_v1
 from trading.signals.skew import illiquidity_veto_v1, skew_change_v1, skew_v1
 from trading.signals.value import value_momentum_v1
@@ -114,6 +115,7 @@ RANKERS: dict[str, RankerSpec] = {
     "illiquidity_veto_v1": RankerSpec(
         illiquidity_veto_v1, requires_fundamentals=False, requires_skew=True
     ),
+    "amihud_v1": RankerSpec(amihud_v1, requires_fundamentals=False),
 }
 
 
