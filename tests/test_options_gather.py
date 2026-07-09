@@ -1139,3 +1139,15 @@ def test_gather_cell_include_far_false_spends_no_far_requests():
     # Only the near walk's probes happened: (100,C) + (90,P); the otm_call walk
     # reuses the cached (100,C). Far would have added two more history calls.
     assert len(client.history_calls) == 2
+
+
+def test_enriched_cell_json_round_trip_and_resume_key(tmp_path: Path):
+    """A gathered v2 cell survives JSON serialization exactly, and the resume
+    reader extracts the same (symbol, decision_date) key it always did."""
+    cell = gather_cell(_near_far_client(), "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None and "far" in cell
+    line = json.dumps(cell)
+    assert json.loads(line) == cell  # nothing in the cell is non-JSON-native
+    out = tmp_path / "samples.jsonl"
+    out.write_text(line + "\n")
+    assert load_existing_keys(out) == {("AAA", "2019-03-01")}
