@@ -149,12 +149,14 @@ def build_parser() -> argparse.ArgumentParser:
         "alphasearch",
         help="cheap alpha search: sweep signals x universes, leaderboard, holdout",
     )
-    alphasearch.add_argument("action", choices=["sweep", "leaderboard", "holdout"])
+    alphasearch.add_argument(
+        "action", choices=["sweep", "leaderboard", "holdout", "robustness"]
+    )
     alphasearch.add_argument(
         "trial",
         nargs="?",
         default=None,
-        help="holdout target as signal:universe (e.g. mom126:largecap)",
+        help="holdout/robustness target as signal:universe (e.g. mom126:largecap)",
     )
     alphasearch.add_argument(
         "--universe",
@@ -940,6 +942,36 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
         _print_alphasearch_leaderboard(rows, count, as_json=args.json)
         return 0
 
+    if args.action == "robustness":
+        if not args.trial or ":" not in args.trial:
+            print(
+                "ERROR: robustness needs a trial id: signal:universe "
+                "(e.g. amihud:midcap)",
+                file=sys.stderr,
+            )
+            return 1
+        signal_name, _, universe = args.trial.partition(":")
+        uspec = _resolve_alphasearch_universe(universe)
+        if uspec is None:
+            return 1
+        factors = _load_alphasearch_factors(args)
+        if factors is None:
+            return 1
+        from trading.alphasearch import robustness
+
+        try:
+            outcome = robustness.run_battery(
+                uspec, journal, factors, _utcnow().isoformat(), signal_name
+            )
+        except (engine.SweepError, PanelError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(outcome.event))
+            return 0
+        _render_battery(outcome)
+        return 0
+
     # holdout
     if not args.trial or ":" not in args.trial:
         print(
@@ -948,26 +980,8 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
         )
         return 1
     signal_name, _, universe = args.trial.partition(":")
-    universes = engine.default_universes(Path("."))
-    if universe not in universes:
-        # Segment holdouts need no flag (spec 3.3: journal-derived targets);
-        # resolving specs from the committed CSVs is cheap and touches no
-        # panel. A missing sic_map only errors when a segment name actually
-        # needs it -- flat-pool holdouts never reach this branch.
-        from trading.alphasearch.segments import segment_universes
-
-        try:
-            seg_universes, _excluded = segment_universes(Path("."))
-        except engine.SweepError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            return 1
-        universes = {**universes, **seg_universes}
-    if universe not in universes:
-        print(
-            f"ERROR: unknown universe {universe!r}; choose from "
-            f"{', '.join(sorted(universes))}",
-            file=sys.stderr,
-        )
+    uspec = _resolve_alphasearch_universe(universe)
+    if uspec is None:
         return 1
     factors = _load_alphasearch_factors(args)
     if factors is None:
@@ -988,7 +1002,7 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
 
     try:
         outcome = engine.run_holdout(
-            universes[universe], journal, factors, _utcnow().isoformat(),
+            uspec, journal, factors, _utcnow().isoformat(),
             signal_name, confirm=confirm,
         )
     except (engine.SweepError, PanelError) as exc:
@@ -1025,6 +1039,33 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
         + ("PASS" if outcome.passed else "FAIL")
     )
     return 0
+
+
+def _resolve_alphasearch_universe(universe: str):
+    """UniverseSpec for a flat pool or (flag-free) segment universe name, or
+    None with the error already printed -- shared by holdout and robustness
+    (both resolve journal-derived targets; a missing sic_map only errors when
+    a segment name actually needs it)."""
+    from trading.alphasearch import sweep as engine
+
+    universes = engine.default_universes(Path("."))
+    if universe not in universes:
+        from trading.alphasearch.segments import segment_universes
+
+        try:
+            seg_universes, _excluded = segment_universes(Path("."))
+        except engine.SweepError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return None
+        universes = {**universes, **seg_universes}
+    if universe not in universes:
+        print(
+            f"ERROR: unknown universe {universe!r}; choose from "
+            f"{', '.join(sorted(universes))}",
+            file=sys.stderr,
+        )
+        return None
+    return universes[universe]
 
 
 def _load_alphasearch_factors(args: argparse.Namespace):
@@ -1094,4 +1135,83 @@ def _print_alphasearch_leaderboard(rows, count: int, *, as_json: bool) -> None:
         "[dim]t-stats use classical OLS SEs on daily data; volatility "
         "clustering typically inflates them 10-30% vs HAC — read marginal "
         "passes skeptically[/dim]"
+    )
+
+
+def _render_battery(outcome) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console() if sys.stdout.isatty() else Console(width=200)
+
+    def num(value, fmt="{:+.2f}"):
+        return "-" if value is None else fmt.format(value)
+
+    def summary(check) -> str:
+        d = check.detail
+        if check.name == "sub_period_halves":
+            return "; ".join(
+                f"{h['window']}: a={num(h['alpha_annual_pct'], '{:+.1f}')} "
+                f"t={num(h['alpha_t'])}" for h in d["halves"]
+            )
+        if check.name == "universe_subsets":
+            return f"{d['n_pass']}/5 draws sign-matched (need >=4)"
+        if check.name == "parameter_jitter":
+            ok = sum(1 for t in d["trials"] if t["passed"])
+            return f"{ok}/4 jitter trials sign-matched (need 4)"
+        if check.name == "decision_offset":
+            return (f"a={num(d['alpha_annual_pct'], '{:+.1f}')} "
+                    f"retention={num(d['retention'], '{:.2f}')} (need >=0.50)")
+        if check.name == "name_concentration":
+            return (f"excl {', '.join(d['excluded'])}: "
+                    f"a={num(d['alpha_annual_pct'], '{:+.1f}')} "
+                    f"retention={num(d['retention'], '{:.2f}')} (need >=0.50)")
+        if check.name == "month_concentration":
+            return f"top-3 months share={num(d['top3_share'], '{:.0%}')} (need <=60%)"
+        return ""
+
+    table = Table(title=(
+        f"robustness battery — {outcome.signal}:{outcome.universe} "
+        f"over {outcome.window}"
+    ))
+    for col in ["#", "check", "result", "numbers"]:
+        table.add_column(col)
+    for check in outcome.checks:
+        table.add_row(str(check.number), check.name,
+                      "PASS" if check.passed else "FAIL", summary(check))
+    console.print(table)
+
+    cost = Table(title="cost-adjusted alpha (one-way bps, both legs charged)")
+    for col in ["cost", "4F a%/yr", "t"]:
+        cost.add_column(col, justify="right")
+    for row in outcome.cost_table:
+        cost.add_row(f"{row['cost_bps']}bp", num(row.get("alpha_annual_pct"), "{:+.1f}"),
+                     num(row.get("alpha_t")))
+    console.print(cost)
+
+    capacity = Table(title="Amihud-implied capacity curve (first-order model)")
+    for col in ["book/side", "4F a%/yr", "t", "no-λ names"]:
+        capacity.add_column(col, justify="right")
+    for row in outcome.capacity_curve:
+        capacity.add_row(f"${row['book_usd']:,.0f}",
+                         num(row.get("alpha_annual_pct"), "{:+.1f}"),
+                         num(row.get("alpha_t")),
+                         str(row.get("skipped_no_lambda", 0)))
+    console.print(capacity)
+
+    if outcome.factor_proxy.get("flagged"):
+        offenders = ", ".join(
+            f"{name} (t={t:+.1f})"
+            for name, t in outcome.factor_proxy["offenders"].items()
+        )
+        console.print(
+            f"[bold red]FACTOR-PROXY WARNING: {offenders} loads harder than "
+            f"the alpha (|t_loading| > 2x|t_alpha|, R²="
+            f"{outcome.factor_proxy['r2']:.2f} > 0.5) — the §9 SMB-costume "
+            f"pattern. Does not block, but read the alpha as a factor bet "
+            f"until proven otherwise.[/bold red]"
+        )
+    console.print(
+        f"holdout-eligible: {'YES' if outcome.eligible else 'NO'} "
+        f"(checks 1-6 all pass AND 30bp cost t >= 2.0)"
     )

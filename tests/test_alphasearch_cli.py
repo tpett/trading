@@ -250,3 +250,107 @@ def test_holdout_resolves_segment_universe_names_without_a_flag(
     assert rc == 1
     assert captured["universe"] == "largecap:banks"
     assert "stub refusal" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# robustness (Piece 3)
+# --------------------------------------------------------------------------- #
+
+
+def test_robustness_requires_trial_id(tmp_path, capsys):
+    rc = cli.main(["alphasearch", "robustness", "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    assert "signal:universe" in capsys.readouterr().err
+
+
+def test_robustness_unknown_universe_rejected(tmp_path, capsys):
+    rc = cli.main(["alphasearch", "robustness", "mom21:smallcap",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    assert "unknown universe" in capsys.readouterr().err
+
+
+def test_robustness_refusal_prints_error(tmp_path, capsys, monkeypatch):
+    # Empty journal: run_battery refuses (no discovery trial) before any IO
+    # beyond factors, which the stub keeps offline.
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    rc = cli.main(["alphasearch", "robustness", "mom21:largecap",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    assert "no discovery trial" in capsys.readouterr().err
+
+
+def _fake_battery_outcome(*, eligible=False, flagged=True):
+    from trading.alphasearch.robustness import BatteryOutcome, CheckResult
+
+    checks = (
+        CheckResult(1, "sub_period_halves", True, {"halves": [
+            {"window": "2019-01-01..2021-06-30", "alpha_annual_pct": 30.0,
+             "alpha_t": 4.0, "error": None, "passed": True},
+            {"window": "2021-07-01..2023-12-31", "alpha_annual_pct": 25.0,
+             "alpha_t": 3.0, "error": None, "passed": True}]}),
+        CheckResult(2, "universe_subsets", True,
+                    {"draws": [], "n_pass": 5}),
+        CheckResult(3, "parameter_jitter", True, {"trials": []}),
+        CheckResult(4, "decision_offset", True,
+                    {"offset_sessions": 1, "alpha_annual_pct": 28.0,
+                     "alpha_t": 3.5, "retention": 0.9, "error": None}),
+        CheckResult(5, "name_concentration", False,
+                    {"excluded": ["AAA", "BBB", "CCC"],
+                     "alpha_annual_pct": 5.0, "retention": 0.16, "error": None}),
+        CheckResult(6, "month_concentration", True, {"top3_share": 0.41}),
+    )
+    return BatteryOutcome(
+        signal="amihud", universe="midcap", window="2019-01-01..2023-12-31",
+        checks=checks,
+        factor_proxy={"flagged": flagged, "offenders": {"SMB": 13.1},
+                      "alpha_t": 3.0, "r2": 0.6},
+        cost_table=[{"cost_bps": 10, "alpha_annual_pct": 55.0, "alpha_t": 7.1},
+                    {"cost_bps": 30, "alpha_annual_pct": 48.0, "alpha_t": 6.0},
+                    {"cost_bps": 50, "alpha_annual_pct": 41.0, "alpha_t": 4.9}],
+        capacity_curve=[
+            {"book_usd": 1e4, "alpha_annual_pct": 60.0, "alpha_t": 8.0,
+             "total_impact_charge": 0.01, "skipped_no_lambda": 0},
+            {"book_usd": 1e5, "alpha_annual_pct": 52.0, "alpha_t": 6.8,
+             "total_impact_charge": 0.1, "skipped_no_lambda": 0},
+            {"book_usd": 1e6, "alpha_annual_pct": 20.0, "alpha_t": 2.1,
+             "total_impact_charge": 1.0, "skipped_no_lambda": 0}],
+        eligible=eligible,
+        event={"event": "trial", "kind": "battery", "signal": "amihud",
+               "universe": "midcap", "window": "2019-01-01..2023-12-31",
+               "config_hash": "4f3d0819382a", "ts": "t1", "error": None,
+               "eligible": eligible},
+    )
+
+
+def test_robustness_report_card_renders_with_red_proxy_warning(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.robustness.run_battery",
+                        lambda *a, **k: _fake_battery_outcome())
+    rc = cli.main(["alphasearch", "robustness", "amihud:midcap",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 0                                   # completed battery = 0
+    out = capsys.readouterr().out
+    assert "name_concentration" in out and "FAIL" in out
+    assert "sub_period_halves" in out and "PASS" in out
+    assert "FACTOR-PROXY WARNING" in out and "SMB" in out
+    assert "30" in out and "capacity" in out.lower()
+    assert "holdout-eligible: NO" in out
+
+
+def test_robustness_json_dumps_the_verdict_event(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.robustness.run_battery",
+                        lambda *a, **k: _fake_battery_outcome(eligible=True))
+    rc = cli.main(["alphasearch", "robustness", "amihud:midcap",
+                   "--journal-dir", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "battery"
+    assert payload["eligible"] is True
+    assert payload["signal"] == "amihud"
