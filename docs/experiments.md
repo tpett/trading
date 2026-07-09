@@ -284,7 +284,7 @@ name-set beta differences more than a repeatable skew edge. (Signal build:
 `src/trading/signals/skew.py`, adversarially reviewed — no lookahead, correct sign,
 thin-cross-section guard; study: `scripts/skew_premium_study.py`.)
 
-## 10. Alpha-search engine (Piece 1) — built; first real sweep pending
+## 10. Alpha-search engine (Piece 1) — built; first sweep = honest null (238 trials, 0 BH survivors)
 
 The core alpha-search engine is implemented (`src/trading/alphasearch/`,
 `trading alphasearch sweep|leaderboard|holdout`; design:
@@ -295,13 +295,33 @@ sort, gates candidates with BH-FDR (q=0.10) over the persisted trial journal
 a touched-once 2024+ holdout. Pre-registered rules are in the design spec §5;
 terms in the glossary ("Multiple testing" section).
 
-**No real sweep has been run yet.** When the first discovery sweep over the
-large-cap and mid-cap options pools lands, record here: the honest trial
-count, the leaderboard summary, BH survivors (if any), and the null-result
-reading if nothing survives — a null is a first-class outcome. Known caveat
-to carry forward: 2024-25 data was partially examined by the §9 skew studies,
-so holdout passes for skew-family signals carry residual contamination risk
-and must be read conservatively (spec §5.3).
+**First pre-registered sweep ran 2026-07-09 (master dcaf5cf): 238 journaled
+discovery trials, ZERO BH survivors at q=0.10 — a comprehensive honest null.**
+Three passes over discovery 2019-01-01..2023-12-31, all in one journal, one
+BH computation: (a) flat pools × 13 signals (7 price + 6 options; fundamentals
+signals refused — no local store) = 26 trials; (b) `--segments` × 7 price
+signals over 26 universes (flat + 24 SIC segments) = 208 cumulative;
+(c) options family × the 5 viable opt segments = 238 cumulative (245 events
+incl. 7 honest `SortError` error trials on `midcap:construction`, whose
+cross-section fell below 15 on every decision date). Best candidates vs the
+BH bar (k=1 needs p ≤ 0.10/238 ≈ 0.00042): `atm_iv` midcap t=−2.70 p=0.0071;
+`disthigh` midcap:services t=−2.54 p=0.0113; `atm_spread`
+opt-largecap:services t=+2.52 p=0.0118; `vrp` largecap t=+2.47 p=0.0138.
+Nothing within an order of magnitude of the bar. **No holdout touches were
+spent** (nothing qualified; the 2024+ holdout remains fully reserved). Reading:
+across every seed signal, both caps, and every pre-registered segment, no
+cross-sectional signal in this library carries four-factor alpha the
+multiple-testing bar can distinguish from luck at monthly rebalance — the
+engine did exactly what it was built to do: kill 238 hypotheses in ~15
+minutes of compute for the cost of zero forward capital. Suggestive (NOT
+significant, and classical-SE inflated) patterns for future pre-registered
+work, recorded only so they aren't re-discovered as "new" ideas: low-IV/-vol
+longs showed NEGATIVE alpha (high-vol names outperformed 2019-23 on a 4F
+basis, consistent with the beta-heavy bull window), and vrp/atm_spread longs
+were the only positive family. Known caveat carried forward: 2024-25 data was
+partially examined by the §9 skew studies, so any FUTURE holdout passes for
+skew-family signals carry residual contamination risk and must be read
+conservatively (spec §5.3).
 
 **Survivorship caveat (the universes, not the bars, are tilted).** The
 alphasearch large-cap and mid-cap universes are each the gathered options
