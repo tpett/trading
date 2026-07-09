@@ -499,6 +499,8 @@ class PanelData:
         bar (the union calendar), so one symbol's missing day never shifts the
         whole universe's rebalance date.
         """
+        if offset < 0:
+            raise ValueError(f"offset must be >= 0, got {offset}")
         union = sorted({d for s in self.closes.values() for d in s.index})
         by_month: dict[str, list[pd.Timestamp]] = {}
         for date in union:

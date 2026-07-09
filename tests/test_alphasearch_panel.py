@@ -519,3 +519,10 @@ def test_decision_dates_offset_picks_the_nth_session_and_drops_short_months():
     assert panel.decision_dates(start, end, offset=0) == (idx[0], idx[3])
     assert panel.decision_dates(start, end, offset=1) == (idx[1],)
     assert panel.decision_dates(start, end, offset=3) == ()
+
+
+def test_decision_dates_rejects_a_negative_offset():
+    idx = pd.DatetimeIndex(["2020-01-06"], tz="UTC")
+    panel = PanelData(closes={"A": pd.Series([1.0], index=idx)}, symbols=("A",))
+    with pytest.raises(ValueError, match="offset"):
+        panel.decision_dates(idx[0], idx[0], offset=-1)
