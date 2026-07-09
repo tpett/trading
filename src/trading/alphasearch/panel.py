@@ -246,34 +246,61 @@ class PanelData:
 
 
 def build_panel(
-    cache_dir: Path, samples: Path, fundamentals_dir: Path | None
+    cache_dir: Path,
+    samples: Path | None,
+    fundamentals_dir: Path | None,
+    *,
+    symbols: tuple[str, ...] | None = None,
 ) -> PanelData:
     """Assemble one universe's PanelData.
 
-    The universe is the gathered options pool: the samples.jsonl allowlist
-    (spec section 3.2) intersected with the symbols that have cached bars, so
-    every signal family within a universe is measured on the identical
-    cross-section (missing per-signal inputs are handled per-date by the NaN
-    rule, never by widening the pool).
+    Two universe sources (Piece 2 spec section 3.3):
+
+    * samples allowlist (Piece 1): the gathered options pool -- the
+      samples.jsonl allowlist intersected with the symbols that have cached
+      bars, so every signal family within a universe is measured on the
+      identical cross-section.
+    * explicit ``symbols`` (segments): the caller supplies the universe
+      outright, overriding the allowlist derivation. ``samples`` may then be
+      None -- no option frames are loaded, so options signals are refused by
+      the sweep's existing assembly-time check -- or a path, in which case
+      option cells are loaded and restricted to the explicit universe.
+
+    An explicitly-empty symbols tuple is refused (mirrors the empty-signals
+    refusal): sweeping a universe with no names is a caller bug, never a
+    silent no-trade run. `symbols is None` checks throughout -- `symbols or`
+    would conflate empty-and-refuse with absent-and-derive.
     """
-    if not samples.exists():
+    if symbols is not None and len(symbols) == 0:
+        raise PanelError(
+            "explicit symbols tuple is empty: a universe with no names cannot "
+            "trade (segment assembly should have excluded it)"
+        )
+    if symbols is None and samples is None:
+        raise PanelError(
+            "no universe source: pass a samples allowlist or an explicit symbols tuple"
+        )
+    if samples is not None and not samples.exists():
         raise PanelError(
             f"options samples not found: {samples} "
             "(Piece 1 universes are the gathered options pools)"
         )
-    allowlist = sorted(load_symbol_allowlist(samples))
+    if symbols is not None:
+        allowlist = sorted(symbols)
+    else:
+        allowlist = sorted(load_symbol_allowlist(samples))
     closes = load_closes(cache_dir, allowlist)
     if not closes:
-        raise PanelError(f"no bar caches under {cache_dir} for the {samples.name} allowlist")
-    options, corrupt = load_options(samples)
+        raise PanelError(f"no bar caches under {cache_dir} for the requested universe")
+    options, corrupt = load_options(samples) if samples is not None else ({}, 0)
     fundamentals = (
         load_fundamentals(fundamentals_dir, closes) if fundamentals_dir is not None else {}
     )
-    symbols = tuple(s for s in allowlist if s in closes)
+    universe = tuple(s for s in allowlist if s in closes)
     return PanelData(
-        closes={s: closes[s] for s in symbols},
-        options={s: options[s] for s in symbols if s in options},
-        fundamentals={s: fundamentals[s] for s in symbols if s in fundamentals},
-        symbols=symbols,
+        closes={s: closes[s] for s in universe},
+        options={s: options[s] for s in universe if s in options},
+        fundamentals={s: fundamentals[s] for s in universe if s in fundamentals},
+        symbols=universe,
         corrupt_cells=corrupt,
     )

@@ -187,15 +187,21 @@ def find_discovery_trial(
 
 
 # --------------------------------------------------------------------------- #
-# Universes (spec 3.2): the two gathered options pools. Every signal family in
-# a universe is measured on this same allowlist cross-section.
+# Universes (spec 3.2): Piece 1's two gathered options pools, plus Piece 2's
+# segment universes (explicit symbols; samples optional). Every signal family
+# in a universe is measured on the same cross-section.
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class UniverseSpec:
     name: str
     cache_dir: Path
-    samples: Path
+    samples: Path | None
     fundamentals_dir: Path | None
+    # Piece 2: an explicit universe (segment pools). None = derive from the
+    # samples allowlist (Piece 1 behavior). The segment's identity in the
+    # hashed trial config is its NAME (spec section 3.3); the symbol list is
+    # derived from committed CSVs, like bar caches are for Piece 1 pools.
+    symbols: tuple[str, ...] | None = None
 
 
 def default_universes(root: Path) -> dict[str, UniverseSpec]:
@@ -216,7 +222,9 @@ def default_universes(root: Path) -> dict[str, UniverseSpec]:
 
 
 def build_universe_panel(spec: UniverseSpec) -> PanelData:
-    return build_panel(spec.cache_dir, spec.samples, spec.fundamentals_dir)
+    return build_panel(
+        spec.cache_dir, spec.samples, spec.fundamentals_dir, symbols=spec.symbols
+    )
 
 
 def _check_universe_supports(panel: PanelData, spec: SignalSpec, universe: str) -> None:

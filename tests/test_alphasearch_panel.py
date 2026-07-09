@@ -223,3 +223,51 @@ def test_build_panel_from_files(tmp_path):
 def test_build_panel_missing_samples_refused(tmp_path):
     with pytest.raises(PanelError):
         build_panel(tmp_path, tmp_path / "nope.jsonl", None)
+
+
+# --------------------------------------------------------------------------- #
+# Explicit-symbols universes (Piece 2)
+# --------------------------------------------------------------------------- #
+
+
+def _write_cache(tmp_path, symbols):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    idx = pd.date_range("2020-01-02", periods=5, freq="B", tz="UTC")
+    for sym in symbols:
+        pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 2.0,
+                      "volume": 10.0}, index=idx).to_parquet(cache / f"{sym}.parquet")
+    return cache
+
+
+def test_build_panel_explicit_symbols_overrides_the_samples_allowlist(tmp_path):
+    cache = _write_cache(tmp_path, ("AAA", "BBB", "CCC"))
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text(
+        json.dumps(_cell("AAA", "2020-01-02")) + "\n"
+        + json.dumps(_cell("BBB", "2020-01-02")) + "\n"
+    )
+    panel = build_panel(cache, samples, None, symbols=("CCC", "BBB"))
+    assert panel.symbols == ("BBB", "CCC")   # explicit set wins, sorted
+    assert set(panel.options) == {"BBB"}     # option frames restricted to it
+
+
+def test_build_panel_samples_none_builds_a_closes_only_panel(tmp_path):
+    cache = _write_cache(tmp_path, ("AAA",))
+    panel = build_panel(cache, None, None, symbols=("AAA", "NOBAR"))
+    assert panel.symbols == ("AAA",)         # missing-data rule: NOBAR dropped
+    assert panel.options == {}
+    assert panel.fundamentals == {}
+    assert panel.corrupt_cells == 0
+
+
+def test_build_panel_empty_symbols_tuple_refused(tmp_path):
+    # Mirrors the empty-signals refusal: a universe with no names is a caller
+    # bug, refused at assembly, never a silent no-trade sweep.
+    with pytest.raises(PanelError, match="empty"):
+        build_panel(tmp_path, None, None, symbols=())
+
+
+def test_build_panel_without_any_universe_source_refused(tmp_path):
+    with pytest.raises(PanelError, match="universe source"):
+        build_panel(tmp_path, None, None)

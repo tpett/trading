@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from alphasearch_helpers import make_factors, make_panel
+from trading.alphasearch.panel import PanelError
 from trading.alphasearch.spec import SIGNALS
 from trading.alphasearch.sweep import (
     RERUN_CONFIRMATION,
     SweepError,
     UniverseSpec,
     build_leaderboard,
+    default_universes,
     discovery_trials,
     holdout_passes,
     prior_holdout_trial,
@@ -506,3 +509,75 @@ def test_holdout_refused_when_discovery_alpha_missing(tmp_path):
                     "t2", "mom21", holdout_start=HOLDOUT_FROM,
                     discovery_window=DISCOVERY, panel_factory=lambda _u: panel)
     assert all(e.get("kind") != "holdout" for e in journal.events())
+
+
+# --------------------------------------------------------------------------- #
+# Explicit-symbols universes (Piece 2): the real files path, no factory.
+# --------------------------------------------------------------------------- #
+
+
+def _write_deep_universe(tmp_path) -> UniverseSpec:
+    """make_panel()'s closes as real parquets + an explicit symbols tuple:
+    exactly the shape segment_universes emits for a deep pool."""
+    panel = make_panel()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for sym in panel.symbols:
+        closes = panel.closes[sym]
+        pd.DataFrame(
+            {"open": closes, "high": closes, "low": closes, "close": closes,
+             "volume": 1000.0},
+            index=closes.index,
+        ).to_parquet(cache / f"{sym}.parquet")
+    return UniverseSpec("largecap:test", cache, None, None, symbols=panel.symbols)
+
+
+def test_deep_universe_runs_price_signals_end_to_end(tmp_path):
+    # No panel_factory injection: build_universe_panel/build_panel must
+    # assemble a closes-only panel from the explicit symbols tuple.
+    journal = trials_journal(tmp_path / "journal")
+    uspec = _write_deep_universe(tmp_path)
+    rows, n_trials = run_sweep({uspec.name: uspec}, journal, make_factors(),
+                               ts="t1", signals=_subset("mom21"), window=WINDOW)
+    assert n_trials == 1
+    assert rows[0].universe == "largecap:test"
+    assert rows[0].error is None
+    assert abs(rows[0].alpha_t) > 5           # the engineered momentum spread
+
+
+def test_deep_universe_refuses_options_signals_end_to_end(tmp_path):
+    # samples=None -> panel.options == {} -> the EXISTING requires_options
+    # assembly-time refusal fires; zero trials journaled (all-or-nothing).
+    journal = trials_journal(tmp_path / "journal")
+    uspec = _write_deep_universe(tmp_path)
+    with pytest.raises(SweepError, match="requires options"):
+        run_sweep({uspec.name: uspec}, journal, make_factors(), ts="t1",
+                  signals=_subset("mom21", "hedge"), window=WINDOW)
+    assert list(journal.events()) == []
+
+
+def test_deep_universe_refuses_fundamentals_signals_end_to_end(tmp_path):
+    # fundamentals_dir=None -> panel.fundamentals == {} -> existing refusal.
+    journal = trials_journal(tmp_path / "journal")
+    uspec = _write_deep_universe(tmp_path)
+    with pytest.raises(SweepError, match="requires fundamentals"):
+        run_sweep({uspec.name: uspec}, journal, make_factors(), ts="t1",
+                  signals=_subset("earnings_yield"), window=WINDOW)
+    assert list(journal.events()) == []
+
+
+def test_empty_symbols_tuple_refused_at_assembly_no_trials(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    uspec = UniverseSpec("largecap:empty", cache, None, None, symbols=())
+    with pytest.raises(PanelError, match="empty"):
+        run_sweep({uspec.name: uspec}, journal, make_factors(), ts="t1",
+                  signals=_subset("mom21"), window=WINDOW)
+    assert list(journal.events()) == []
+
+
+def test_universespec_symbols_defaults_none_for_piece1_call_sites():
+    got = default_universes(Path("."))
+    assert got["largecap"].symbols is None
+    assert got["midcap"].symbols is None
