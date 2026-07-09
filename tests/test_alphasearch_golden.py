@@ -49,7 +49,12 @@ def _write_universe(tmp_path) -> UniverseSpec:
     store = FundamentalsStore(tmp_path / "fundamentals")
     for sym in panel.symbols:
         store.append(sym, panel.fundamentals[sym])
-    return UniverseSpec("largecap", cache, samples, tmp_path / "fundamentals")
+    insider_dir = tmp_path / "insider"
+    insider_dir.mkdir()
+    for sym in panel.symbols:
+        panel.insider[sym].to_parquet(insider_dir / f"{sym}.parquet")
+    return UniverseSpec("largecap", cache, samples, tmp_path / "fundamentals",
+                        insider_dir=insider_dir)
 
 
 def test_golden_sweep_end_to_end(tmp_path):
@@ -59,7 +64,7 @@ def test_golden_sweep_end_to_end(tmp_path):
                                ts="t1", window=WINDOW)
 
     # Every registered signal became exactly one journaled trial.
-    assert n_trials == len(SIGNALS) == 37
+    assert n_trials == len(SIGNALS) == 40
     assert {(r.signal, r.universe) for r in rows} == {
         (s, "largecap") for s in SIGNALS
     }
@@ -69,6 +74,15 @@ def test_golden_sweep_end_to_end(tmp_path):
     assert {"mom126", "mom252"} <= errored
     # Error trials carry p=NaN -> 1.0: they must never clear the BH gate.
     assert not any(r.bh_pass for r in rows if r.signal in {"mom126", "mom252"})
+    # The narrow golden bar cache has no close_raw -> officer_buy_90 is an
+    # honest all-NaN error trial (like div_yield); the other two insider
+    # signals run end-to-end on the real-files store.
+    assert "officer_buy_90" in errored
+    for name in ("npr_90", "cluster_buys_90"):
+        row = next(r for r in rows if r.signal == name)
+        assert row.error is None
+        assert row.alpha_t is not None
+        assert row.n_names_median == 16.0
     # The engineered momentum spread is a standout survivor with full stats.
     mom = next(r for r in rows if r.signal == "mom21")
     assert mom.bh_pass
@@ -89,5 +103,5 @@ def test_golden_sweep_end_to_end(tmp_path):
     assert [(r.signal, r.alpha_t, r.p) for r in rows2] == [
         (r.signal, r.alpha_t, r.p) for r in rows
     ]
-    assert len(list(journal.events())) == 74
-    assert len(discovery_trials(journal)) == 37
+    assert len(list(journal.events())) == 80
+    assert len(discovery_trials(journal)) == 40

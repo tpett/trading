@@ -50,11 +50,24 @@ def _perturb_after(panel: PanelData, cutoff: pd.Timestamp) -> PanelData:
         late = f.index > cutoff
         f.loc[late] = f.loc[late] * 5.0 + 1.0
         fundamentals[sym] = f
+    insider: dict[str, pd.DataFrame] = {}
+    for sym, frame in panel.insider.items():
+        f = frame.copy()
+        late = f.index > cutoff
+        # Mixed dtypes (code/owner_cik/is_officer/trans_date) rule out the
+        # bars-style blanket `* k + c`; corrupt the specific fields the three
+        # insider signals read so a leak of ANY of them would show up: value
+        # (npr_90/officer_buy_90), code (both P/S filters), owner_cik
+        # (cluster_buys_90's distinct-owner count).
+        f.loc[late, "value"] = f.loc[late, "value"] * 5.0 + 1.0
+        f.loc[late, "owner_cik"] = -1
+        f.loc[late, "code"] = f.loc[late, "code"].map({"P": "S", "S": "P"})
+        insider[sym] = f
     factors = panel.factors.copy()
     late = factors.index > cutoff
     factors.loc[late] = factors.loc[late] * 3.0 + 0.001
     return assemble_panel(
-        bars, options, fundamentals, factors,
+        bars, options, fundamentals, factors, insider=insider,
         has_option_volume=panel.has_option_volume, sectors=panel.sectors,
     )
 
@@ -65,6 +78,7 @@ def test_fixture_actually_has_data_after_the_cutoff():
     assert any((f.index > CUTOFF).any() for f in panel.bars.values())
     assert any((f.index > CUTOFF).any() for f in panel.options.values())
     assert any((f.index > CUTOFF).any() for f in panel.fundamentals.values())
+    assert any((f.index > CUTOFF).any() for f in panel.insider.values())
     assert (panel.factors.index > CUTOFF).any()
 
 

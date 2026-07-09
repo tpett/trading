@@ -928,12 +928,14 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
                     for name, s in SIGNALS.items()
                     if not s.requires_options
                     and not s.requires_fundamentals
+                    and not s.requires_insider
                     and name != "ind_mom"
                 )
                 print(
                     "hint: deep-pool segments carry no options data (and "
-                    "fundamentals only once data/fundamentals/equities is "
-                    f"synced) — pair --segments with --signals {segment_safe_signals} "
+                    "fundamentals/insider only once data/fundamentals/equities "
+                    "and data/insider/equities are synced) — pair --segments "
+                    f"with --signals {segment_safe_signals} "
                     "(segment-safe signals), or target options segments individually "
                     "via --universe opt-largecap:<segment>",
                     file=sys.stderr,
