@@ -174,7 +174,7 @@ def test_fundamentals_family_values_and_neutrality():
 
 
 def test_registry_is_complete_with_correct_requirements():
-    assert len(SIGNALS) == 16
+    assert len(SIGNALS) == 25  # 16 seeds + 9 Tier-1 price/volume
     options_family = {"vrp", "hedge", "excite", "atm_iv", "smile", "atm_spread"}
     fundamentals_family = {"gross_profitability", "earnings_yield", "book_to_market"}
     for name, spec in SIGNALS.items():

@@ -24,6 +24,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from trading.alphasearch.panel import PanelView
@@ -108,6 +109,125 @@ _register("rvol21", _price_signal(lambda c: -_rvol(c)))
 # Proximity to the 52-week high is momentum-like; disthigh is <= 0 with 0 at
 # the high, so raw sign already puts near-high names on top.
 _register("disthigh", _price_signal(_disthigh))
+
+
+# --------------------------------------------------------------------------- #
+# Tier-1 price/volume family (spec 2026-07-09 section 2). Bar metrics receive
+# the PIT-truncated BAR_COLUMNS frame; the last row IS the as_of bar (the
+# _trail convention). Windows/floors/signs are frozen pre-registration.
+# --------------------------------------------------------------------------- #
+_PARKINSON_DENOM = 4.0 * math.log(2.0)
+
+
+def _bar_signal(metric: Callable[[pd.DataFrame], float]) -> SignalFn:
+    def fn(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+        scores = {symbol: metric(view.bars(symbol)) for symbol in view.symbols}
+        return pd.Series(scores, dtype="float64")
+
+    return fn
+
+
+def _feature_signal(column: str, sign: float) -> SignalFn:
+    """Score = sign * the precomputed rolling feature gathered as-of."""
+
+    def fn(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+        scores = {s: sign * view.feature(s, column) for s in view.symbols}
+        return pd.Series(scores, dtype="float64")
+
+    return fn
+
+
+def _mom_12_2(closes: pd.Series) -> float:
+    """Total return t-252 -> t-21 (skip the most recent month)."""
+    p = len(closes) - 1
+    if p - 252 < 0:
+        return math.nan
+    return float(closes.iloc[p - 21] / closes.iloc[p - 252] - 1)
+
+
+def _overnight(bars: pd.DataFrame) -> float:
+    """Sum of the last 63 overnight log-returns ln(open_t / close_{t-1})."""
+    if len(bars) < 64:
+        return math.nan
+    opens = bars["open"].to_numpy()[-63:]
+    prev_close = bars["close"].to_numpy()[-64:-1]
+    return float(np.sum(np.log(opens / prev_close)))
+
+
+def _park_vol(bars: pd.DataFrame) -> float:
+    """Parkinson range vol over 21 bars: sqrt(mean(ln(H/L)^2/(4 ln 2))) * sqrt(252)."""
+    if len(bars) < 21:
+        return math.nan
+    high = bars["high"].to_numpy()[-21:]
+    low = bars["low"].to_numpy()[-21:]
+    terms = np.log(high / low) ** 2 / _PARKINSON_DENOM
+    return float(math.sqrt(terms.mean()) * math.sqrt(252))
+
+
+def _max5(closes: pd.Series) -> float:
+    """Mean of the 5 largest daily returns among the last 21."""
+    if len(closes) < 22:
+        return math.nan
+    rets = closes.iloc[-22:].pct_change().dropna().to_numpy()
+    return float(np.sort(rets)[-5:].mean())
+
+
+def _amihud(bars: pd.DataFrame) -> float:
+    """Mean |ret| / dollar volume over the last 252 bars; min 126 valid terms
+    (non-positive dollar volume or NaN return terms are skipped, never 0)."""
+    window = bars.iloc[-252:]
+    rets = window["close"].pct_change().to_numpy()
+    dollar = (window["close"] * window["volume"]).to_numpy()
+    valid = ~np.isnan(rets) & ~np.isnan(dollar) & (dollar > 0)
+    if valid.sum() < 126:
+        return math.nan
+    return float(np.mean(np.abs(rets[valid]) / dollar[valid]))
+
+
+def _vol_trend(bars: pd.DataFrame) -> float:
+    """Mean dollar volume over 21 bars / mean over 252 bars (strict window)."""
+    if len(bars) < 252:
+        return math.nan
+    dollar = (bars["close"] * bars["volume"]).to_numpy()[-252:]
+    base = dollar.mean()
+    if not base > 0:  # NaN or zero baseline both land here
+        return math.nan
+    return float(dollar[-21:].mean() / base)
+
+
+def _div_yield(bars: pd.DataFrame) -> float:
+    """Trailing 252-bar cash dividends / last close. min_count=1 keeps an
+    all-NaN div_cash column (legacy narrow cache) NaN instead of sum()'s
+    skipna zero -- a cache without dividend data must not claim 'no
+    dividends' (that would fabricate a 0-yield cross-section)."""
+    if len(bars) < 252:
+        return math.nan
+    paid = bars["div_cash"].iloc[-252:].sum(min_count=1)
+    close = float(bars["close"].iloc[-1])
+    if pd.isna(paid) or not close > 0:
+        return math.nan
+    return float(paid / close)
+
+
+# Classic UMD with the skip-month that avoids short-term reversal
+# contamination (Jegadeesh-Titman).
+_register("mom_12_2", _price_signal(_mom_12_2))
+# The overnight component of returns persists (Lou-Polk-Skouras).
+_register("overnight", _bar_signal(_overnight))
+# Low-vol anomaly on the Parkinson range estimator -> negate.
+_register("park_vol", _bar_signal(lambda b: -_park_vol(b)))
+# Idiosyncratic-vol puzzle (Ang-Hodrick-Xing-Zhang) -> negate.
+_register("ivol", _feature_signal("ivol", -1.0))
+# Lottery demand: extreme-day chasers overpay (Bali-Cakici-Whitelaw) -> negate.
+_register("max5", _price_signal(lambda c: -_max5(c)))
+# Betting-against-beta (Frazzini-Pedersen) -> negate.
+_register("beta", _feature_signal("beta", -1.0))
+# Illiquidity premium (Amihud): harder-to-trade names pay more.
+_register("amihud", _bar_signal(_amihud))
+# High-volume return premium (Gervais-Kaniel-Mingelgrin).
+_register("vol_trend", _bar_signal(_vol_trend))
+# Income/value tilt: cash actually paid out over the trailing year.
+_register("div_yield", _bar_signal(_div_yield))
 
 
 # --------------------------------------------------------------------------- #
