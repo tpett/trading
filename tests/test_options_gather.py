@@ -17,18 +17,26 @@ import pandas as pd
 import pytest
 
 from trading.research.options_gather import (
+    FAR_MAX_DTE,
+    FAR_MIN_DTE,
+    OI_PATH,
     ThetaClient,
+    backup_v1,
     build_cell,
     build_universe,
     build_work_items,
     dedup_bars_by_trade_date,
+    extract_open_interest,
     gather_cell,
     is_standard_monthly,
     load_existing_keys,
     rank_strikes_by_distance,
+    row_trade_date,
     run_gather,
     select_bar_for_decision,
     select_expiration,
+    select_far_expiration,
+    select_row_for_date,
     snap_strikes,
 )
 from trading.research.options_iv import DIV_YIELD, RATE, bs_price
@@ -39,26 +47,44 @@ from trading.research.options_iv import DIV_YIELD, RATE, bs_price
 class FakeClient:
     """Serves canned expirations / strikes / history from in-memory dicts.
 
-    ``history`` is keyed by (strike, right) -> list-of-bars; unknown legs return
-    an empty tape (no prints in window). Records every history call so tests can
-    assert de-duplication of collapsed strikes.
+    ``history`` (and ``open_interest``) are keyed by (strike, right) ->
+    list-of-rows, or by (expiration, strike, right) when a test needs
+    per-expiration data (the 3-tuple wins). ``strikes`` is a flat list served
+    for every expiration, or a {expiration: [strikes]} dict. Unknown legs
+    return an empty tape. Records every call so tests can assert request
+    de-duplication.
     """
 
-    def __init__(self, expirations=None, strikes=None, history=None):
+    def __init__(self, expirations=None, strikes=None, history=None, open_interest=None):
         self._expirations = expirations or []
         self._strikes = strikes or []
         self._history = history or {}
+        self._open_interest = open_interest or {}
         self.history_calls: list[tuple] = []
+        self.oi_calls: list[tuple] = []
 
     def list_expirations(self, symbol):
         return list(self._expirations)
 
     def list_strikes(self, symbol, expiration):
+        if isinstance(self._strikes, dict):
+            return list(self._strikes.get(expiration, []))
         return list(self._strikes)
 
+    @staticmethod
+    def _lookup(table, expiration, strike, right):
+        key3 = (expiration, float(strike), right)
+        if key3 in table:
+            return list(table[key3])
+        return list(table.get((float(strike), right), []))
+
     def history_eod(self, symbol, expiration, strike, right, start_date, end_date):
-        self.history_calls.append((strike, right, start_date, end_date))
-        return list(self._history.get((float(strike), right), []))
+        self.history_calls.append((float(strike), right, start_date, end_date))
+        return self._lookup(self._history, expiration, strike, right)
+
+    def history_open_interest(self, symbol, expiration, strike, right, start_date, end_date):
+        self.oi_calls.append((expiration, float(strike), right))
+        return self._lookup(self._open_interest, expiration, strike, right)
 
 
 def _bar(trade_date: str, bid: float, ask: float, close: float, created: str) -> dict:
@@ -725,3 +751,466 @@ def test_theta_client_treats_472_as_empty_not_error(monkeypatch):
     assert bars == []  # empty, not an exception
     assert calls["n"] == 1  # 472 is NOT retried
     assert sleeps == []  # no backoff spent on a no-data response
+
+
+# --- OI endpoint & extraction (v2) ------------------------------------------
+#
+# Discovery verdict (2026-07, live Standard-tier terminal): the EOD tape carries
+# NO inline open_interest field, but `/v3/option/history/open_interest` (OI_PATH)
+# serves it -- HTTP 200, one row/day, columns
+# symbol,expiration,strike,right,timestamp,open_interest. Greeks endpoints
+# (`/v3/option/history/greeks`, `/v3/option/history/implied_volatility`) both
+# 404 on this tier, so the greeks capture path is omitted entirely (YAGNI --
+# nothing in this module references greeks).
+
+
+class _FakeResp:
+    """Minimal urlopen context-manager double serving one canned JSON body."""
+
+    status = 200
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode()
+
+
+# One OI row exactly as the live tape serves it: the response header
+# (symbol,expiration,strike,right,timestamp,open_interest) becomes the row keys
+# verbatim, so the date-bearing key is `timestamp` -- NOT `date` -- and it
+# carries a time component. Fixtures below MUST use this shape or they test an
+# assumed schema instead of the discovered one.
+def _live_oi_row(timestamp: str, open_interest: int) -> dict:
+    return {
+        "symbol": "AAPL",
+        "expiration": "2023-06-16",
+        "strike": 180,
+        "right": "C",
+        "timestamp": timestamp,
+        "open_interest": open_interest,
+    }
+
+
+def test_theta_client_history_open_interest_endpoint_and_parse(monkeypatch):
+    """history_open_interest hits the verified v3 OI route with the canonical
+    contract params and flattens the response envelope to rows whose keys are
+    the live header verbatim (`timestamp`, not `date`)."""
+    captured = {}
+    live_row = _live_oi_row("2023-05-15T06:30:10.000", 54141)
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        return _FakeResp({"response": [{"data": [dict(live_row)]}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = ThetaClient("http://x")
+    rows = client.history_open_interest(
+        "AAPL", "2023-06-16", 180.0, "C", "2023-05-15", "2023-05-19"
+    )
+    assert rows == [live_row]
+    # The parse preserves the live header keys: rows DO carry `timestamp`.
+    assert set(rows[0]) == {
+        "symbol",
+        "expiration",
+        "strike",
+        "right",
+        "timestamp",
+        "open_interest",
+    }
+    assert f"{OI_PATH}?" in captured["url"]  # tracks the discovery-verified route
+    assert "symbol=AAPL" in captured["url"]
+    assert "strike=180" in captured["url"]  # whole-dollar strike, canonical bare-int form
+    assert "right=C" in captured["url"]
+    assert "start_date=2023-05-15" in captured["url"]  # dashed dates
+
+
+def test_theta_client_history_open_interest_472_is_empty_not_error(monkeypatch):
+    """A 472 on the OI route is a normal empty (same semantics as history_eod):
+    one call, no retry, no exception -- a missing OI leg is simply absent."""
+    calls = {"n": 0}
+
+    def always_472(req, timeout):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 472, "No data", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", always_472)
+    client = ThetaClient("http://x", sleep=lambda _s: None)
+    rows = client.history_open_interest(
+        "AAPL", "2019-04-18", 185.0, "C", "2019-02-25", "2019-03-05"
+    )
+    assert rows == []
+    assert calls["n"] == 1  # the 472 was NOT retried
+
+
+def test_row_trade_date_reads_timestamp_then_date_then_last_trade():
+    # The live OI tape: `timestamp` with a time component -> date part only.
+    assert row_trade_date(_live_oi_row("2023-05-15T06:30:10.000", 54141)) == date(2023, 5, 15)
+    # The EOD tape keys `last_trade`; `date` is a defensive alias.
+    assert row_trade_date({"last_trade": "2019-03-01T15:59:56.204"}) == date(2019, 3, 1)
+    assert row_trade_date({"date": "2019-03-01"}) == date(2019, 3, 1)
+    assert row_trade_date({"timestamp": "garbage"}) is None
+    assert row_trade_date({}) is None
+
+
+def test_select_row_for_date_matches_live_oi_rows_by_date_part():
+    """Matching is by CALENDAR DATE, never exact-timestamp equality -- the live
+    OI stamps carry 06:30-style times. Exact match only, last row wins on a
+    tape double-print, and NO nearest-neighbor fallback when the date is absent."""
+    rows = [
+        _live_oi_row("2023-05-15T06:30:10.000", 54141),
+        _live_oi_row("2023-05-15T06:30:11.000", 54142),  # double-print: last wins
+        _live_oi_row("2023-05-12T06:30:09.000", 53990),
+    ]
+    assert select_row_for_date(rows, date(2023, 5, 15))["open_interest"] == 54142
+    # NO nearest-prior fallback: enrichment must ride the SAME date as the bar.
+    assert select_row_for_date(rows, date(2023, 5, 16)) is None
+
+
+def test_extract_open_interest_absent_or_junk_yields_no_key():
+    assert extract_open_interest(None) == {}
+    assert extract_open_interest({"date": "2019-03-01"}) == {}  # field absent -> no key
+    assert extract_open_interest({"open_interest": None}) == {}
+    assert extract_open_interest({"open_interest": "junk"}) == {}
+    assert extract_open_interest({"open_interest": float("nan")}) == {}
+    # A vendor-SERVED zero is a real observation, kept (never fabricated, never dropped).
+    assert extract_open_interest({"open_interest": 0}) == {"open_interest": 0}
+    assert extract_open_interest({"open_interest": 1523.0}) == {"open_interest": 1523}
+
+
+# --- Per-leg OI enrichment (v2) ----------------------------------------------
+
+
+def _enrichment_client() -> FakeClient:
+    """The 90/100/110 cell with OI for two of the three resolved legs."""
+    dte = (date(2019, 4, 18) - date(2019, 3, 1)).days
+    t = dte / 365
+    price_c = bs_price(100.0, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    price_p = bs_price(100.0, 90.0, t, RATE, DIV_YIELD, 0.35, False)
+    price_oc = bs_price(100.0, 110.0, t, RATE, DIV_YIELD, 0.25, True)
+    history = {
+        (100.0, "C"): [_bar("2019-03-01", price_c - 0.05, price_c + 0.05, price_c, "c")],
+        (90.0, "P"): [_bar("2019-03-01", price_p - 0.02, price_p + 0.02, price_p, "c")],
+        (110.0, "C"): [_bar("2019-03-01", price_oc - 0.02, price_oc + 0.02, price_oc, "c")],
+    }
+    open_interest = {
+        (100.0, "C"): [{"date": "2019-03-01", "open_interest": 1500}],
+        (90.0, "P"): [{"date": "2019-03-01", "open_interest": 2200}],
+        # (110.0, "C") has NO OI row -> key absent on that leg.
+    }
+    return FakeClient(
+        expirations=["2019-04-18"], strikes=[90.0, 100.0, 110.0],
+        history=history, open_interest=open_interest,
+    )
+
+
+def test_gather_cell_attaches_oi_additively():
+    cell = gather_cell(_enrichment_client(), "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    assert cell is not None
+    by_role = {c["role"]: c for c in cell["contracts"]}
+    assert by_role["atm"]["open_interest"] == 1500
+    assert by_role["otm_put"]["open_interest"] == 2200
+    assert "open_interest" not in by_role["otm_call"]  # no OI row -> key ABSENT, never 0
+    # v1 fields intact on an enriched leg.
+    assert by_role["atm"]["iv"] == pytest.approx(0.30, abs=2e-3)
+    assert by_role["atm"]["volume"] is None  # _bar carries no volume; unchanged semantics
+
+
+def test_gather_cell_oi_row_on_wrong_date_yields_no_key():
+    client = _enrichment_client()
+    client._open_interest = {
+        (100.0, "C"): [{"date": "2019-02-25", "open_interest": 999}],  # not the bar's date
+    }
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    by_role = {c["role"]: c for c in cell["contracts"]}
+    assert "open_interest" not in by_role["atm"]
+
+
+def test_gather_cell_enrichment_failure_degrades_to_absent_keys():
+    class ExplodingEnrichment(FakeClient):
+        def history_open_interest(self, *args, **kwargs):
+            raise OSError("boom")
+
+    base = _enrichment_client()
+    client = ExplodingEnrichment(
+        expirations=["2019-04-18"], strikes=[90.0, 100.0, 110.0], history=base._history
+    )
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    assert cell is not None  # enrichment failure must never sink a good cell
+    for contract in cell["contracts"]:
+        assert "open_interest" not in contract
+        assert contract["iv"] is not None  # the quote side of the leg is untouched
+
+
+def test_gather_cell_no_oi_no_far_serializes_bit_identical_to_v1():
+    """The frozen v2 constraint, pinned at the SERIALIZATION level: with no OI
+    served and no far monthly listed, json.dumps(cell) is byte-identical to the
+    pre-v2 gather's output -- same keys, same ORDER, same values. The expected
+    string was generated by running this exact fixture through the v1 module
+    (`git show 2ce9e9b:src/trading/research/options_gather.py`); do NOT
+    regenerate it from current code, or the pin stops pinning anything."""
+    client = _enrichment_client()
+    client._open_interest = {}  # OI endpoint serves nothing -> no enrichment keys
+    # _enrichment_client lists only 2019-04-18 -> no far monthly in band.
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    expected = (
+        '{"symbol": "AAA", "decision_date": "2019-03-01", "spot_at_decision": 100.0,'
+        ' "target_expiration": "2019-04-18", "days_to_expiry": 48, "contracts":'
+        ' [{"role": "atm", "type": "call", "strike": 100.0, "bid": 4.576628065973783,'
+        ' "ask": 4.676628065973783, "close": 4.626628065973783, "mid": 4.626628065973783,'
+        ' "iv": 0.30000000996421705, "volume": null, "count": null},'
+        ' {"role": "otm_put", "type": "put", "strike": 90.0, "bid": 1.2364619410631188,'
+        ' "ask": 1.2764619410631188, "close": 1.2564619410631188, "mid": 1.2564619410631188,'
+        ' "iv": 0.3499999999999991, "volume": null, "count": null},'
+        ' {"role": "otm_call", "type": "call", "strike": 110.0, "bid": 0.7905863529137771,'
+        ' "ask": 0.8305863529137771, "close": 0.8105863529137771, "mid": 0.8105863529137771,'
+        ' "iv": 0.2499999999999992, "volume": null, "count": null}],'
+        ' "skew_put_atm": 0.04999999003578204, "skew_put_call": 0.0999999999999999}'
+    )
+    assert json.dumps(cell) == expected
+
+
+def test_gather_cell_enriches_collapsed_roles_once():
+    """otm_call collapsed onto the ATM strike: one contract, one OI request."""
+    dte = (date(2019, 4, 18) - date(2019, 3, 1)).days
+    t = dte / 365
+    price_c = bs_price(100.0, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    price_p = bs_price(100.0, 90.0, t, RATE, DIV_YIELD, 0.35, False)
+    client = FakeClient(
+        expirations=["2019-04-18"],
+        strikes=[90.0, 100.0],
+        history={
+            (100.0, "C"): [_bar("2019-03-01", price_c - 0.05, price_c + 0.05, price_c, "c")],
+            (90.0, "P"): [_bar("2019-03-01", price_p - 0.02, price_p + 0.02, price_p, "c")],
+        },
+        open_interest={(100.0, "C"): [{"date": "2019-03-01", "open_interest": 7}]},
+    )
+    gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    oi_for_atm = [c for c in client.oi_calls if c[1] == 100.0 and c[2] == "C"]
+    assert len(oi_for_atm) == 1
+
+
+# --- Far (second expiration) block (v2) --------------------------------------
+
+V1_CELL_KEYS = {
+    "symbol", "decision_date", "spot_at_decision", "target_expiration",
+    "days_to_expiry", "contracts", "skew_put_atm", "skew_put_call",
+}
+
+
+def test_select_far_expiration_picks_next_monthly_in_band():
+    decision = date(2019, 3, 1)
+    near = date(2019, 4, 18)
+    expirations = [
+        "2019-04-18",  # the near itself -> excluded (not strictly after)
+        "2019-05-10",  # a weekly in-band -> ignored (not a standard monthly)
+        "2019-05-17",  # 77 DTE monthly -> pick (the NEXT monthly after near)
+        "2019-06-21",  # 112 DTE -> above the far band
+    ]
+    assert select_far_expiration(expirations, decision, near) == date(2019, 5, 17)
+
+
+def test_select_far_expiration_none_when_band_empty_or_only_near():
+    decision = date(2019, 3, 1)
+    near = date(2019, 4, 18)
+    assert select_far_expiration(["2019-04-18"], decision, near) is None
+    # A monthly in the DTE band that IS the near expiration must not be reused:
+    # decision 2019-03-20 -> 2019-05-17 = 58 DTE (in 55..90) but == near.
+    assert (
+        select_far_expiration(["2019-05-17", "2019-06-21"], date(2019, 3, 20), date(2019, 5, 17))
+        is None  # 2019-06-21 is 93 DTE, above the band
+    )
+
+
+def test_select_far_expiration_dte_band_edges_inclusive_neighbors_excluded():
+    """The far band [55, 90] is INCLUSIVE at both edges; 54 and 91 are out."""
+    exps = ["2019-05-17", "2019-06-21"]
+    near = date(2019, 5, 17)
+    far = date(2019, 6, 21)
+    assert select_far_expiration(exps, date(2019, 4, 27), near) == far  # 55 DTE, lower edge
+    assert select_far_expiration(exps, date(2019, 3, 23), near) == far  # 90 DTE, upper edge
+    assert select_far_expiration(exps, date(2019, 4, 28), near) is None  # 54 DTE, below band
+    assert select_far_expiration(exps, date(2019, 3, 22), near) is None  # 91 DTE, above band
+
+
+def _near_far_client() -> FakeClient:
+    """Near 2019-04-18 and far 2019-05-17 both with data, priced at their own
+    tenors so the far ATM IV (0.28) is distinguishable from the near (0.30)."""
+    decision = date(2019, 3, 1)
+    t_near = (date(2019, 4, 18) - decision).days / 365
+    t_far = (date(2019, 5, 17) - decision).days / 365
+    near_c = bs_price(100.0, 100.0, t_near, RATE, DIV_YIELD, 0.30, True)
+    near_p = bs_price(100.0, 90.0, t_near, RATE, DIV_YIELD, 0.35, False)
+    far_c = bs_price(100.0, 100.0, t_far, RATE, DIV_YIELD, 0.28, True)
+    far_p = bs_price(100.0, 90.0, t_far, RATE, DIV_YIELD, 0.33, False)
+    history = {
+        ("2019-04-18", 100.0, "C"): [_bar("2019-03-01", near_c - 0.05, near_c + 0.05, near_c, "c")],
+        ("2019-04-18", 90.0, "P"): [_bar("2019-03-01", near_p - 0.02, near_p + 0.02, near_p, "c")],
+        ("2019-05-17", 100.0, "C"): [_bar("2019-03-01", far_c - 0.05, far_c + 0.05, far_c, "c")],
+        ("2019-05-17", 90.0, "P"): [_bar("2019-03-01", far_p - 0.02, far_p + 0.02, far_p, "c")],
+    }
+    open_interest = {
+        ("2019-05-17", 100.0, "C"): [{"date": "2019-03-01", "open_interest": 640}],
+    }
+    return FakeClient(
+        expirations=["2019-04-18", "2019-05-17"],
+        strikes=[90.0, 100.0],
+        history=history,
+        open_interest=open_interest,
+    )
+
+
+def test_gather_cell_composes_near_plus_far_blocks():
+    cell = gather_cell(_near_far_client(), "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None
+    assert set(cell) == V1_CELL_KEYS | {"far"}  # far is the ONLY new top-level key
+    far = cell["far"]
+    assert far["target_expiration"] == "2019-05-17"
+    assert far["days_to_expiry"] == (date(2019, 5, 17) - date(2019, 3, 1)).days
+    assert FAR_MIN_DTE <= far["days_to_expiry"] <= FAR_MAX_DTE
+    far_by_role = {c["role"]: c for c in far["contracts"]}
+    assert far_by_role["atm"]["iv"] == pytest.approx(0.28, abs=3e-3)  # far tenor, own IV
+    assert far_by_role["atm"]["open_interest"] == 640  # far legs are enriched too
+    # Near block untouched by the far gather.
+    near_by_role = {c["role"]: c for c in cell["contracts"]}
+    assert near_by_role["atm"]["iv"] == pytest.approx(0.30, abs=3e-3)
+    assert cell["target_expiration"] == "2019-04-18"
+
+
+def test_gather_cell_far_absent_when_no_far_monthly():
+    client = _near_far_client()
+    client._expirations = ["2019-04-18"]  # nothing after the near monthly
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None
+    assert "far" not in cell  # absent, not null/empty
+    assert set(cell) == V1_CELL_KEYS  # bit-for-bit v1 shape
+
+
+def test_gather_cell_far_legs_dataless_drops_far_only():
+    client = _near_far_client()
+    client._history = {
+        k: v for k, v in client._history.items() if k[0] == "2019-04-18"
+    }  # far expiration listed but its whole tape is empty
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None
+    assert "far" not in cell
+
+
+def test_gather_cell_far_atm_only_drops_far_block():
+    """A far expiration whose OTM-put leg is dataless fails the same
+    ATM+OTM-put validity rule as the near cell: the far block is dropped
+    (no ATM-only far block), while the near cell keeps both blocks' rule
+    honored and survives untouched."""
+    client = _near_far_client()
+    del client._history[("2019-05-17", 90.0, "P")]  # far put dataless; far ATM still fine
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None
+    assert "far" not in cell
+    assert set(cell) == V1_CELL_KEYS
+
+
+def test_gather_cell_far_exception_drops_block_only():
+    class FarExploding(FakeClient):
+        def list_strikes(self, symbol, expiration):
+            if expiration == "2019-05-17":
+                raise OSError("terminal hiccup on the far ladder")
+            return super().list_strikes(symbol, expiration)
+
+    base = _near_far_client()
+    client = FarExploding(
+        expirations=["2019-04-18", "2019-05-17"],
+        strikes=[90.0, 100.0],
+        history=base._history,
+    )
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None  # near cell survives
+    assert "far" not in cell
+
+
+def test_gather_cell_include_far_false_spends_no_far_requests():
+    client = _near_far_client()
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    assert "far" not in cell
+    # Only the near walk's probes happened: (100,C) + (90,P); the otm_call walk
+    # reuses the cached (100,C). Far would have added two more history calls.
+    assert len(client.history_calls) == 2
+
+
+def test_enriched_cell_json_round_trip_and_resume_key(tmp_path: Path):
+    """A gathered v2 cell survives JSON serialization exactly, and the resume
+    reader extracts the same (symbol, decision_date) key it always did."""
+    cell = gather_cell(_near_far_client(), "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None and "far" in cell
+    line = json.dumps(cell)
+    assert json.loads(line) == cell  # nothing in the cell is non-JSON-native
+    out = tmp_path / "samples.jsonl"
+    out.write_text(line + "\n")
+    assert load_existing_keys(out) == {("AAA", "2019-03-01")}
+
+
+# --- v2 fresh-gather backup + resume under the enriched schema ---------------
+
+
+def test_backup_v1_renames_once_and_refuses_clobber(tmp_path: Path):
+    out = tmp_path / "samples.jsonl"
+    out.write_text('{"symbol":"AAA","decision_date":"2019-01-01"}\n')
+    backup = backup_v1(out)
+    assert backup == tmp_path / "samples.v1.jsonl"
+    assert not out.exists() and backup.exists()
+    # A second fresh run must NEVER destroy the v1 baseline.
+    out.write_text("regathered\n")
+    with pytest.raises(FileExistsError):
+        backup_v1(out)
+    assert backup.read_text().startswith('{"symbol"')  # baseline untouched
+    # Nothing to back up -> None, no file created.
+    assert backup_v1(tmp_path / "absent.jsonl") is None
+    # The mid-cap file maps to its own backup name.
+    mid = tmp_path / "samples-midcap.jsonl"
+    mid.write_text("x\n")
+    assert backup_v1(mid) == tmp_path / "samples-midcap.v1.jsonl"
+
+
+def test_run_gather_resume_skips_enriched_cells(tmp_path: Path):
+    """The completed-cell skip must hold when the existing file contains
+    v2-enriched cells (OI/greeks/far): keys are (symbol, decision_date), and
+    a second run adds nothing."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    raw_dir = tmp_path / "raw"
+    _write_underlying(cache_dir, "AAA")
+    _write_raw(raw_dir, "AAA", 100.0)
+    out = tmp_path / "samples.jsonl"
+
+    hist = _full_history()
+    oi = {
+        (100.0, "C"): [], (90.0, "P"): [], (110.0, "C"): [],
+    }
+    for key, bars in hist.items():
+        oi[key] = [{"date": b["last_trade"][:10], "open_interest": 500} for b in bars]
+    client = FakeClient(
+        expirations=["2019-02-15", "2019-03-15", "2019-04-18"],
+        strikes=[90.0, 100.0, 110.0],
+        history=hist,
+        open_interest=oi,
+    )
+    kwargs = dict(
+        symbols=["AAA"], start_month="2019-01", end_month="2019-03",
+        cache_dir=cache_dir, raw_dir=raw_dir, membership_csv=tmp_path / "unused.csv",
+    )
+    summary1 = run_gather(client, out, **kwargs)
+    assert summary1["written"] > 0
+    first = out.read_text().splitlines()
+    cells = [json.loads(x) for x in first]
+    assert all(
+        any("open_interest" in c for c in cell["contracts"]) for cell in cells
+    )  # the file really is enriched
+    assert any("far" in c for c in cells)  # ...including at least one far block
+    summary2 = run_gather(client, out, **kwargs)
+    assert summary2["cells_attempted"] == 0
+    assert out.read_text().splitlines() == first

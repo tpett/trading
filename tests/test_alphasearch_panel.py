@@ -19,6 +19,7 @@ from trading.alphasearch.panel import (
     PanelError,
     build_panel,
     cell_metrics,
+    cells_have_volume,
     load_bars,
     load_closes,
     load_options,
@@ -526,3 +527,70 @@ def test_decision_dates_rejects_a_negative_offset():
     panel = PanelData(closes={"A": pd.Series([1.0], index=idx)}, symbols=("A",))
     with pytest.raises(ValueError, match="offset"):
         panel.decision_dates(idx[0], idx[0], offset=-1)
+
+
+# --------------------------------------------------------------------------- #
+# Options gather v2 tolerance: enriched cells must parse identically
+# --------------------------------------------------------------------------- #
+
+
+def _enriched_cell(symbol: str, date: str) -> dict:
+    """A v2 cell: the v1 `_cell` plus per-leg OI/greeks and a far block."""
+    cell = _cell(symbol, date)
+    for contract in cell["contracts"]:
+        contract["open_interest"] = 1500
+        contract["delta"] = 0.5
+        contract["gamma"] = 0.01
+        contract["theta"] = -0.03
+        contract["vega"] = 0.12
+    cell["far"] = {
+        "target_expiration": "2020-03-20",
+        "days_to_expiry": 78,
+        "contracts": [
+            {"role": "atm", "iv": 0.31, "volume": 10, "open_interest": 5},
+            {"role": "otm_put", "iv": 0.35, "volume": 4},
+        ],
+        "skew_put_atm": 0.04,
+        "skew_put_call": None,
+    }
+    return cell
+
+
+def test_cell_metrics_identical_on_v2_enriched_cell():
+    """Enrichment keys and the far block are INVISIBLE to cell_metrics: every
+    OPTION_COLUMNS value matches the un-enriched v1 cell exactly."""
+    v1 = cell_metrics(_cell("AAA", "2020-01-02"))
+    v2 = cell_metrics(_enriched_cell("AAA", "2020-01-02"))
+    assert set(v2) == set(OPTION_COLUMNS)
+    for key in OPTION_COLUMNS:
+        if isinstance(v1[key], float) and math.isnan(v1[key]):
+            assert math.isnan(v2[key])
+        else:
+            assert v2[key] == v1[key], key
+
+
+def test_load_options_parses_mixed_v1_and_v2_lines(tmp_path):
+    path = tmp_path / "samples.jsonl"
+    lines = [
+        json.dumps(_cell("AAA", "2020-01-02")),          # v1 cell
+        json.dumps(_enriched_cell("AAA", "2020-02-03")),  # v2 cell, same symbol
+        json.dumps(_enriched_cell("BBB", "2020-01-02")),
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    frames, corrupt, has_volume = load_options(path)
+    assert corrupt == 0  # enrichment is NOT corruption
+    assert set(frames) == {"AAA", "BBB"}
+    assert len(frames["AAA"]) == 2  # both vintages land in one frame
+    assert list(frames["AAA"].columns) == OPTION_COLUMNS
+    assert frames["AAA"].dtypes.eq("float64").all()
+    assert has_volume  # _cell legs carry volume
+
+
+def test_cells_have_volume_reads_near_legs_only():
+    """Volume living ONLY in the far block must not unlock the option-volume
+    family: cp_vol/wing_vol/tot_vol are near-leg metrics, so the gate reads
+    cell["contracts"] and nothing else."""
+    cell = _enriched_cell("AAA", "2020-01-02")
+    for contract in cell["contracts"]:
+        del contract["volume"]  # near legs unmeasured; far still has volume
+    assert cells_have_volume([cell]) is False
