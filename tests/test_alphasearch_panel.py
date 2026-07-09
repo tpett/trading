@@ -504,3 +504,18 @@ def test_option_row_prior_none_without_an_older_cell_or_when_stale():
     assert fresh.view(at).option_row_prior("AAA") is not None
     stale = _prior_panel(["2020-01-16", "2020-03-02"])   # 46 days -> stale
     assert stale.view(at).option_row_prior("AAA") is None
+
+
+def test_decision_dates_offset_picks_the_nth_session_and_drops_short_months():
+    # Jan has 3 union sessions, Feb exactly 1: offset=1 (2nd session) keeps
+    # Jan's 2nd date and DROPS Feb (no 2nd session to rebalance on).
+    idx = pd.DatetimeIndex(
+        ["2020-01-06", "2020-01-07", "2020-01-08", "2020-02-03"], tz="UTC"
+    )
+    panel = PanelData(closes={"A": pd.Series([1.0, 2.0, 3.0, 4.0], index=idx)},
+                      symbols=("A",))
+    start, end = idx[0], idx[-1]
+    assert panel.decision_dates(start, end) == (idx[0], idx[3])          # unchanged
+    assert panel.decision_dates(start, end, offset=0) == (idx[0], idx[3])
+    assert panel.decision_dates(start, end, offset=1) == (idx[1],)
+    assert panel.decision_dates(start, end, offset=3) == ()

@@ -59,6 +59,24 @@ def test_sweep_journals_every_trial_and_ranks_by_abs_t(tmp_path):
     assert mom.turnover_monthly is not None
 
 
+def test_evaluate_trial_threads_subset_and_offset():
+    from trading.alphasearch.sweep import evaluate_trial
+
+    panel = make_panel()
+    factors = make_factors()
+    subset = tuple(panel.symbols[:8])
+    got = evaluate_trial(panel, SIGNALS["mom21"], WINDOW, factors,
+                         min_names=5, symbol_subset=subset)
+    assert got["n_names_median"] == 8.0        # subset reached the sort
+    offset = evaluate_trial(panel, SIGNALS["mom21"], WINDOW, factors,
+                            calendar_offset=1)
+    base = evaluate_trial(panel, SIGNALS["mom21"], WINDOW, factors)
+    # Same months, different sessions: the offset run rebalances on the 2nd
+    # session, so its decision-date count matches and its series differs.
+    assert offset["n_dates"] == base["n_dates"]
+    assert offset["ls"]["alpha_annual_pct"] != base["ls"]["alpha_annual_pct"]
+
+
 def test_sweep_rerun_is_idempotent_for_trial_count(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel()

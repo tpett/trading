@@ -487,22 +487,26 @@ class PanelData:
         return PanelView(self, as_of)
 
     def decision_dates(
-        self, start: pd.Timestamp, end: pd.Timestamp
+        self, start: pd.Timestamp, end: pd.Timestamp, offset: int = 0
     ) -> tuple[pd.Timestamp, ...]:
-        """First trading session of each month in [start, end].
+        """The (offset+1)-th trading session of each month in [start, end]
+        (offset=0, the default, is the first session -- Piece 1 behavior,
+        bit-identical). offset=1 is Piece 3's decision-date-offset battery
+        check. A month with too few in-window sessions is dropped, never
+        approximated with a different session.
 
         "Trading session" = any date on which at least one panel symbol has a
         bar (the union calendar), so one symbol's missing day never shifts the
         whole universe's rebalance date.
         """
         union = sorted({d for s in self.closes.values() for d in s.index})
-        in_window = [d for d in union if start <= d <= end]
-        if not in_window:
-            return ()
-        firsts: dict[str, pd.Timestamp] = {}
-        for date in in_window:  # ascending, so the first hit per month sticks
-            firsts.setdefault(date.strftime("%Y-%m"), date)
-        return tuple(firsts[m] for m in sorted(firsts))
+        by_month: dict[str, list[pd.Timestamp]] = {}
+        for date in union:
+            if start <= date <= end:
+                by_month.setdefault(date.strftime("%Y-%m"), []).append(date)
+        return tuple(
+            by_month[m][offset] for m in sorted(by_month) if len(by_month[m]) > offset
+        )
 
 
 def build_panel(

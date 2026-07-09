@@ -161,3 +161,42 @@ def test_holdout_and_discovery_never_collide_in_dedupe(tmp_path):
     log_trial(journal, kind="discovery", config=config, ts="t1", result=_result())
     log_trial(journal, kind="holdout", config=config, ts="t2", result=_result())
     assert len(load_trials(journal)) == 2  # same hash, different kind
+
+
+def test_default_config_hash_is_pinned_to_the_live_journal():
+    # journal/alphasearch-trials.jsonl carries 799 discovery trials hashed
+    # through this exact params dict. This is amihud:midcap's LIVE hash (the
+    # parked BH survivor, verified present in the committed journal). If
+    # _hashed_params ever emits a different default dict — e.g. a new key
+    # present at its default value — every existing trial silently orphans
+    # from its dedupe identity. Never "fix" this by re-pinning.
+    config = trial_config("amihud", "midcap", "2019-01-01..2023-12-31")
+    assert trial_config_hash(config) == "4f3d0819382a"
+    assert config["params"] == {
+        "quantiles": 5, "weighting": "equal", "cadence": "monthly",
+        "tercile_below": 50, "min_names": 15,
+    }
+
+
+def test_default_valued_perturbation_params_are_omitted_from_the_hash():
+    from trading.alphasearch.sweep import DEFAULT_PARAMS, _hashed_params
+
+    assert _hashed_params(5, 50, 15) == DEFAULT_PARAMS
+    assert _hashed_params(5, 50, 15, symbol_subset=None, calendar_offset=0) == DEFAULT_PARAMS
+    assert set(_hashed_params(5, 50, 15)) == {
+        "quantiles", "weighting", "cadence", "tercile_below", "min_names",
+    }
+
+
+def test_subset_and_offset_change_the_hash_when_set():
+    from trading.alphasearch.sweep import _hashed_params
+
+    window = "2020-01-01..2020-06-30"
+    base = trial_config_hash(trial_config("mom21", "largecap", window))
+    sub = _hashed_params(5, 50, 15, symbol_subset=("B", "A"))
+    assert sub["symbol_subset"] == ["A", "B"]        # sorted: draw-order-proof
+    sub_hash = trial_config_hash(trial_config("mom21", "largecap", window, params=sub))
+    off = _hashed_params(5, 50, 15, calendar_offset=1)
+    assert off["calendar_offset"] == 1
+    off_hash = trial_config_hash(trial_config("mom21", "largecap", window, params=off))
+    assert len({base, sub_hash, off_hash}) == 3      # three distinct trials

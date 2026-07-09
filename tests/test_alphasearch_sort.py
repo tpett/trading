@@ -281,3 +281,29 @@ def test_turnover_across_skip_uses_actual_rebalances_only():
     # tops: {S5,S6} (dates[0]) then {S4,S5} (dates[2]) -> one pair -> 0.5.
     assert result.turnover_monthly == 0.5
     assert result.n_names_median == 6.0
+
+
+def test_symbol_subset_restricts_the_cross_section():
+    panel = _panel(SIX)
+    dates = panel.decision_dates(panel.closes["S1"].index[0],
+                                 panel.closes["S1"].index[-1])
+    end = panel.closes["S1"].index[-1]
+    subset = ("S1", "S3", "S5")
+    got = portfolio_sort(panel, _mom21(), dates, end, min_names=3,
+                         symbol_subset=subset)
+    assert got.n_names_median == 3.0          # only subset members scored
+    full = portfolio_sort(panel, _mom21(), dates, end, min_names=3)
+    assert full.n_names_median == 6.0
+    # Terciles of {S1, S3, S5} by growth rate: top = S5, bottom = S1 -- the
+    # L/S daily return is exactly the rate spread on constant-growth closes.
+    assert math.isclose(got.ls.iloc[-1], 0.02 - (-0.02), rel_tol=1e-9)
+
+
+def test_symbol_subset_below_min_names_skips_like_a_thin_date():
+    panel = _panel(SIX)
+    dates = panel.decision_dates(panel.closes["S1"].index[0],
+                                 panel.closes["S1"].index[-1])
+    end = panel.closes["S1"].index[-1]
+    with pytest.raises(SortError):
+        portfolio_sort(panel, _mom21(), dates, end, min_names=3,
+                       symbol_subset=("S1", "S2"))

@@ -72,6 +72,7 @@ def portfolio_sort(
     quantiles: int = QUANTILES,
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
+    symbol_subset: tuple[str, ...] | None = None,
 ) -> SortResult:
     """Build the daily L/S and long-only series over [dates[0], end]."""
     if not dates:
@@ -95,6 +96,12 @@ def portfolio_sort(
 
     for i, date in enumerate(dates):
         scores = spec.fn(panel.view(date), date).dropna()
+        if symbol_subset is not None:
+            # Piece 3 subset check: the scored cross-section is restricted to
+            # the draw; every downstream rule (min_names skip, tercile fall-
+            # back, distinct-score guard) then applies to the SUBSET, exactly
+            # as if the universe had been this half all along.
+            scores = scores[scores.index.isin(symbol_subset)]
         if len(scores) < min_names:
             skipped.append(date.date().isoformat())
         else:

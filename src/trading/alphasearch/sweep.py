@@ -49,14 +49,32 @@ HOLDOUT_PASS_RATIO = 0.5                      # pre-registered (spec 3.6)
 # the "any changed parameter is a NEW trial" rule. run_sweep AND run_holdout
 # both build their hashed params through this one constructor so the journaled
 # config always records what evaluate_trial truly ran.
-def _hashed_params(quantiles: int, tercile_below: int, min_names: int) -> dict:
-    return {
+#
+# The Piece 3 perturbation params (symbol_subset, calendar_offset) are
+# OMITTED when default-valued: an always-present new key would change the
+# hash of every one of the journal's existing trials (799 at Piece 3 time),
+# severing them from their dedupe identities. A default-valued perturbation
+# IS the plain trial, so omission is also semantically exact. Pinned by
+# test_default_config_hash_is_pinned_to_the_live_journal.
+def _hashed_params(
+    quantiles: int,
+    tercile_below: int,
+    min_names: int,
+    symbol_subset: tuple[str, ...] | None = None,
+    calendar_offset: int = 0,
+) -> dict:
+    params = {
         "quantiles": quantiles,
         "weighting": "equal",
         "cadence": "monthly",
         "tercile_below": tercile_below,
         "min_names": min_names,
     }
+    if symbol_subset is not None:
+        params["symbol_subset"] = sorted(symbol_subset)
+    if calendar_offset != 0:
+        params["calendar_offset"] = calendar_offset
+    return params
 
 
 DEFAULT_PARAMS = _hashed_params(QUANTILES, TERCILE_BELOW, MIN_NAMES)
@@ -382,15 +400,21 @@ def evaluate_trial(
     quantiles: int = QUANTILES,
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
+    symbol_subset: tuple[str, ...] | None = None,
+    calendar_offset: int = 0,
 ) -> dict:
     """Score -> sort -> regress. Raises SortError/ValueError/LinAlgError on
-    failure; the caller journals that as an error trial."""
+    failure; the caller journals that as an error trial. symbol_subset and
+    calendar_offset are Piece 3 battery perturbations: callers that set them
+    MUST hash them into the trial config via _hashed_params (they change the
+    outcome)."""
     start, end = _window_bounds(window)
     _check_factor_coverage(factors, end)
-    dates = panel.decision_dates(start, end)
+    dates = panel.decision_dates(start, end, offset=calendar_offset)
     sort = portfolio_sort(
         panel, spec, dates, end,
         quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+        symbol_subset=symbol_subset,
     )
     ls_alpha = evaluate_alpha(sort.ls, factors, self_financing=True)
     lo_alpha = evaluate_alpha(sort.lo, factors, self_financing=False)
