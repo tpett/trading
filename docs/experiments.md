@@ -520,7 +520,22 @@ as BH passes (near-duplicates of the same effect, expected); any UNRELATED
 new PASS rows are artifacts of the enlarged m and earn nothing without
 their own battery.
 
-**Developer decision (2026-07-09): PARKED, not promoted.** This is the
+**Look-ahead audit (2026-07-09, developer-requested).** Question: is the
+amihud alpha computed from data unknowable at decision time? Answer: **no.**
+Decisive test — the identical trial recomputed with a raw-basis denominator
+(close_raw × tape volume, removing the future-dividend adjustment channel
+that leaked into div_yield) — reproduces the result: +60.20%/yr t=+8.08 vs
+journaled +61.53%/yr t=+8.34 (per-date rank correlation 0.987, top-quintile
+overlap 94.8%). Channels checked and quantified: dividend-adjustment tilt
+(present, immaterial — median factor 1.0, worst 1.51× vs 3 decades of λ
+spread; direction slightly DAMPENS the effect), zero-volume days
+(structurally filtered, cannot poison), zombie scores from delisted names
+(WPX in the long leg on 47/60 rebalances contributing nothing — removing it
+RAISES alpha to +62.5, a drag not an edge), forward-return interaction
+(none). The audit was read-only (no journal writes); a raw-basis or
+recency-guarded redefinition would each be a prospective amendment + new
+trial and buys ~nothing. The caveats that still matter are the disclosed
+ones: pool survivorship, classical SEs, and paper-vs-realizable costs. This is the
 program's second illiquidity finding. The first (§9: mid-cap option
 illiquidity, the `illiquidity_veto_v1` ranker family) looked real until it
 decomposed into the size factor (SMB loading t=13.1, four-factor alpha ≈ 0 —
