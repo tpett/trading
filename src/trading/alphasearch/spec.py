@@ -38,6 +38,9 @@ class SignalSpec:
     fn: SignalFn
     requires_options: bool = False
     requires_fundamentals: bool = False
+    # Leg volume exists only in the mid-cap gather; signals reading it are
+    # refused at sweep assembly on volume-less universes (spec section 2).
+    requires_option_volume: bool = False
 
 
 SIGNALS: dict[str, SignalSpec] = {}
@@ -49,8 +52,15 @@ def _register(
     *,
     requires_options: bool = False,
     requires_fundamentals: bool = False,
+    requires_option_volume: bool = False,
 ) -> None:
-    SIGNALS[name] = SignalSpec(name, fn, requires_options, requires_fundamentals)
+    SIGNALS[name] = SignalSpec(
+        name,
+        fn,
+        requires_options=requires_options,
+        requires_fundamentals=requires_fundamentals,
+        requires_option_volume=requires_option_volume,
+    )
 
 
 # --------------------------------------------------------------------------- #

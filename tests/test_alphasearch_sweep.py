@@ -9,7 +9,7 @@ import pytest
 
 from alphasearch_helpers import make_factors, make_panel
 from trading.alphasearch.panel import PanelError
-from trading.alphasearch.spec import SIGNALS
+from trading.alphasearch.spec import SIGNALS, SignalSpec
 from trading.alphasearch.sweep import (
     RERUN_CONFIRMATION,
     SweepError,
@@ -596,3 +596,27 @@ def test_run_sweep_passes_factors_to_the_panel_factory(tmp_path):
     run_sweep(_universe(tmp_path), journal, factors, ts="t1",
               signals=_subset("mom21"), window=WINDOW, panel_factory=factory)
     assert len(seen) == 1 and seen[0] is factors
+
+
+def test_option_volume_signal_refused_on_a_volume_less_universe(tmp_path):
+    # requires_option_volume mirrors requires_options: an assembly-time
+    # refusal, never silent fake-log(1/1)=0 trials (spec section 2, options
+    # family constraint).
+    journal = trials_journal(tmp_path / "journal")
+    fake = SignalSpec("fake_vol", SIGNALS["hedge"].fn,
+                      requires_options=True, requires_option_volume=True)
+    largecap_like = make_panel(with_option_volume=False)
+    with pytest.raises(SweepError) as excinfo:
+        run_sweep(_universe(tmp_path), journal, make_factors(), ts="t1",
+                  signals={"fake_vol": fake, "mom21": SIGNALS["mom21"]},
+                  window=WINDOW, panel_factory=lambda _u, _f: largecap_like)
+    message = str(excinfo.value)
+    assert "option volume" in message
+    assert "--signals" in message                    # actionable workaround
+    assert list(journal.events()) == []              # all-or-nothing: no trials
+    # And the same signal RUNS where cells carry leg volume.
+    midcap_like = make_panel()
+    rows, n = run_sweep(_universe(tmp_path), journal, make_factors(), ts="t2",
+                        signals={"fake_vol": fake}, window=WINDOW,
+                        panel_factory=lambda _u, _f: midcap_like)
+    assert n == 1 and rows[0].error is None

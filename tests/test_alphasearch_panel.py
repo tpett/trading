@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from alphasearch_helpers import make_cell
 from trading.alphasearch.panel import (
     BAR_COLUMNS,
     MAX_OPTION_AGE_DAYS,
@@ -168,7 +169,7 @@ def test_load_options_skips_and_counts_corrupt_lines(tmp_path):
         "",                                  # blank: ignored, not corrupt
     ]
     path.write_text("\n".join(lines) + "\n")
-    frames, corrupt = load_options(path)
+    frames, corrupt, _has_volume = load_options(path)
     assert set(frames) == {"AAA", "BBB"}
     assert corrupt == 2
 
@@ -370,3 +371,76 @@ def test_build_panel_precomputes_rolling_features_when_factors_supplied(tmp_path
     assert list(panel.features["AAA"].columns) == ROLLING_FEATURES
     without = build_panel(tmp_path, None, None, symbols=("AAA",))
     assert without.features == {}
+
+
+# --------------------------------------------------------------------------- #
+# Option-volume infrastructure (Task 4)
+# --------------------------------------------------------------------------- #
+
+
+def test_cell_metrics_opt_dollar_vol_sums_legs_with_both_volume_and_mid():
+    metrics = cell_metrics(make_cell("AAA", "2020-01-06"))
+    want = 100 * 100 * 4.1 + 50 * 100 * 2.0 + 25 * 100 * 1.5  # 54750
+    assert math.isclose(metrics["opt_dollar_vol"], want, rel_tol=1e-12)
+    no_volume = cell_metrics(make_cell("AAA", "2020-01-06", with_volume=False))
+    assert np.isnan(no_volume["opt_dollar_vol"])  # no qualifying leg -> NaN
+    partial = make_cell("AAA", "2020-01-06")
+    del partial["contracts"][1]["volume"]  # put leg loses volume
+    got = cell_metrics(partial)["opt_dollar_vol"]
+    assert math.isclose(got, 100 * 100 * 4.1 + 25 * 100 * 1.5, rel_tol=1e-12)
+
+
+def test_load_options_reports_leg_volume_presence(tmp_path):
+    p1 = tmp_path / "with.jsonl"
+    p1.write_text(json.dumps(make_cell("AAA", "2020-01-06")) + "\n")
+    p2 = tmp_path / "without.jsonl"
+    p2.write_text(json.dumps(make_cell("AAA", "2020-01-06", with_volume=False)) + "\n")
+    _frames, _corrupt, has_volume = load_options(p1)
+    assert has_volume is True
+    _frames, _corrupt, has_volume = load_options(p2)
+    assert has_volume is False
+
+
+def test_build_panel_threads_has_option_volume(tmp_path):
+    idx = pd.date_range("2020-01-02", periods=3, freq="B", tz="UTC")
+    pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+        index=idx,
+    ).to_parquet(tmp_path / "AAA.parquet")
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text(json.dumps(make_cell("AAA", "2020-01-02")) + "\n")
+    panel = build_panel(tmp_path, samples, None)
+    assert panel.has_option_volume is True
+    assert panel.view(idx[0]).has_option_volume is True
+    bare = build_panel(tmp_path, None, None, symbols=("AAA",))
+    assert bare.has_option_volume is False
+
+
+def _prior_panel(dates: list[str]) -> PanelData:
+    cells = [make_cell("AAA", d) for d in dates]
+    return PanelData(closes={}, options=options_from_cells(cells), symbols=("AAA",))
+
+
+def test_option_row_prior_returns_the_cell_strictly_older_than_current():
+    panel = _prior_panel(["2020-01-06", "2020-02-03", "2020-03-02"])
+    as_of = pd.Timestamp("2020-03-02", tz="UTC")
+    prior = panel.view(as_of).option_row_prior("AAA")
+    assert prior is not None
+    assert prior.name == pd.Timestamp("2020-02-03", tz="UTC")
+    # Current cell = Feb when as_of sits between Feb and Mar cells.
+    mid = pd.Timestamp("2020-02-05", tz="UTC")
+    prior = panel.view(mid).option_row_prior("AAA")
+    assert prior.name == pd.Timestamp("2020-01-06", tz="UTC")
+
+
+def test_option_row_prior_none_without_an_older_cell_or_when_stale():
+    single = _prior_panel(["2020-01-06"])
+    as_of = pd.Timestamp("2020-01-06", tz="UTC")
+    assert single.view(as_of).option_row_prior("AAA") is None
+    assert single.view(as_of).option_row_prior("NOPE") is None
+    # Boundary: exactly 45 calendar days before as_of is FRESH; 46 is stale.
+    fresh = _prior_panel(["2020-01-17", "2020-03-02"])   # Jan 17 + 45d = Mar 2
+    at = pd.Timestamp("2020-03-02", tz="UTC")
+    assert fresh.view(at).option_row_prior("AAA") is not None
+    stale = _prior_panel(["2020-01-16", "2020-03-02"])   # 46 days -> stale
+    assert stale.view(at).option_row_prior("AAA") is None

@@ -253,6 +253,15 @@ def _check_universe_supports(panel: PanelData, spec: SignalSpec, universe: str) 
             "`scripts/backfill_fundamentals.py`; or work around it by passing "
             "--signals with a non-fundamentals signal subset"
         )
+    if spec.requires_option_volume and not panel.has_option_volume:
+        raise SweepError(
+            f"signal {spec.name!r} requires per-leg option volume; universe "
+            f"{universe!r} cells carry none (leg volume ships only in the "
+            "mid-cap gather -- see data/options-iv/samples-midcap.jsonl). "
+            "Re-gather this universe's cells with a volume-carrying "
+            "`scripts/gather_options_iv.py` run, or work around it by "
+            "passing --signals without the option-volume family"
+        )
 
 
 # --------------------------------------------------------------------------- #

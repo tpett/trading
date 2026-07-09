@@ -22,19 +22,25 @@ def make_cell(
     call_iv: float = 0.28,
     skew_put_atm: float = 0.05,
     skew_put_call: float = 0.02,
+    with_volume: bool = True,
 ) -> dict:
-    """One samples.jsonl-shaped options cell with all three legs present."""
+    """One samples.jsonl-shaped options cell with all three legs present.
+    with_volume=False reproduces the largecap gather (no volume keys on any
+    leg); True reproduces the mid-cap gather (volumes 100/50/25)."""
+    contracts = [
+        {"role": "atm", "bid": 4.0, "ask": 4.2, "mid": 4.1, "iv": atm_iv},
+        {"role": "otm_put", "mid": 2.0, "iv": put_iv},
+        {"role": "otm_call", "mid": 1.5, "iv": call_iv},
+    ]
+    if with_volume:
+        for contract, volume in zip(contracts, (100, 50, 25), strict=True):
+            contract["volume"] = volume
     return {
         "symbol": symbol,
         "decision_date": date,
         "skew_put_atm": skew_put_atm,
         "skew_put_call": skew_put_call,
-        "contracts": [
-            {"role": "atm", "bid": 4.0, "ask": 4.2, "mid": 4.1, "iv": atm_iv,
-             "volume": 100},
-            {"role": "otm_put", "iv": put_iv, "volume": 50},
-            {"role": "otm_call", "iv": call_iv, "volume": 25},
-        ],
+        "contracts": contracts,
     }
 
 
@@ -51,6 +57,8 @@ def assemble_panel(
     options: dict[str, pd.DataFrame],
     fundamentals: dict[str, pd.DataFrame],
     factors: pd.DataFrame,
+    *,
+    has_option_volume: bool = False,
 ) -> PanelData:
     """PanelData from raw stores, deriving what build_panel derives (closes
     from bars). The lookahead test perturbs RAW stores and reassembles
@@ -61,6 +69,7 @@ def assemble_panel(
         closes=closes, options=options, fundamentals=fundamentals,
         symbols=tuple(sorted(bars)), bars=bars, factors=factors,
         features=compute_rolling_features(closes, factors),
+        has_option_volume=has_option_volume,
     )
 
 
@@ -71,6 +80,7 @@ def make_panel(
     seed: int = 7,
     with_options: bool = True,
     with_fundamentals: bool = True,
+    with_option_volume: bool = True,
     factors: pd.DataFrame | None = None,
 ) -> PanelData:
     """Symbol S<i> drifts at (i - n/2)*2bp/day plus small seeded noise (same
@@ -113,6 +123,7 @@ def make_panel(
                     call_iv=0.18 + 0.01 * i,
                     skew_put_atm=0.02 + 0.005 * i,
                     skew_put_call=0.01 + 0.002 * i,
+                    with_volume=with_option_volume,
                 ))
         options = options_from_cells(cells)
     fundamentals: dict[str, pd.DataFrame] = {}
@@ -137,7 +148,10 @@ def make_panel(
                 },
                 index=filed,
             )
-    return assemble_panel(bars, options, fundamentals, factors)
+    return assemble_panel(
+        bars, options, fundamentals, factors,
+        has_option_volume=with_options and with_option_volume,
+    )
 
 
 def make_factors(

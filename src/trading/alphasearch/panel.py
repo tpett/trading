@@ -37,7 +37,7 @@ MAX_OPTION_AGE_DAYS = 7  # a cell older than this at as_of is stale -> missing
 
 OPTION_COLUMNS = [
     "hedge", "excite", "atm_iv", "otm_put_iv", "otm_call_iv",
-    "smile", "cp_vol", "wing_vol", "tot_vol", "atm_spread",
+    "smile", "cp_vol", "wing_vol", "tot_vol", "atm_spread", "opt_dollar_vol",
 ]
 
 
@@ -62,6 +62,16 @@ def cell_metrics(cell: dict) -> dict:
     spread = ((atm["ask"] - atm["bid"]) / atm["mid"]
               if atm.get("mid") and atm.get("bid") is not None and atm.get("ask") is not None
               else np.nan)
+
+    def leg_dollar(role):
+        contract = d.get(role, {})
+        volume, mid = contract.get("volume"), contract.get("mid")
+        if volume is None or mid is None:
+            return None
+        return float(volume) * 100.0 * float(mid)
+
+    dollars = [x for x in (leg_dollar(r) for r in ("atm", "otm_put", "otm_call"))
+               if x is not None]
     return {
         "hedge": cell.get("skew_put_atm"),
         "excite": (-rr if rr is not None else np.nan),  # call-vs-put IV richness
@@ -74,6 +84,9 @@ def cell_metrics(cell: dict) -> dict:
         "wing_vol": np.log((vol("otm_call") + 1) / (vol("otm_put") + 1)),
         "tot_vol": vol("atm") + vol("otm_put") + vol("otm_call"),
         "atm_spread": spread,
+        # Johnson-So O/S numerator: only legs carrying BOTH volume and mid
+        # count; a cell with neither is missing, never $0.
+        "opt_dollar_vol": (sum(dollars) if dollars else np.nan),
     }
 
 
@@ -97,8 +110,24 @@ def options_from_cells(cells: Iterable[dict]) -> dict[str, pd.DataFrame]:
     return frames
 
 
-def load_options(samples: Path) -> tuple[dict[str, pd.DataFrame], int]:
-    """Parse a samples.jsonl into per-symbol metric frames.
+MAX_PRIOR_OPTION_AGE_DAYS = 45  # spec section 2: iv_change/dskew staleness cap
+
+
+def cells_have_volume(cells: Iterable[dict]) -> bool:
+    """True when ANY gathered leg carries a volume field. Leg volume ships
+    only in the mid-cap gather; the sweep refuses the option-volume family
+    on universes without it (a volume-less cell would otherwise score a
+    fabricated log(1/1)=0, not NaN)."""
+    return any(
+        contract.get("volume") is not None
+        for cell in cells
+        for contract in cell.get("contracts", [])
+    )
+
+
+def load_options(samples: Path) -> tuple[dict[str, pd.DataFrame], int, bool]:
+    """Parse a samples.jsonl into per-symbol metric frames, plus a corrupt-
+    line count and whether any gathered cell carries leg volume.
 
     An unparseable line or one without symbol/decision_date is SKIPPED and
     COUNTED (spec section 6: corrupt cells never fabricate data, and the count
@@ -119,7 +148,7 @@ def load_options(samples: Path) -> tuple[dict[str, pd.DataFrame], int]:
             corrupt += 1
             continue
         cells.append(cell)
-    return options_from_cells(cells), corrupt
+    return options_from_cells(cells), corrupt, cells_have_volume(cells)
 
 
 def load_fundamentals(root: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame]:
@@ -301,6 +330,30 @@ class PanelView:
         closes = self.closes(symbol)
         return float(closes.iloc[-1]) if len(closes) else float("nan")
 
+    @property
+    def has_option_volume(self) -> bool:
+        return self._panel.has_option_volume
+
+    def option_row_prior(
+        self, symbol: str, max_age_days: int = MAX_PRIOR_OPTION_AGE_DAYS
+    ) -> pd.Series | None:
+        """The most recent cell strictly OLDER than the current cell (the
+        one option_row's position arithmetic selects; spec section 3.5),
+        never a future one. None when there is no current cell, no older
+        cell, or the older cell is more than max_age_days calendar days
+        before as_of -- staleness measured from as_of, mirroring
+        MAX_OPTION_AGE_DAYS. The 45-day default freezes iv_change/dskew's
+        'prior month' definition (spec section 2)."""
+        frame = self._panel.options.get(symbol)
+        if frame is None or frame.empty:
+            return None
+        pos = int(frame.index.searchsorted(self.as_of, side="right")) - 1
+        if pos < 1:
+            return None
+        if (self.as_of - frame.index[pos - 1]).days > max_age_days:
+            return None
+        return frame.iloc[pos - 1]
+
     def option_row(self, symbol: str) -> pd.Series | None:
         """Latest options cell with decision_date <= as_of, or None.
 
@@ -381,6 +434,9 @@ class PanelData:
     # Precomputed heavy rolling features (ROLLING_FEATURES columns), keyed by
     # symbol, indexed by the joint return/factor calendar.
     features: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # True when ANY gathered options cell carries leg volume (mid-cap gather).
+    # Drives the requires_option_volume assembly-time refusal (sweep.py).
+    has_option_volume: bool = False
 
     def view(self, as_of: pd.Timestamp) -> PanelView:
         if as_of.tzinfo is None:
@@ -455,7 +511,9 @@ def build_panel(
     if not bars:
         raise PanelError(f"no bar caches under {cache_dir} for the requested universe")
     closes = {s: frame["close"] for s, frame in bars.items()}
-    options, corrupt = load_options(samples) if samples is not None else ({}, 0)
+    options, corrupt, has_volume = (
+        load_options(samples) if samples is not None else ({}, 0, False)
+    )
     fundamentals = (
         load_fundamentals(fundamentals_dir, closes) if fundamentals_dir is not None else {}
     )
@@ -470,4 +528,5 @@ def build_panel(
         bars={s: bars[s] for s in universe},
         factors=pd.DataFrame() if factors is None else factors,
         features={s: features[s] for s in universe if s in features},
+        has_option_volume=has_volume,
     )
