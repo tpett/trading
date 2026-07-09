@@ -246,3 +246,17 @@ the sweep is allowed to look; the holdout (2024-01-01..latest) is spent the
 FIRST time a candidate reads it, enforced by the trial journal exactly like
 the go-live holdout. Pass rule, pre-registered: same alpha sign AND >= 50% of
 the discovery alpha magnitude retained.
+
+**SIC code** — Standard Industrial Classification: the 4-digit industry code the SEC
+records for each filer (e.g. 2836 = Biological Products, 6021/6022 = commercial banks,
+7372 = Prepackaged Software). We read each filer's *current* code from
+`data.sec.gov/submissions` into the committed `sic_map.csv` and apply it backward over
+the whole discovery window — a disclosed caveat, since companies occasionally
+reclassify.
+
+**Segment universe** — a pre-registered slice of a cap pool by SIC range
+(`trading.alphasearch.segments.SEGMENTS`, frozen before any segment sweep): ten coarse
+sectors plus the fine industries biotech and banks, which deliberately overlap their
+parents. Each segment is an ordinary sweep universe, so every (signal, segment) pair is
+an honestly-counted extra trial — the BH bar spans flat + segment trials in the one
+journal, meaning segmentation *raises* the significance bar; it can never lower it.

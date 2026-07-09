@@ -324,6 +324,50 @@ with a heteroskedasticity/autocorrelation-robust estimator. This does not
 change the gate statistic itself (spec §5 is pre-registered and locked) — it
 is a caveat on how to *read* a marginal pass, not a different pass rule.
 
+**Segment sweep (Piece 2) — pre-registered disclosure.** `trading alphasearch
+sweep --segments` expands the sweep to the frozen `SEGMENTS` table
+(`trading.alphasearch.segments`; design:
+`docs/superpowers/specs/2026-07-08-segmented-universes-design.md`): 10 coarse
+SIC sectors + 2 fine industries (biotech SIC 2836/8731, banks SIC 6020–6039)
+× 2 caps — deep pools (membership ∩ Tiingo caches, price signals only, since
+they carry no options or fundamentals stores) plus options pools
+(`opt-largecap:`/`opt-midcap:`) where ≥ 15 gathered names. Expected cost
+≈ 200–300 new journaled trials, all discounted by the same BH q=0.10 bar over
+the whole journal — segment multiplication makes the gate harder, never
+easier, and a null across the entire segment sweep is a valid outcome.
+Because assembly-time validation is all-or-nothing across the signal ×
+universe cross-product, the sweep runs as separate passes: price signals over
+everything (`--segments --signals
+mom21,mom63,mom126,mom252,rev5,rvol21,disthigh`), then the options/
+fundamentals families per options-pool segment (`--segments --universe
+opt-largecap:biotech --signals vrp,hedge,excite,atm_iv,smile,atm_spread,...`).
+Disclosed caveats on every segment result (spec §4 rule 5): (a) SIC is each
+filer's **current** code applied backward over the window (no PIT
+reclassification); (b) segment membership is static across the window; (c)
+fine industries double-count names with their parent sector — distinct,
+honestly-counted trials; (d) a symbol without a SIC mapping belongs to no
+segment (never guessed; see `sic_map.csv` provenance). Below-threshold
+segments (< 15 names) are excluded at build time and printed, never silently
+dropped.
+
+**Operator recipe (the two canonical invocations).** In practice the pass
+split above means two shapes of command cover the whole table without ever
+tripping the all-or-nothing refusal. Price family, everywhere in one call —
+every price signal is legal on every universe, flat or segmented, so this
+sweeps the flat pools plus every `largecap:<segment>`/`midcap:<segment>` deep
+pool and every options segment at once:
+`trading alphasearch sweep --segments --signals
+mom21,mom63,mom126,mom252,rev5,rvol21,disthigh`. Options/fundamentals family,
+one options-pool segment at a time — repeat per `opt-largecap:<segment>` /
+`opt-midcap:<segment>` name (the run's stderr prints the excluded segments, so
+below-threshold ones are never silently skipped):
+`trading alphasearch sweep --segments --universe opt-largecap:biotech
+--signals vrp,hedge,excite,atm_iv,smile,atm_spread,gross_profitability,earnings_yield,book_to_market`.
+Running `--segments` bare against the full default registry is a deliberate
+refusal, not a bug — deep pools have no options or fundamentals store, so the
+cross-product check catches the mismatch before any trial is journaled; the
+CLI prints an actionable `hint:` line naming this same two-pass split.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
