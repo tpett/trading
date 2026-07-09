@@ -72,9 +72,11 @@ def test_coverage_report_rates_and_agreement():
     ]
     report = coverage_report(v2, v1)
     assert report["cells_v2"] == 2 and report["cells_v1"] == 2
-    assert report["leg_volume_rate"] == 0.5   # 1 of 2 cells has a volume-bearing near leg
-    assert report["oi_leg_rate"] == 0.25      # 1 of 4 near legs carries open_interest
+    assert report["volume_cell_rate"] == 0.5  # 1 of 2 CELLS has a volume-bearing near leg
+    assert report["volume_leg_rate"] == 0.5   # 2 of 4 near LEGS carry volume (both AAA legs)
+    assert report["oi_leg_rate"] == 0.25      # 1 of 4 near LEGS carries open_interest
     assert report["far_rate"] == 0.5
+    assert "cell_rate" in report["_denominators"] and "leg_rate" in report["_denominators"]
     assert report["iv_overlap_legs"] == 4
     assert report["iv_median_abs_delta"] == pytest.approx(0.001)  # {.002,.002,0,0} -> median .001
     assert report["iv_red_flag"] is False
@@ -90,7 +92,8 @@ def test_coverage_report_red_flags_large_iv_drift():
 def test_coverage_report_empty_inputs_yield_none_rates():
     report = coverage_report([], [])
     assert report["cells_v2"] == 0
-    assert report["leg_volume_rate"] is None
+    assert report["volume_cell_rate"] is None
+    assert report["volume_leg_rate"] is None
     assert report["oi_leg_rate"] is None
     assert report["far_rate"] is None
     assert report["iv_median_abs_delta"] is None

@@ -8,6 +8,11 @@ contract/date (large drift is a red flag to investigate, not accept). There is
 no greeks coverage column: both vendor greeks endpoints 404 on this tier (Task
 1 discovery), so no greeks capture path exists anywhere in the gather. Pure
 functions over parsed cells -- no network, no pandas needed.
+
+Two denominators, named explicitly: ``*_cell_rate`` fields are fractions of
+CELLS (any near leg satisfies the predicate), ``*_leg_rate`` fields are
+fractions of NEAR LEGS; the report's ``_denominators`` note restates this so
+the CLI's JSON output is self-describing.
 """
 
 from __future__ import annotations
@@ -96,15 +101,20 @@ def coverage_report(v2_cells: list[dict], v1_cells: list[dict]) -> dict:
     return {
         "cells_v2": len(v2_cells),
         "cells_v1": len(v1_cells),
-        "leg_volume_rate": _cell_rate(
+        "volume_cell_rate": _cell_rate(
             v2_cells,
             lambda cell: any(
                 c.get("volume") is not None for c in cell.get("contracts", [])
             ),
         ),
+        "volume_leg_rate": _leg_rate(v2_cells, "volume"),
         "oi_leg_rate": _leg_rate(v2_cells, "open_interest"),
         "far_rate": _cell_rate(v2_cells, lambda cell: "far" in cell),
         "iv_overlap_legs": len(deltas),
         "iv_median_abs_delta": iv_median,
         "iv_red_flag": iv_median is not None and iv_median > IV_DRIFT_RED_FLAG,
+        "_denominators": (
+            "volume_cell_rate/far_rate are fractions of v2 CELLS; "
+            "volume_leg_rate/oi_leg_rate are fractions of v2 NEAR LEGS"
+        ),
     }

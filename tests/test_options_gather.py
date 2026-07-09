@@ -1210,6 +1210,7 @@ def test_run_gather_resume_skips_enriched_cells(tmp_path: Path):
     assert all(
         any("open_interest" in c for c in cell["contracts"]) for cell in cells
     )  # the file really is enriched
+    assert any("far" in c for c in cells)  # ...including at least one far block
     summary2 = run_gather(client, out, **kwargs)
     assert summary2["cells_attempted"] == 0
     assert out.read_text().splitlines() == first
