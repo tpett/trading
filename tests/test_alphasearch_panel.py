@@ -317,11 +317,14 @@ def test_load_bars_reads_full_schema_and_nan_fills_legacy_columns(tmp_path):
     narrow.to_parquet(tmp_path / "NARROW.parquet")
     got = load_bars(tmp_path, ["WIDE", "NARROW", "NOPE"])
     assert set(got) == {"WIDE", "NARROW"}
-    assert list(got["WIDE"].columns) == BAR_COLUMNS      # close_raw dropped
+    assert list(got["WIDE"].columns) == BAR_COLUMNS
     assert got["WIDE"]["div_cash"].iloc[1] == 0.25
-    # A legacy narrow cache cannot claim "no dividends": NaN, never 0.0/1.0.
+    assert (got["WIDE"]["close_raw"] == 1.5).all()
+    # A legacy narrow cache cannot claim "no dividends" / "no splits" / a raw
+    # price basis: NaN, never 0.0/1.0/adjusted-close.
     assert got["NARROW"]["div_cash"].isna().all()
     assert got["NARROW"]["split_factor"].isna().all()
+    assert got["NARROW"]["close_raw"].isna().all()
 
 
 def test_view_bars_truncates_at_as_of_and_is_empty_for_unknown_symbol():

@@ -26,13 +26,18 @@ def _bar_frame(
     volume: float | pd.Series = 1000.0,
     div_cash: float | pd.Series = 0.0,
     split_factor: float | pd.Series = 1.0,
+    close_raw: pd.Series | None = None,
 ) -> pd.DataFrame:
+    # close_raw defaults to `close` -- most fixtures have no synthetic split,
+    # so adjusted and raw coincide; div_yield's dedicated split fixture below
+    # overrides this to diverge the two.
     return pd.DataFrame(
         {"open": close if open_ is None else open_,
          "high": close if high is None else high,
          "low": close if low is None else low,
          "close": close, "volume": volume, "div_cash": div_cash,
-         "split_factor": split_factor},
+         "split_factor": split_factor,
+         "close_raw": close if close_raw is None else close_raw},
         index=close.index,
     )
 
@@ -165,6 +170,8 @@ def test_vol_trend_ratio_of_dollar_volume_means():
 
 
 def test_div_yield_sums_trailing_dividends_and_never_fabricates_zero():
+    # No synthetic split here (close_raw == close, split_factor == 1.0 via
+    # _bar_frame defaults), so the raw-basis fix reduces to the plain sum.
     idx = pd.date_range("2019-01-02", periods=260, freq="B", tz="UTC")
     div = pd.Series(0.0, index=idx)
     div.iloc[-100] = 1.0
@@ -176,6 +183,49 @@ def test_div_yield_sums_trailing_dividends_and_never_fabricates_zero():
     assert math.isclose(scores["PAYER"], 1.5 / 50.0, rel_tol=1e-12)
     # Legacy narrow cache (all-NaN div_cash): NaN, never sum()'s skipna 0.0.
     assert math.isnan(scores["LEGACY"])
+
+
+def test_div_yield_uses_raw_close_and_split_adjusts_trailing_payments():
+    """2026-07-09 fix: Tiingo's `close` is adjusted using the FULL downloaded
+    history, so it bakes in corporate actions that happen AFTER any given
+    as-of date; raw div_cash / adjusted close therefore look-ahead-inflates
+    the yield for future splitters (the AAPL 2020 4:1-split bug). Fixed
+    basis: raw div_cash / close_raw, with each trailing payment split-
+    adjusted INTO as-of terms via the VISIBLE (<=as_of) split_factor history.
+
+    Fixture: a REAL, already-visible 4:1 split lands mid-window (idx[-50]),
+    exercising the payment-adjustment logic on a dividend paid before it; `close`
+    is ALSO already discounted for a FURTHER 4:1 split that hasn't happened yet
+    as of as_of (Tiingo's whole-history retroactive adjustment) -- the specific
+    look-ahead this fix removes from the divisor.
+    """
+    idx = pd.date_range("2019-01-02", periods=260, freq="B", tz="UTC")
+    close_raw = pd.Series(400.0, index=idx)
+    close_raw.iloc[210:] = 100.0  # the VISIBLE split lands at idx[210] (idx[-50])
+    close = pd.Series(25.0, index=idx)  # adjusted: continuous, plus a FUTURE
+    # (invisible-as-of-as_of) 4:1 split already baked in -- the look-ahead.
+    split_factor = pd.Series(1.0, index=idx)
+    split_factor.iloc[210] = 4.0
+    div_cash = pd.Series(0.0, index=idx)
+    div_cash.iloc[60] = 1.0    # idx[-200]: BEFORE the visible split
+    div_cash.iloc[250] = 0.3   # idx[-10]: after the visible split
+    frame = pd.DataFrame(
+        {"open": close, "high": close, "low": close, "close": close,
+         "volume": 1000.0, "div_cash": div_cash, "split_factor": split_factor,
+         "close_raw": close_raw},
+        index=idx,
+    )
+    panel = _bar_panel({"SPLITTER": frame})
+    got = _score("div_yield", panel, idx[-1])["SPLITTER"]
+    # New basis: (1.0/4.0 [split-adjusted] + 0.3/1.0) / close_raw[-1].
+    want = (1.0 / 4.0 + 0.3) / 100.0
+    assert math.isclose(got, want, rel_tol=1e-12)
+    # RED-verify: the PRE-FIX formula (raw div sum / adjusted close) gives a
+    # materially different (inflated, ~9.5x) number on this exact fixture --
+    # proof the basis change matters, not a no-op refactor.
+    old_formula = (1.0 + 0.3) / close.iloc[-1]
+    assert math.isclose(old_formula, 1.3 / 25.0, rel_tol=1e-12)
+    assert not math.isclose(got, old_formula, rel_tol=1e-6)
 
 
 def test_price_volume_family_covers_every_panel_symbol():

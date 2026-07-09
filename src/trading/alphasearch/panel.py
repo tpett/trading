@@ -184,8 +184,14 @@ def load_closes(cache_dir: Path, symbols: Iterable[str]) -> dict[str, pd.Series]
 
 # Full bar schema served to signals. Legacy largecap caches predate the
 # extended columns; load_bars NaN-fills them (see docstring) rather than
-# fabricating "no dividends / no splits".
-BAR_COLUMNS = ["open", "high", "low", "close", "volume", "div_cash", "split_factor"]
+# fabricating "no dividends / no splits". close_raw (the RAW, unadjusted
+# close) is div_yield's divisor (2026-07-09 fix): Tiingo's `close` is
+# split+dividend adjusted using the FULL downloaded history, so it bakes in
+# corporate actions that happen AFTER any given as-of date -- close_raw never
+# does.
+BAR_COLUMNS = [
+    "open", "high", "low", "close", "volume", "div_cash", "split_factor", "close_raw",
+]
 
 
 def load_bars(cache_dir: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame]:
@@ -193,10 +199,11 @@ def load_bars(cache_dir: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame
 
     A symbol without a cached parquet is absent from the result (missing-data
     rule, spec section 5.5). A legacy narrow cache (OHLCV only) gets NaN
-    div_cash/split_factor -- NOT the venue layer's 0.0/1.0 migration
-    defaults: a cache that never stored dividends cannot claim "no
-    dividends", so div_yield/net_issuance go honestly NaN there instead of
-    scoring fabricated zeros. Extra columns (close_raw) are dropped.
+    div_cash/split_factor/close_raw -- NOT the venue layer's 0.0/1.0/adjusted-
+    close migration defaults: a cache that never stored these cannot claim
+    "no dividends" / "no splits" / a raw-price basis, so div_yield/
+    net_issuance go honestly NaN there instead of scoring fabricated or
+    look-ahead-contaminated values.
     """
     out: dict[str, pd.DataFrame] = {}
     for symbol in sorted(set(symbols)):

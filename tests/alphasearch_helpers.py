@@ -90,7 +90,10 @@ def make_panel(
     fixture). Bars extend the closes deterministically: open gaps up
     1bp*(i+1) from the prior close (a per-symbol overnight drift), high/low
     bracket the close at +-(0.2+0.05i)%, volume 1e5*(i+1), div_cash
-    0.01*(i+1) daily, split_factor 1.0. Fundamentals file THREE times so the
+    0.01*(i+1) daily, split_factor 1.0, close_raw == close (no synthetic
+    split -- div_yield's raw-basis fix is exercised by its own dedicated
+    fixture in test_alphasearch_tier1.py, not this general-purpose panel).
+    Fundamentals file THREE times so the
     300-day YoY rule and the post-cutoff perturbation are both exercised on
     long fixtures (positions 0 / 63% / 95% of the index)."""
     rng = np.random.default_rng(seed)
@@ -107,7 +110,7 @@ def make_panel(
         bars[sym] = pd.DataFrame(
             {"open": open_, "high": close * (1 + span), "low": close * (1 - span),
              "close": close, "volume": 1e5 * (i + 1), "div_cash": 0.01 * (i + 1),
-             "split_factor": 1.0},
+             "split_factor": 1.0, "close_raw": close},
             index=idx,
         )
     if factors is None:

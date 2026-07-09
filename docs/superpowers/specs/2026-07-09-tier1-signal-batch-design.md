@@ -34,7 +34,7 @@ decision date through PIT accessors.
 | `beta` | OLS slope of daily excess ret on Mkt-RF over 252d (min 126 obs) | − betting-against-beta (Frazzini-Pedersen) |
 | `amihud` | mean over 252d of |daily ret| / (close·volume), min 126 obs | + illiquidity premium (Amihud) |
 | `vol_trend` | mean dollar volume 21d / mean dollar volume 252d | + high-volume return premium (Gervais-Kaniel-Mingelgrin) |
-| `div_yield` | sum of `div_cash` over trailing 252d / close | + income/value tilt |
+| `div_yield` | split-adjusted sum of `div_cash` over trailing 252d / `close_raw` (see 2026-07-09 amendment below) | + income/value tilt |
 
 ### Fundamentals family (5) — from stored primitives (`assets, ttm_net_income, book_equity, shares_outstanding, revenue_ttm`), filing-date PIT
 
@@ -49,6 +49,28 @@ decision date through PIT accessors.
 YoY convention: "one-year-prior filing" = the latest filing FILED at least
 300 calendar days before the current filing's filed date; if none exists the
 signal is NaN for that name (dropped, never imputed).
+
+**2026-07-09 amendment (written prospective, pre-sweep — nothing spent):**
+`div_yield`'s original row above ("sum of `div_cash` over trailing 252d /
+`close`") was under-specified with respect to adjustment basis. Tiingo's
+`close` is split+dividend adjusted using the FULL downloaded history, so a
+bar's adjusted close already bakes in corporate actions that happen AFTER
+that bar's date; raw `div_cash` (a per-share amount in the shares-outstanding
+basis AS PAID) divided by that adjusted close therefore look-ahead-inflates
+the yield for any name that splits later (e.g. a 4:1 split after a $1
+dividend reads 4x too high at every pre-split date — the AAPL 2020 4:1 split
+is the concrete case this was caught on). Corrected definition: `div_yield`
+= (sum over the trailing 252 bars of `div_cash[t]` divided by the product of
+`split_factor` over bar dates strictly after `t` through as_of) / `close_raw`
+at as_of — both numerator and denominator now in the SAME as-of share-count
+basis, using only VISIBLE (<=as_of) split history. `close_raw` (BAR_COLUMNS)
+is the raw, never-retroactively-adjusted close. NaN when any split_factor in
+the trailing window is NaN, or `close_raw` is NaN/non-positive (a legacy
+narrow cache, e.g. the current largecap bar cache, cannot claim a raw-price
+basis — honest NaN → error trials there until re-backfilled, per the plan's
+known data landmine). Sign and window are unchanged. This is a pure
+under-specification fix caught before any trial ran (no sweep has run against
+this spec), so it requires no BH-journal reconciliation.
 
 ### Options family (5) — from existing `samples*.jsonl` cells
 

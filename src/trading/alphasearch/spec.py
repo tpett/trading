@@ -209,17 +209,48 @@ def _vol_trend(bars: pd.DataFrame) -> float:
 
 
 def _div_yield(bars: pd.DataFrame) -> float:
-    """Trailing 252-bar cash dividends / last close. min_count=1 keeps an
-    all-NaN div_cash column (legacy narrow cache) NaN instead of sum()'s
-    skipna zero -- a cache without dividend data must not claim 'no
-    dividends' (that would fabricate a 0-yield cross-section)."""
+    """Trailing 252-bar split-adjusted cash dividends / close_raw at as_of.
+
+    2026-07-09 amendment (see the design spec's dated note): Tiingo's `close`
+    is split+dividend adjusted using the FULL downloaded history, so a row's
+    adjusted close already bakes in corporate actions that happen AFTER that
+    row's date -- raw div_cash / adjusted close therefore look-ahead-inflates
+    the yield for any name that splits later (a 4:1 split after a $1 dividend
+    makes raw-div/adjusted-close read 4x too high at every PRE-split date,
+    e.g. AAPL's 2020 4:1 split). Fixed basis: divide by close_raw (the RAW,
+    never-retroactively-adjusted close), and split-adjust each trailing
+    payment INTO as-of terms by dividing it by the product of split_factor
+    over bar dates strictly AFTER the payment through as_of (visible history
+    only -- a split that hasn't happened yet by as_of is correctly not
+    applied). min_count=1 keeps an all-NaN div_cash column (legacy narrow
+    cache) NaN instead of sum()'s skipna zero. A NaN split_factor ANYWHERE in
+    the trailing window, or a NaN/non-positive close_raw, makes the whole
+    score NaN -- a legacy cache without a raw-price/split basis cannot claim
+    'no splits' (mirrors _net_issuance's rule)."""
     if len(bars) < 252:
         return math.nan
-    paid = bars["div_cash"].iloc[-252:].sum(min_count=1)
-    close = float(bars["close"].iloc[-1])
-    if pd.isna(paid) or not close > 0:
+    window = bars.iloc[-252:]
+    close_raw = float(window["close_raw"].iloc[-1])
+    if pd.isna(close_raw) or not close_raw > 0:
         return math.nan
-    return float(paid / close)
+    split_factor = window["split_factor"]
+    if split_factor.isna().any():
+        return math.nan
+    paid = window["div_cash"]
+    if paid.isna().all():
+        return math.nan
+    # adjustment[i] = product of split_factor strictly AFTER row i through the
+    # last (as-of) row; a reverse cumulative product shifted by one row.
+    factors = split_factor.to_numpy()
+    cum_from_i = np.cumprod(factors[::-1])[::-1]
+    adjustment = np.empty(len(factors))
+    adjustment[:-1] = cum_from_i[1:]
+    adjustment[-1] = 1.0
+    adjusted = paid.to_numpy() / adjustment
+    total = pd.Series(adjusted).sum(min_count=1)
+    if pd.isna(total):
+        return math.nan
+    return float(total / close_raw)
 
 
 # Classic UMD with the skip-month that avoids short-term reversal
