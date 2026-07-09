@@ -174,9 +174,13 @@ def test_fundamentals_family_values_and_neutrality():
 
 
 def test_registry_is_complete_with_correct_requirements():
-    assert len(SIGNALS) == 25  # 16 seeds + 9 Tier-1 price/volume
-    options_family = {"vrp", "hedge", "excite", "atm_iv", "smile", "atm_spread"}
-    fundamentals_family = {"gross_profitability", "earnings_yield", "book_to_market"}
+    assert len(SIGNALS) == 30  # 16 seeds + 9 price/volume + 5 options
+    options_family = {"vrp", "hedge", "excite", "atm_iv", "smile", "atm_spread",
+                      "cp_vol", "osv", "otm_put_iv", "iv_change", "dskew"}
+    volume_family = {"cp_vol", "osv"}
     for name, spec in SIGNALS.items():
         assert spec.requires_options == (name in options_family)
-        assert spec.requires_fundamentals == (name in fundamentals_family)
+        assert spec.requires_option_volume == (name in volume_family)
+        assert spec.requires_fundamentals == (
+            name in {"gross_profitability", "earnings_yield", "book_to_market"}
+        )

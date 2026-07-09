@@ -8,7 +8,8 @@ import math
 import numpy as np
 import pandas as pd
 
-from trading.alphasearch.panel import PanelData
+from alphasearch_helpers import make_cell
+from trading.alphasearch.panel import PanelData, options_from_cells
 from trading.alphasearch.spec import SIGNALS
 
 
@@ -187,3 +188,76 @@ def test_price_volume_family_covers_every_panel_symbol():
         scores = _score(name, panel, as_of)
         assert list(scores.index) == list(panel.symbols)
         assert scores.dtype == "float64"
+
+
+# --------------------------------------------------------------------------- #
+# Options family
+# --------------------------------------------------------------------------- #
+
+
+def _options_tier1_panel(prior_age_days: int = 28):
+    idx = pd.date_range("2020-01-02", periods=60, freq="B", tz="UTC")
+    as_of = idx[-1]
+    prior = (as_of - pd.Timedelta(prior_age_days, unit="D")).date().isoformat()
+    current = as_of.date().isoformat()
+    cells = [
+        make_cell("AAA", prior, atm_iv=0.24, skew_put_atm=0.02),
+        make_cell("AAA", current, atm_iv=0.30, skew_put_atm=0.05),
+        make_cell("BBB", current, atm_iv=0.50, put_iv=0.50,
+                  skew_put_atm=0.10),  # no prior; steeper smirk
+    ]
+    bars = {s: _bar_frame(pd.Series(100.0, index=idx), volume=500.0)
+            for s in ("AAA", "BBB")}
+    panel = PanelData(
+        closes={s: f["close"] for s, f in bars.items()}, bars=bars,
+        options=options_from_cells(cells), symbols=("AAA", "BBB"),
+        has_option_volume=True,
+    )
+    return panel, as_of
+
+
+def test_cp_vol_reads_the_committed_call_minus_put_log_volume():
+    panel, as_of = _options_tier1_panel()
+    scores = _score("cp_vol", panel, as_of)
+    # ATM leg is a call: call side = atm(100) + otm_call(25); put side = 50.
+    assert math.isclose(scores["AAA"], math.log(126 / 51), rel_tol=1e-12)
+    assert scores["AAA"] > 0  # + sign: informed call demand attractive
+
+
+def test_osv_is_negated_option_to_stock_dollar_volume():
+    panel, as_of = _options_tier1_panel()
+    scores = _score("osv", panel, as_of)
+    opt_dollar = 100 * 100 * 4.1 + 50 * 100 * 2.0 + 25 * 100 * 1.5  # 54750
+    assert math.isclose(scores["AAA"], -(opt_dollar / (100.0 * 500.0)),
+                        rel_tol=1e-12)
+
+
+def test_otm_put_iv_is_negated_smirk_level():
+    panel, as_of = _options_tier1_panel()
+    scores = _score("otm_put_iv", panel, as_of)
+    assert scores["AAA"] == -0.34
+    assert scores["AAA"] > scores["BBB"]  # steeper smirk = less attractive
+
+
+def test_iv_change_and_dskew_are_negated_innovations_nan_without_prior():
+    panel, as_of = _options_tier1_panel()
+    iv_change = _score("iv_change", panel, as_of)
+    assert math.isclose(iv_change["AAA"], -(0.30 - 0.24), rel_tol=1e-12)
+    assert math.isnan(iv_change["BBB"])  # no prior cell -> NaN
+    dskew = _score("dskew", panel, as_of)
+    assert math.isclose(dskew["AAA"], -(0.05 - 0.02), rel_tol=1e-12)
+    assert math.isnan(dskew["BBB"])
+
+
+def test_innovations_nan_when_the_prior_cell_is_stale():
+    panel, as_of = _options_tier1_panel(prior_age_days=50)  # > 45d cap
+    assert math.isnan(_score("iv_change", panel, as_of)["AAA"])
+    assert math.isnan(_score("dskew", panel, as_of)["AAA"])
+
+
+def test_options_family_nan_without_cells():
+    idx = pd.date_range("2020-01-02", periods=60, freq="B", tz="UTC")
+    bars = {"AAA": _bar_frame(pd.Series(100.0, index=idx), volume=500.0)}
+    bare = _bar_panel(bars)
+    for name in ("cp_vol", "osv", "otm_put_iv", "iv_change", "dskew"):
+        assert _score(name, bare, idx[-1]).isna().all(), name

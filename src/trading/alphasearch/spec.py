@@ -285,6 +285,64 @@ _register("atm_spread", _option_signal("atm_spread", +1.0), requires_options=Tru
 
 
 # --------------------------------------------------------------------------- #
+# Tier-1 options family (spec 2026-07-09 section 2). cp_vol/osv read per-leg
+# volume, which only the mid-cap gather carries -> requires_option_volume
+# refuses them elsewhere (fake log(1/1)=0 cross-sections must never trial).
+# --------------------------------------------------------------------------- #
+def _osv(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """Option/stock dollar-volume ratio: the cell's opt_dollar_vol over the
+    decision-day stock dollar volume (close*volume of the last bar <= as_of),
+    one cell vs one day. NEGATED at registration below."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        row = view.option_row(symbol)
+        score = math.nan
+        if row is not None:
+            bars = view.bars(symbol)
+            if len(bars):
+                stock_dollar = float(bars["close"].iloc[-1] * bars["volume"].iloc[-1])
+                opt_dollar = float(row["opt_dollar_vol"])
+                if stock_dollar > 0 and not math.isnan(opt_dollar):
+                    score = -(opt_dollar / stock_dollar)
+        scores[symbol] = score
+    return pd.Series(scores, dtype="float64")
+
+
+def _option_innovation(column: str, sign: float) -> SignalFn:
+    """sign * (current cell's column - prior cell's column); NaN when either
+    cell is missing or the prior is stale (option_row_prior's 45d cap)."""
+
+    def fn(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+        scores: dict[str, float] = {}
+        for symbol in view.symbols:
+            row = view.option_row(symbol)
+            prior = view.option_row_prior(symbol)
+            if row is None or prior is None:
+                scores[symbol] = math.nan
+            else:
+                scores[symbol] = sign * (float(row[column]) - float(prior[column]))
+        return pd.Series(scores, dtype="float64")
+
+    return fn
+
+
+# Informed call demand predicts positive returns (Pan-Poteshman). The cell's
+# committed cp_vol column is log(1+call volume) - log(1+put volume) with the
+# ATM leg counted as the call it is.
+_register("cp_vol", _option_signal("cp_vol", +1.0),
+          requires_options=True, requires_option_volume=True)
+# High option/stock volume marks informed (mostly bearish) positioning
+# (Johnson-So) -> negate.
+_register("osv", _osv, requires_options=True, requires_option_volume=True)
+# Steep OTM-put smirk predicts negative returns (Xing-Zhang-Zhao) -> negate.
+_register("otm_put_iv", _option_signal("otm_put_iv", -1.0), requires_options=True)
+# Rising implied vol = rising perceived risk (An-Ang-Bali-Cakici) -> negate.
+_register("iv_change", _option_innovation("atm_iv", -1.0), requires_options=True)
+# A steepening put smirk is bearish, consistent with `hedge`'s sign -> negate.
+_register("dskew", _option_innovation("hedge", -1.0), requires_options=True)
+
+
+# --------------------------------------------------------------------------- #
 # Fundamentals family (requires_fundamentals). Ratios computed at scoring time
 # from price-free stored primitives x the as-of close, exactly as
 # trading.signals.quality / trading.signals.value do. NaN (dropped) when no
