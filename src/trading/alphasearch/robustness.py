@@ -19,8 +19,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from trading.alphasearch.evaluate import evaluate_alpha
 from trading.alphasearch.panel import PanelData
-from trading.alphasearch.sort import SortError
+from trading.alphasearch.sort import Membership, SortError, SortResult
 from trading.alphasearch.spec import SIGNALS, SignalSpec
 from trading.alphasearch.sweep import (
     BH_Q,
@@ -276,3 +277,126 @@ def require_survivor(
             f"Current survivors: {listing}"
         )
     return discovery
+
+
+# ---------------------------------------------------------------------------#
+# Checks 5-7: arithmetic on already-computed series. NO new trials journaled.
+# ---------------------------------------------------------------------------#
+def _segments(rebalances: tuple[Membership, ...], end: pd.Timestamp):
+    """(date, top, bottom, hold_end): each membership is held to the next
+    ACTUAL rebalance (or the window end) -- skipped decision dates never
+    truncate a holding period, matching portfolio_sort's hold-through rule."""
+    for j, (date, top, bottom) in enumerate(rebalances):
+        hold_end = rebalances[j + 1][0] if j + 1 < len(rebalances) else end
+        yield date, top, bottom, hold_end
+
+
+def ls_series(
+    closes: dict[str, pd.Series],
+    rebalances: tuple[Membership, ...],
+    end: pd.Timestamp,
+    *,
+    excluded: frozenset[str] = frozenset(),
+) -> pd.Series:
+    """Replay the daily L/S spread from recorded memberships (bit-identical
+    to portfolio_sort's ls -- proven by test), optionally excluding names
+    from BOTH legs. A rebalance segment whose top or bottom leg is emptied
+    by the exclusion has no defined spread and is dropped; if every segment
+    empties, SortError (the caller fails the check)."""
+    returns = pd.DataFrame({s: c.pct_change() for s, c in closes.items()})
+    parts: list[pd.Series] = []
+    for date, top, bottom, hold_end in _segments(rebalances, end):
+        top_kept = [s for s in top if s not in excluded]
+        bottom_kept = [s for s in bottom if s not in excluded]
+        if len(top_kept) == 0 or len(bottom_kept) == 0:
+            continue
+        segment = returns.loc[(returns.index > date) & (returns.index <= hold_end)]
+        parts.append(
+            segment[top_kept].mean(axis=1) - segment[bottom_kept].mean(axis=1)
+        )
+    if len(parts) == 0:
+        raise SortError("every rebalance segment emptied by the exclusion")
+    return pd.concat(parts).dropna()
+
+
+def top_leg_contributions(
+    closes: dict[str, pd.Series],
+    rebalances: tuple[Membership, ...],
+    end: pd.Timestamp,
+) -> pd.Series:
+    """Cumulative per-name contribution to the TOP-quantile leg's daily
+    return: on each held day an equal-weight member contributes ret / n_top.
+    Descending order -- index[:3] are check 5's exclusion candidates."""
+    returns = pd.DataFrame({s: c.pct_change() for s, c in closes.items()})
+    totals: dict[str, float] = {}
+    for date, top, _bottom, hold_end in _segments(rebalances, end):
+        segment = returns.loc[(returns.index > date) & (returns.index <= hold_end)]
+        per_name = segment[list(top)].sum() / len(top)
+        for sym, value in per_name.items():
+            totals[sym] = totals.get(sym, 0.0) + float(value)
+    return pd.Series(totals, dtype="float64").sort_values(ascending=False)
+
+
+def check_name_concentration(ctx: BatteryContext, sort: SortResult) -> CheckResult:
+    """Check 5 (frozen): recompute the L/S excluding the top-3 contributors
+    to the top leg; remaining four-factor alpha must retain >= 0.5 of the
+    journaled original (signed ratio -- symmetric for negative alphas)."""
+    end = _window_bounds(ctx.window)[1]
+    contributions = top_leg_contributions(ctx.panel.closes, sort.rebalances, end)
+    excluded = list(contributions.index[:NAME_EXCLUDE_TOP])
+    alpha: float | None = None
+    error: str | None = None
+    try:
+        reduced = ls_series(ctx.panel.closes, sort.rebalances, end,
+                            excluded=frozenset(excluded))
+        alpha = evaluate_alpha(reduced, ctx.factors, self_financing=True
+                               ).alpha_annual_pct
+    except (SortError, ValueError, np.linalg.LinAlgError) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    r = signed_retention(ctx.full_alpha, alpha)
+    ok = not math.isnan(r) and r >= NAME_MIN_RETENTION
+    return CheckResult(5, "name_concentration", ok, {
+        "excluded": excluded, "alpha_annual_pct": alpha,
+        "retention": None if math.isnan(r) else r, "error": error,
+    })
+
+
+def month_share(ls: pd.Series, top_n: int = MONTH_TOP) -> float:
+    """Top-`top_n` calendar months' share of the cumulative L/S log return.
+    NaN when the cumulative log return is not positive (concentration of a
+    non-gain is undefined; callers fail the check -- an amendment would be
+    needed before running the battery on a negative-alpha survivor)."""
+    log_returns = np.log1p(ls)
+    monthly = log_returns.groupby(ls.index.strftime("%Y-%m")).sum()
+    total = float(monthly.sum())
+    if not total > 0:
+        return math.nan
+    return float(monthly.nlargest(top_n).sum()) / total
+
+
+def check_month_concentration(ls: pd.Series) -> CheckResult:
+    """Check 6 (frozen): top-3 months' share of cumulative L/S log return
+    <= 60%."""
+    share = month_share(ls)
+    ok = not math.isnan(share) and share <= MONTH_MAX_SHARE
+    return CheckResult(6, "month_concentration", ok, {
+        "top3_share": None if math.isnan(share) else share,
+    })
+
+
+def factor_proxy_flag(ls_stats: dict) -> dict:
+    """Check 7 (frozen; WARNING only, never blocks): any factor loading with
+    |t_loading| > 2 x |t_alpha| while R^2 > 0.5 -- the section 9 SMB-costume
+    detector. Input is the discovery trial's journaled `ls` block."""
+    alpha_t = ls_stats.get("alpha_t")
+    r2 = ls_stats.get("r2")
+    loadings_t = ls_stats.get("loadings_t") or {}
+    offenders: dict[str, float] = {}
+    if alpha_t is not None and r2 is not None and float(r2) > PROXY_MIN_R2:
+        for name, t in loadings_t.items():
+            if t is not None and abs(float(t)) > (
+                PROXY_LOADING_MULTIPLE * abs(float(alpha_t))
+            ):
+                offenders[name] = float(t)
+    return {"flagged": len(offenders) > 0, "offenders": offenders,
+            "alpha_t": alpha_t, "r2": r2}

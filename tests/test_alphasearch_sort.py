@@ -307,3 +307,18 @@ def test_symbol_subset_below_min_names_skips_like_a_thin_date():
     with pytest.raises(SortError):
         portfolio_sort(panel, _mom21(), dates, end, min_names=3,
                        symbol_subset=("S1", "S2"))
+
+
+def test_rebalances_record_actual_memberships_only():
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[0], idx[-1])
+    got = portfolio_sort(panel, _mom21(), dates, idx[-1], min_names=3)
+    # mom21 needs 22 bars: the first month is skipped (no membership
+    # recorded), later months rebalance with the SIX terciles.
+    assert len(got.rebalances) < len(dates)
+    date, top, bottom = got.rebalances[0]
+    assert date in dates
+    assert top == ("S5", "S6") and bottom == ("S1", "S2")   # tercile extremes
+    # Every attempted date either rebalanced (recorded) or was skipped.
+    assert len(got.rebalances) + len(got.skipped_dates) == got.n_dates

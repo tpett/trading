@@ -257,3 +257,173 @@ def test_require_survivor_refuses_unknown_missing_and_errored(tmp_path):
         require_survivor(journal, "mom21", "largecap", WINDOW,
                          dict(DEFAULT_PARAMS))
     assert len(list(journal.events())) == 1          # refusals journal nothing
+
+
+def _hand_closes(values: dict[str, list[float]], start="2020-01-06") -> dict:
+    idx = pd.date_range(start, periods=len(next(iter(values.values()))),
+                        freq="B", tz="UTC")
+    return {sym: pd.Series(v, index=idx) for sym, v in values.items()}
+
+
+def test_ls_series_replays_portfolio_sort_exactly(tmp_path):
+    from trading.alphasearch.robustness import ls_series
+    from trading.alphasearch.sort import portfolio_sort
+
+    panel = make_panel(n_symbols=40)
+    idx = panel.closes[panel.symbols[0]].index
+    dates = panel.decision_dates(idx[0], idx[-1])
+    sort = portfolio_sort(panel, SIGNALS["mom21"], dates, idx[-1])
+    replayed = ls_series(panel.closes, sort.rebalances, idx[-1])
+    pd.testing.assert_series_equal(replayed, sort.ls)
+
+
+def test_ls_series_excludes_names_from_both_legs():
+    from trading.alphasearch.robustness import ls_series
+
+    # 4 names, constant daily growth: A 4%, B 3%, C 1%, D 0%. One rebalance:
+    # top=(A,B), bottom=(C,D). Excluding A leaves top=B alone.
+    closes = _hand_closes({
+        "A": [100.0, 104.0], "B": [100.0, 103.0],
+        "C": [100.0, 101.0], "D": [100.0, 100.0],
+    })
+    date, end = closes["A"].index[0], closes["A"].index[-1]
+    rebalances = ((date, ("A", "B"), ("C", "D")),)
+    full = ls_series(closes, rebalances, end)
+    assert full.iloc[0] == pytest.approx((0.04 + 0.03) / 2 - (0.01 + 0.0) / 2)
+    reduced = ls_series(closes, rebalances, end, excluded=frozenset({"A"}))
+    assert reduced.iloc[0] == pytest.approx(0.03 - 0.005)
+    # Excluding a bottom name symmetrically:
+    reduced2 = ls_series(closes, rebalances, end, excluded=frozenset({"D"}))
+    assert reduced2.iloc[0] == pytest.approx(0.035 - 0.01)
+
+
+def test_ls_series_emptied_leg_contributes_nothing():
+    from trading.alphasearch.robustness import ls_series
+    from trading.alphasearch.sort import SortError
+
+    closes = _hand_closes({"A": [100.0, 104.0], "B": [100.0, 101.0]})
+    date, end = closes["A"].index[0], closes["A"].index[-1]
+    rebalances = ((date, ("A",), ("B",)),)
+    with pytest.raises(SortError):
+        ls_series(closes, rebalances, end, excluded=frozenset({"A"}))
+
+
+def test_top_leg_contributions_hand_computed():
+    from trading.alphasearch.robustness import top_leg_contributions
+
+    # top=(A,B) held two days; equal weight 1/2. A returns 4% then ~1.923%,
+    # B returns 1% then ~0.990%: contributions are the summed ret/2.
+    closes = _hand_closes({
+        "A": [100.0, 104.0, 106.0],
+        "B": [100.0, 101.0, 102.0],
+        "C": [100.0, 100.0, 100.0],
+    })
+    date, end = closes["A"].index[0], closes["A"].index[-1]
+    rebalances = ((date, ("A", "B"), ("C",)),)
+    got = top_leg_contributions(closes, rebalances, end)
+    assert got.index[0] == "A"                       # ranked descending
+    assert got["A"] == pytest.approx((0.04 + 2.0 / 104.0) / 2)
+    assert got["B"] == pytest.approx((0.01 + 1.0 / 101.0) / 2)
+    assert "C" not in got.index                      # bottom leg never counted
+
+
+def test_check_name_concentration_fails_a_three_name_alpha(tmp_path):
+    # Spec section 7's three-name fixture: 3 monsters carry the whole top
+    # leg; excluding them collapses the alpha below half -> FAIL.
+    from trading.alphasearch.robustness import check_name_concentration
+    from trading.alphasearch.sort import portfolio_sort
+
+    idx = pd.date_range("2020-01-02", periods=130, freq="B", tz="UTC")
+    names = [f"S{i:02d}" for i in range(40)]
+    rng = np.random.default_rng(5)
+    closes = {}
+    for i, sym in enumerate(names):
+        drift = 0.02 if i >= 37 else 0.0             # 3 monsters, 37 duds
+        rets = drift + rng.normal(0.0, 1e-4, size=130)
+        closes[sym] = pd.Series(100.0 * np.cumprod(1 + rets), index=idx)
+    panel = PanelData(closes=closes, symbols=tuple(names))
+    journal = trials_journal(tmp_path / "journal")
+    factors = make_factors()
+    ctx = _ctx(journal, panel, factors, spec=_planted_rank_spec())
+    # The sort is built over the ctx WINDOW bounds, exactly as run_battery
+    # does (check 5 replays memberships to the window end, not the last bar).
+    start = pd.Timestamp("2020-01-01", tz="UTC")
+    end = pd.Timestamp("2020-06-30", tz="UTC")
+    sort = portfolio_sort(panel, _planted_rank_spec(),
+                          panel.decision_dates(start, end), end)
+    got = check_name_concentration(ctx, sort)
+    assert not got.passed
+    assert set(got.detail["excluded"]) == {"S37", "S38", "S39"}
+    assert got.detail["retention"] < 0.5
+    assert len(list(journal.events())) == 0          # arithmetic: NO new trials
+
+
+def test_check_name_concentration_passes_a_broad_alpha(tmp_path):
+    from trading.alphasearch.robustness import check_name_concentration
+    from trading.alphasearch.sort import portfolio_sort
+
+    panel = make_panel(n_symbols=40)                 # linear drift spread
+    journal = trials_journal(tmp_path / "journal")
+    ctx = _ctx(journal, panel, make_factors())
+    start = pd.Timestamp("2020-01-01", tz="UTC")
+    end = pd.Timestamp("2020-06-30", tz="UTC")
+    sort = portfolio_sort(panel, SIGNALS["mom21"],
+                          panel.decision_dates(start, end), end)
+    got = check_name_concentration(ctx, sort)
+    assert got.passed
+    assert got.number == 5 and got.name == "name_concentration"
+
+
+def test_month_share_hand_computed():
+    from trading.alphasearch.robustness import month_share
+
+    # One trading day per month with known LOG returns .01/.02/.03/.04:
+    # top-3 share = .09/.10. expm1 round-trips through log1p.
+    idx = pd.DatetimeIndex(
+        ["2020-01-15", "2020-02-14", "2020-03-16", "2020-04-15"], tz="UTC"
+    )
+    ls = pd.Series(np.expm1([0.01, 0.02, 0.03, 0.04]), index=idx)
+    assert month_share(ls) == pytest.approx(0.09 / 0.10)
+    # Non-positive cumulative log return: concentration is undefined -> NaN
+    # (the caller FAILS the check; spec section 6).
+    flat = pd.Series(np.expm1([-0.02, 0.01]), index=idx[:2])
+    assert math.isnan(month_share(flat))
+
+
+def test_check_month_concentration_fails_a_single_month_spike():
+    from trading.alphasearch.robustness import check_month_concentration
+
+    idx = pd.date_range("2020-01-02", periods=105, freq="B", tz="UTC")
+    values = np.full(105, 0.0001)
+    march = (idx.month == 3)
+    values[march] = 0.01                             # the spike month
+    got = check_month_concentration(pd.Series(values, index=idx))
+    assert not got.passed
+    assert got.number == 6 and got.name == "month_concentration"
+    assert got.detail["top3_share"] > 0.60
+
+
+def test_check_month_concentration_passes_an_even_series():
+    from trading.alphasearch.robustness import check_month_concentration
+
+    idx = pd.date_range("2020-01-02", periods=130, freq="B", tz="UTC")
+    got = check_month_concentration(pd.Series(0.001, index=idx))
+    assert got.passed                                # ~6 even months: 3/6 = 50%
+
+
+def test_factor_proxy_flag_is_the_smb_costume_detector():
+    from trading.alphasearch.robustness import factor_proxy_flag
+
+    costume = {"alpha_t": 3.0, "r2": 0.6,
+               "loadings_t": {"Mkt-RF": 1.0, "SMB": 9.0, "HML": 0.5, "Mom": 0.2}}
+    got = factor_proxy_flag(costume)
+    assert got["flagged"] is True
+    assert got["offenders"] == {"SMB": 9.0}
+    # R^2 below the floor: high loading t alone does not flag.
+    low_r2 = dict(costume, r2=0.4)
+    assert factor_proxy_flag(low_r2)["flagged"] is False
+    # Loading below 2x |alpha t|: no flag.
+    mild = dict(costume, loadings_t={"SMB": 5.9})
+    assert factor_proxy_flag(mild)["flagged"] is False
+    # Missing stats (errored trial): never flags, never crashes.
+    assert factor_proxy_flag({})["flagged"] is False

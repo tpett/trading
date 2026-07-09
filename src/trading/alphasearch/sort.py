@@ -40,6 +40,11 @@ class SortError(ValueError):
     """The sort could not produce a return series (empty calendar/universe)."""
 
 
+# (decision date, top, bottom) at one ACTUAL rebalance. Piece 3's arithmetic
+# checks and cost/capacity analysis replay holdings from this record.
+Membership = tuple[pd.Timestamp, tuple[str, ...], tuple[str, ...]]
+
+
 @dataclass(frozen=True)
 class SortResult:
     ls: pd.Series                    # daily long/short spread (top - bottom)
@@ -48,6 +53,7 @@ class SortResult:
     skipped_dates: tuple[str, ...]   # ISO dates skipped for thin cross-sections
     n_dates: int                     # decision dates attempted (incl. skipped)
     n_names_median: float            # median cross-section size on traded dates
+    rebalances: tuple[Membership, ...] = ()  # memberships at ACTUAL rebalances
 
 
 def assign_quantiles(scores: pd.Series, quantiles: int) -> tuple[list[str], list[str]]:
@@ -87,6 +93,7 @@ def portfolio_sort(
     tops: list[set[str]] = []
     skipped: list[str] = []
     names_per_date: list[int] = []
+    rebalances: list[Membership] = []
     # A skipped date means "don't rebalance", never "delete the period": the
     # previously formed portfolio (if any) is held through the skipped period
     # until the next actual rebalance (or the window end). Leading skips have
@@ -121,6 +128,9 @@ def portfolio_sort(
                 current_top, current_bottom = assign_quantiles(scores, q)
                 tops.append(set(current_top))
                 names_per_date.append(len(scores))
+                rebalances.append(
+                    (date, tuple(current_top), tuple(current_bottom))
+                )
         if current_top is None or current_bottom is None:
             continue
         hold_end = dates[i + 1] if i + 1 < len(dates) else end
@@ -149,4 +159,5 @@ def portfolio_sort(
         skipped_dates=tuple(skipped),
         n_dates=len(dates),
         n_names_median=float(np.median(names_per_date)),
+        rebalances=tuple(rebalances),
     )
