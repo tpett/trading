@@ -360,7 +360,12 @@ mean reverses (Da-Liu-Schaumburg): sector-adjusted laggards bounce, leaders fade
   cross-section survives ≥ 4 of 5; one carried by a few lucky names doesn't.
 - **Parameter jitter (check 3)** — the same evaluation at quantiles {4, 6} ×
   min_names {10, 20}. Real effects don't care exactly where the bucket
-  boundaries fall.
+  boundaries fall. Caveat: on a universe whose cross-section is below
+  `tercile_below` (50 names), `portfolio_sort`'s tercile fallback collapses
+  BOTH quantile settings to 3 buckets regardless of the requested 4 or 6, so
+  check 3 there effectively only exercises the min_names dimension and
+  journals pairwise-duplicate p-values (same q=3 sort at each min_names
+  value, twice) — expected, disclosed, not a bug.
 - **Decision-date offset (check 4)** — rebalance on the second trading
   session of each month instead of the first. Guards against calendar-turn
   artifacts; the alpha must keep its sign and half its magnitude.

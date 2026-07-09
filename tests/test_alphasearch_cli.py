@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pandas as pd
 
@@ -340,6 +341,41 @@ def test_robustness_report_card_renders_with_red_proxy_warning(
     assert "FACTOR-PROXY WARNING" in out and "SMB" in out
     assert "30" in out and "capacity" in out.lower()
     assert "holdout-eligible: NO" in out
+
+
+def test_robustness_report_card_surfaces_errored_subset_draws(
+    tmp_path, capsys, monkeypatch
+):
+    """Fix (final-review): an ERRORED draw (e.g. the half-universe fell below
+    MIN_NAMES) is a different failure mode than a merely sign-mismatched
+    draw, and the report card must say so instead of collapsing both into
+    the same "sign-matched" count."""
+    from trading.alphasearch.robustness import CheckResult
+
+    outcome = _fake_battery_outcome()
+    errored_subsets = CheckResult(
+        2, "universe_subsets", False,
+        {"n_pass": 0, "draws": [
+            {"seed": 42 + i, "n_symbols": 5, "alpha_annual_pct": None,
+             "error": "SortError: cross-section below minimum", "passed": False}
+            for i in range(5)
+        ]},
+    )
+    checks = tuple(
+        errored_subsets if c.name == "universe_subsets" else c
+        for c in outcome.checks
+    )
+    outcome = replace(outcome, checks=checks)
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.robustness.run_battery",
+                        lambda *a, **k: outcome)
+    rc = cli.main(["alphasearch", "robustness", "amihud:midcap",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "5 errored: SortError: cross-section below minimum" in out
+    assert "0/5 draws sign-matched" in out
 
 
 def test_robustness_json_dumps_the_verdict_event(tmp_path, capsys, monkeypatch):

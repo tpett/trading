@@ -104,10 +104,13 @@ def portfolio_sort(
     for i, date in enumerate(dates):
         scores = spec.fn(panel.view(date), date).dropna()
         if symbol_subset is not None:
-            # Piece 3 subset check: the scored cross-section is restricted to
-            # the draw; every downstream rule (min_names skip, tercile fall-
-            # back, distinct-score guard) then applies to the SUBSET, exactly
-            # as if the universe had been this half all along.
+            # Piece 3 subset check: scores are computed above on the FULL
+            # cross-section (a cross-sectional term, e.g. ind_mom's sector
+            # mean, still sees every name) and only THEN restricted to the
+            # draw -- a membership perturbation with the signal held fixed,
+            # not a re-score of a smaller universe. Every downstream rule
+            # (min_names skip, tercile fallback, distinct-score guard) then
+            # applies to the SUBSET.
             scores = scores[scores.index.isin(symbol_subset)]
         if len(scores) < min_names:
             skipped.append(date.date().isoformat())

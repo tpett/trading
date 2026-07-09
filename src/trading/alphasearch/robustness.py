@@ -457,11 +457,15 @@ def cost_adjusted_table(
     factors: pd.DataFrame,
 ) -> list[dict]:
     """Cost-adjusted alpha (spec section 4, frozen reading): for each one-way
-    cost c in COST_BPS, EVERY rebalance (formation included) charges
+    cost c in COST_BPS, EVERY rebalance -- formation included -- charges
     2 x turnover_monthly x c -- both legs trade -- against the L/S series on
     the first return day after that decision date, and the charged series is
-    re-regressed. turnover_monthly is exactly the leaderboard's measurement;
-    charging its mean per rebalance totals the same as charging actuals."""
+    re-regressed. Deliberate simplification, not an equality: formation is
+    really a ~100% turnover event (every position is new, from cash), but it
+    is charged at the SAME mean turnover_monthly as every later rebalance
+    rather than at 1.0 -- a one-time understatement of the first charge,
+    traded for one consistent per-rebalance formula instead of a
+    special-cased first row."""
     rows: list[dict] = []
     dates = [date for date, _top, _bottom in rebalances]
     usable = turnover_monthly is not None and not math.isnan(turnover_monthly)

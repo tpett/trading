@@ -1155,6 +1155,11 @@ def _render_battery(outcome) -> None:
                 f"t={num(h['alpha_t'])}" for h in d["halves"]
             )
         if check.name == "universe_subsets":
+            errored = [draw["error"] for draw in d["draws"] if draw.get("error")]
+            if errored:
+                msgs = "; ".join(dict.fromkeys(errored))  # dedupe, keep order
+                return (f"{d['n_pass']}/5 draws sign-matched "
+                        f"({len(errored)} errored: {msgs})")
             return f"{d['n_pass']}/5 draws sign-matched (need >=4)"
         if check.name == "parameter_jitter":
             ok = sum(1 for t in d["trials"] if t["passed"])
