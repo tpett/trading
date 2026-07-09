@@ -16,6 +16,7 @@ Pure I/O + indexing: no clock reads; as_of is always a parameter.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from trading.alphasearch.evaluate import TRADING_DAYS
 from trading.fundamentals.store import FundamentalsStore
 from trading.symbols import load_symbol_allowlist
 
@@ -174,6 +176,103 @@ def load_bars(cache_dir: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame
     return out
 
 
+IVOL_WINDOW = 21
+IVOL_MIN_OBS = 15   # spec section 6: 15-obs floor for 21d windows
+BETA_WINDOW = 252
+BETA_MIN_OBS = 126  # spec section 6: 126-obs floor for 252d windows
+ROLLING_FEATURES = ["ivol", "beta"]
+_FF3 = ["Mkt-RF", "SMB", "HML"]
+
+
+def _rolling_sum(values: np.ndarray, window: int) -> np.ndarray:
+    """Trailing-window sums via cumsum differences: row t sums rows
+    max(0, t-window+1)..t. Works for any trailing shape, so the same helper
+    rolls scalars, design rows, and stacked 4x4 cross-product matrices."""
+    cum = np.cumsum(values, axis=0, dtype="float64")
+    out = cum.copy()
+    out[window:] = cum[window:] - cum[:-window]
+    return out
+
+
+def _ivol_column(y: np.ndarray, x3: np.ndarray) -> np.ndarray:
+    """Rolling FF3 residual std, annualized (spec section 2 `ivol`).
+
+    Per row t: OLS of the trailing <=IVOL_WINDOW excess returns on
+    [1, Mkt-RF, SMB, HML]; ivol = sqrt(SSE / (n - 4)) * sqrt(TRADING_DAYS)
+    -- the OLS residual standard error, the same e'e/(n-k) convention as
+    evaluate.ols. NaN below IVOL_MIN_OBS obs, and NaN for a numerically
+    singular window (a rank-deficient window has no defined FF3 residual:
+    missing data, spec section 6 -- real factor history is never
+    rank-deficient over 15+ days). Fully vectorized: rolling cross-product
+    sums, one batched det, one batched solve.
+    """
+    n = len(y)
+    k = 4
+    design = np.column_stack([np.ones(n), x3])
+    xtx = _rolling_sum(design[:, :, None] * design[:, None, :], IVOL_WINDOW)
+    xty = _rolling_sum(design * y[:, None], IVOL_WINDOW)
+    yty = _rolling_sum(y * y, IVOL_WINDOW)
+    counts = np.minimum(np.arange(n) + 1, IVOL_WINDOW)
+    solvable = (counts >= IVOL_MIN_OBS) & (np.abs(np.linalg.det(xtx)) > 0.0)
+    # Identity-substitute the unsolvable stacks: batched solve raises on ANY
+    # singular member (the first 14 windows always are), and masked rows are
+    # overwritten with NaN below anyway.
+    safe = np.where(solvable[:, None, None], xtx, np.eye(k))
+    beta = np.linalg.solve(safe, xty[:, :, None])[:, :, 0]
+    sse = np.maximum(yty - np.einsum("nk,nk->n", beta, xty), 0.0)
+    dof = np.maximum(counts - k, 1)
+    out = np.sqrt(sse / dof) * math.sqrt(TRADING_DAYS)
+    out[~solvable] = np.nan
+    return out
+
+
+def _beta_column(y: np.ndarray, mkt: np.ndarray) -> np.ndarray:
+    """Rolling OLS slope of excess returns on Mkt-RF with intercept (spec
+    section 2 `beta`): cov(mkt, y) / var(mkt) over the trailing
+    <=BETA_WINDOW rows; NaN below BETA_MIN_OBS obs or when the window's
+    market variance is zero."""
+    n = len(y)
+    counts = np.minimum(np.arange(n) + 1, BETA_WINDOW).astype("float64")
+    sx = _rolling_sum(mkt, BETA_WINDOW)
+    sy = _rolling_sum(y, BETA_WINDOW)
+    sxy = _rolling_sum(mkt * y, BETA_WINDOW)
+    sxx = _rolling_sum(mkt * mkt, BETA_WINDOW)
+    denom = counts * sxx - sx * sx
+    out = np.full(n, np.nan)
+    valid = (counts >= BETA_MIN_OBS) & (denom > 0)
+    out[valid] = (counts * sxy - sx * sy)[valid] / denom[valid]
+    return out
+
+
+def compute_rolling_features(
+    closes: dict[str, pd.Series], factors: pd.DataFrame
+) -> dict[str, pd.DataFrame]:
+    """Per-symbol full-span ivol/beta frames (the FeaturePanel pattern from
+    trading.signals.engine: precompute once, gather as-of). Rows live on the
+    inner join of the symbol's pct_change() calendar with the factor
+    calendar (NaN rows dropped); every rolling sum looks strictly backward,
+    so the value gathered at as_of is identical whether or not data after
+    as_of exists -- the no-look-ahead perturbation test proves it. ivol
+    regresses EXCESS returns (ret - RF) on FF3; beta regresses them on
+    Mkt-RF alone."""
+    if factors.empty:
+        return {}
+    cols = factors[[*_FF3, "RF"]]
+    out: dict[str, pd.DataFrame] = {}
+    for symbol, series in closes.items():
+        rets = series.pct_change().rename("ret")
+        joined = cols.join(rets, how="inner").dropna()
+        if joined.empty:
+            continue
+        y = (joined["ret"] - joined["RF"]).to_numpy()
+        x3 = joined[_FF3].to_numpy()
+        out[symbol] = pd.DataFrame(
+            {"ivol": _ivol_column(y, x3), "beta": _beta_column(y, x3[:, 0])},
+            index=joined.index,
+        )
+    return out
+
+
 class PanelView:
     """Read-only as-of window onto a PanelData.
 
@@ -247,6 +346,18 @@ class PanelView:
         pos = frame.index.searchsorted(self.as_of, side="right")
         return frame.iloc[:pos]
 
+    def feature(self, symbol: str, column: str) -> float:
+        """Precomputed rolling feature (ROLLING_FEATURES) at the last row
+        dated at or before as_of; NaN when the symbol has no feature rows
+        yet. Same searchsorted gather as FeaturePanel.gather."""
+        frame = self._panel.features.get(symbol)
+        if frame is None or frame.empty:
+            return math.nan
+        pos = int(frame.index.searchsorted(self.as_of, side="right")) - 1
+        if pos < 0:
+            return math.nan
+        return float(frame.iloc[pos][column])
+
 
 @dataclass(frozen=True)
 class PanelData:
@@ -267,6 +378,9 @@ class PanelData:
     # UTC index) from evaluate.load_factors. Published history: PIT holds by
     # truncation like every other store (spec section 3, item 1).
     factors: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # Precomputed heavy rolling features (ROLLING_FEATURES columns), keyed by
+    # symbol, indexed by the joint return/factor calendar.
+    features: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     def view(self, as_of: pd.Timestamp) -> PanelView:
         if as_of.tzinfo is None:
@@ -346,6 +460,7 @@ def build_panel(
         load_fundamentals(fundamentals_dir, closes) if fundamentals_dir is not None else {}
     )
     universe = tuple(s for s in allowlist if s in bars)
+    features = compute_rolling_features(closes, factors) if factors is not None else {}
     return PanelData(
         closes={s: closes[s] for s in universe},
         options={s: options[s] for s in universe if s in options},
@@ -354,4 +469,5 @@ def build_panel(
         corrupt_cells=corrupt,
         bars={s: bars[s] for s in universe},
         factors=pd.DataFrame() if factors is None else factors,
+        features={s: features[s] for s in universe if s in features},
     )

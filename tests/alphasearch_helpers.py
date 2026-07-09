@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from trading.alphasearch.panel import PanelData, options_from_cells
+from trading.alphasearch.panel import PanelData, compute_rolling_features, options_from_cells
 
 
 def make_cell(
@@ -60,6 +60,7 @@ def assemble_panel(
     return PanelData(
         closes=closes, options=options, fundamentals=fundamentals,
         symbols=tuple(sorted(bars)), bars=bars, factors=factors,
+        features=compute_rolling_features(closes, factors),
     )
 
 

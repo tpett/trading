@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -12,6 +13,7 @@ from trading.alphasearch.panel import (
     BAR_COLUMNS,
     MAX_OPTION_AGE_DAYS,
     OPTION_COLUMNS,
+    ROLLING_FEATURES,
     PanelData,
     PanelError,
     build_panel,
@@ -349,3 +351,22 @@ def test_build_panel_without_factors_stores_an_empty_frame(tmp_path):
     ).to_parquet(tmp_path / "AAA.parquet")
     panel = build_panel(tmp_path, None, None, symbols=("AAA",))
     assert panel.factors.empty
+
+
+def test_build_panel_precomputes_rolling_features_when_factors_supplied(tmp_path):
+    idx = pd.date_range("2020-01-02", periods=30, freq="B", tz="UTC")
+    pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5,
+         "close": np.linspace(100.0, 110.0, 30), "volume": 10.0},
+        index=idx,
+    ).to_parquet(tmp_path / "AAA.parquet")
+    rng = np.random.default_rng(2)
+    factors = pd.DataFrame(
+        {"Mkt-RF": rng.normal(0.0, 0.01, 30), "SMB": rng.normal(0.0, 0.005, 30),
+         "HML": rng.normal(0.0, 0.005, 30), "RF": 0.0001, "Mom": 0.0},
+        index=idx,
+    )
+    panel = build_panel(tmp_path, None, None, symbols=("AAA",), factors=factors)
+    assert list(panel.features["AAA"].columns) == ROLLING_FEATURES
+    without = build_panel(tmp_path, None, None, symbols=("AAA",))
+    assert without.features == {}
