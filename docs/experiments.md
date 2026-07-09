@@ -550,6 +550,23 @@ the holdout stays reserved, and no live promotion path is open for this
 family until it survives realistic costs. Recorded so a future sweep doesn't
 "rediscover" illiquidity as a novel finding.
 
+**Full walk-forward (2026-07-09, `amihud_v1` ranker, config
+`config/experiments/amihud-midcap`, master d020d8a): OOS Sharpe 0.16 vs SPY
+0.96, total +7.43% — GATE FAIL, decisively.** The battery-passed L/S factor
+alpha does NOT survive the long-only tradeable wrapper: at 15 bps with the
+strategy machinery (stops, regime gate, threshold entries), the long-illiquid
+book bleeds across most windows (2020's rebound quarters carried what little
+total return there was; 2022-2025 is a string of negative quarters against a
+rising benchmark). This completes the illiquidity story in both directions:
+the FACTOR is real (L/S, battery-passed, look-ahead-audited above), but as a
+long-only strategy in this account's format it is worse than holding the
+index — echoing §9's lesson that the long-only wrapper is where
+cross-sectional signals go to die. Journaled: 94 walk-forward windows +
+summary in `journal/experiments-equities.jsonl`. The alphasearch holdout
+remains unspent; with the tradeable form refuted, spending it on amihud is
+academic unless a market-neutral or overlay construction is designed (its
+own pre-registered spec, if ever).
+
 **Battery pseudo-replication caveat (read post-battery promotions
 skeptically).** Checks 1-4 journal 12 new BH-counted discovery trials per
 battery run, deliberately (spec section 5.6 — no second ledger, no
