@@ -22,6 +22,7 @@ from trading.alphasearch.panel import (
     cells_have_volume,
     load_bars,
     load_closes,
+    load_insider,
     load_options,
     options_from_cells,
 )
@@ -594,3 +595,98 @@ def test_cells_have_volume_reads_near_legs_only():
     for contract in cell["contracts"]:
         del contract["volume"]  # near legs unmeasured; far still has volume
     assert cells_have_volume([cell]) is False
+
+
+# --------------------------------------------------------------------------- #
+# Insider store (Form 4 pipeline)
+# --------------------------------------------------------------------------- #
+
+
+def _insider_frame(rows: list[tuple[str, str, float, float, int]]) -> pd.DataFrame:
+    """(filed_iso, code, shares, price, owner_cik) -> a store-shaped frame."""
+    frame = pd.DataFrame(
+        rows, columns=["filed", "code", "shares", "price", "owner_cik"]
+    )
+    frame["filed"] = pd.to_datetime(frame["filed"]).dt.tz_localize("UTC")
+    frame["trans_date"] = frame["filed"] - pd.Timedelta(2, unit="D")
+    frame["value"] = frame["shares"] * frame["price"]
+    frame["is_officer"] = True
+    frame["is_director"] = False
+    frame["is_ten_pct"] = False
+    return frame.set_index("filed").sort_index(kind="mergesort")
+
+
+def test_insider_window_filed_date_boundaries():
+    as_of = pd.Timestamp("2020-06-30", tz="UTC")
+    frame = _insider_frame([
+        ("2020-04-01", "P", 100.0, 10.0, 1),   # exactly as_of-90d: EXCLUDED
+        ("2020-04-02", "P", 100.0, 10.0, 2),   # first included day
+        ("2020-06-30", "S", 50.0, 10.0, 3),    # filed exactly at as_of: included
+        ("2020-07-01", "P", 999.0, 10.0, 4),   # filed after as_of: invisible
+    ])
+    panel = PanelData(closes={}, insider={"AAA": frame}, symbols=("AAA",))
+    window = panel.view(as_of).insider_window("AAA")
+    assert window is not None
+    assert list(window["owner_cik"]) == [2, 3]
+
+
+def test_insider_window_none_vs_empty_is_the_covered_distinction():
+    as_of = pd.Timestamp("2020-06-30", tz="UTC")
+    old = _insider_frame([("2019-01-15", "P", 100.0, 10.0, 1)])
+    panel = PanelData(closes={}, insider={"QUIET": old}, symbols=("QUIET", "NEVER"))
+    view = panel.view(as_of)
+    quiet = view.insider_window("QUIET")
+    assert quiet is not None and quiet.empty     # covered-but-quiet: a real 0
+    assert view.insider_window("NEVER") is None  # never covered: NaN downstream
+    # Before ANY filing, a later-covered symbol is never-covered too.
+    early = panel.view(pd.Timestamp("2019-01-10", tz="UTC"))
+    assert early.insider_window("QUIET") is None
+
+
+def test_load_insider_reads_store_and_never_creates_it(tmp_path):
+    frame = _insider_frame([("2020-01-06", "P", 10.0, 5.0, 1)])
+    store = tmp_path / "insider"
+    store.mkdir()
+    frame.to_parquet(store / "AAA.parquet")
+    frame.to_parquet(store / "BRK-B.parquet")   # '/'-sanitized filename
+    got = load_insider(store, ["AAA", "BRK/B", "NOPE"])
+    assert set(got) == {"AAA", "BRK/B"}
+    assert got["AAA"]["value"].iloc[0] == 50.0
+    absent = load_insider(tmp_path / "missing", ["AAA"])
+    assert absent == {}
+    assert not (tmp_path / "missing").exists()  # never invented
+
+
+def test_load_insider_warns_once_on_a_gaps_marker(tmp_path, caplog):
+    frame = _insider_frame([("2020-01-06", "P", 10.0, 5.0, 1)])
+    store = tmp_path / "insider"
+    store.mkdir()
+    frame.to_parquet(store / "AAA.parquet")
+    (store / ".source").write_text("form345 GAPS:2020q2,2021q4")
+    with caplog.at_level("WARNING"):
+        load_insider(store, ["AAA"])
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "2020q2" in warnings[0].message and "2021q4" in warnings[0].message
+
+
+def test_load_insider_clean_marker_does_not_warn(tmp_path, caplog):
+    frame = _insider_frame([("2020-01-06", "P", 10.0, 5.0, 1)])
+    store = tmp_path / "insider"
+    store.mkdir()
+    frame.to_parquet(store / "AAA.parquet")
+    (store / ".source").write_text("form345")
+    with caplog.at_level("WARNING"):
+        load_insider(store, ["AAA"])
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_build_panel_threads_insider_dir(tmp_path):
+    cache = _write_cache(tmp_path, ("AAA",))
+    store = tmp_path / "insider"
+    store.mkdir()
+    _insider_frame([("2020-01-06", "P", 10.0, 5.0, 1)]).to_parquet(store / "AAA.parquet")
+    panel = build_panel(cache, None, None, insider_dir=store, symbols=("AAA",))
+    assert set(panel.insider) == {"AAA"}
+    bare = build_panel(cache, None, None, symbols=("AAA",))
+    assert bare.insider == {}

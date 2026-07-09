@@ -232,6 +232,22 @@ def test_deep_segments_carry_fundamentals_dir_when_the_store_exists(tmp_path):
     assert universes["opt-largecap:biotech"].fundamentals_dir == store
 
 
+def test_deep_segments_carry_insider_dir_when_the_store_exists(tmp_path):
+    # Mirrors the fundamentals section 3.4-amendment conditional: None only
+    # ever means "no store built yet". Opt pools carry it unconditionally,
+    # exactly like fundamentals_dir (an absent store loads {} and the
+    # requires_insider refusal fires at sweep assembly).
+    _pharma, _banks, sic, membership = _fixture_root(tmp_path)
+    universes, _ = segment_universes(tmp_path, sic, membership_path=membership)
+    assert universes["largecap:biotech"].insider_dir is None
+    store = tmp_path / "data" / "insider" / "equities"
+    assert universes["opt-largecap:biotech"].insider_dir == store
+    store.mkdir(parents=True)
+    universes, _ = segment_universes(tmp_path, sic, membership_path=membership)
+    assert universes["largecap:biotech"].insider_dir == store
+    assert universes["opt-largecap:biotech"].insider_dir == store
+
+
 def test_segment_universes_thread_the_sic_map_path(tmp_path):
     _pharma, _banks, sic, membership = _fixture_root(tmp_path)
     universes, _ = segment_universes(tmp_path, sic, membership_path=membership)
