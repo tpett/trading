@@ -325,13 +325,19 @@ def top_leg_contributions(
     end: pd.Timestamp,
 ) -> pd.Series:
     """Cumulative per-name contribution to the TOP-quantile leg's daily
-    return: on each held day an equal-weight member contributes ret / n_top.
+    return: on each held day a member contributes ret / n_live, where n_live
+    counts the members with a return that day -- the same skipna denominator
+    as the leg's mean(axis=1), so the contributions sum to the lo series by
+    construction (a fixed 1/n_top would under-credit survivors of a
+    mid-holding delisting and mis-rank check 5's exclusions).
     Descending order -- index[:3] are check 5's exclusion candidates."""
     returns = pd.DataFrame({s: c.pct_change() for s, c in closes.items()})
     totals: dict[str, float] = {}
     for date, top, _bottom, hold_end in _segments(rebalances, end):
         segment = returns.loc[(returns.index > date) & (returns.index <= hold_end)]
-        per_name = segment[list(top)].sum() / len(top)
+        leg = segment[list(top)]
+        weights = 1.0 / leg.notna().sum(axis=1)
+        per_name = leg.mul(weights, axis=0).sum()
         for sym, value in per_name.items():
             totals[sym] = totals.get(sym, 0.0) + float(value)
     return pd.Series(totals, dtype="float64").sort_values(ascending=False)

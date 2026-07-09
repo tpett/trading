@@ -327,6 +327,83 @@ def test_top_leg_contributions_hand_computed():
     assert "C" not in got.index                      # bottom leg never counted
 
 
+def _six_panel(periods=65, truncate: dict[str, int] | None = None) -> PanelData:
+    """Constant-growth six-name panel (the sort tests' SIX rates); `truncate`
+    cuts a symbol's series after N bars -- a mid-window delisting."""
+    rates = {"S1": -0.02, "S2": -0.01, "S3": 0.0,
+             "S4": 0.01, "S5": 0.02, "S6": 0.03}
+    idx = pd.date_range("2020-01-02", periods=periods, freq="B", tz="UTC")
+    closes = {
+        sym: pd.Series([100.0 * (1 + r) ** i for i in range(periods)], index=idx)
+        for sym, r in rates.items()
+    }
+    for sym, n in (truncate or {}).items():
+        closes[sym] = closes[sym].iloc[:n]
+    return PanelData(closes=closes, symbols=tuple(sorted(closes)))
+
+
+def test_ls_series_replay_holds_through_a_mid_sequence_skip():
+    # A thin cross-section SANDWICHED between rebalances: portfolio_sort
+    # holds the prior portfolio through the skipped date (two sub-interval
+    # parts), while the replay spans the whole holding as ONE segment --
+    # the series must still be bit-identical.
+    from trading.alphasearch.robustness import ls_series
+    from trading.alphasearch.sort import portfolio_sort
+
+    panel = _six_panel()
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[0], idx[-1])[:3]
+    assert len(dates) == 3
+    calls = {"n": 0}
+
+    def fn(view, as_of):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return pd.Series({"S1": 1.0, "S2": 2.0})  # thin -> skip, hold
+        base = {"S1": 1.0, "S2": 2.0, "S3": 3.0, "S4": 4.0, "S5": 5.0, "S6": 6.0}
+        if calls["n"] == 3:
+            base["S6"] = 0.0                          # rotate on the 3rd date
+        return pd.Series(base, dtype="float64")
+
+    sort = portfolio_sort(panel, SignalSpec("skipper", fn), dates, idx[-1],
+                          quantiles=3, tercile_below=0, min_names=3)
+    assert sort.skipped_dates == (dates[1].date().isoformat(),)
+    replayed = ls_series(panel.closes, sort.rebalances, idx[-1])
+    pd.testing.assert_series_equal(replayed, sort.ls)
+
+
+def test_ls_series_replay_matches_through_a_mid_holding_delisting():
+    # S6 (a top-leg name) delists mid-holding: the leg mean's skipna
+    # denominator shrinks, and the replay must track it bit-identically.
+    from trading.alphasearch.robustness import ls_series
+    from trading.alphasearch.sort import portfolio_sort
+
+    panel = _six_panel(truncate={"S6": 45})
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[30], idx[-1])[:1]  # one rebalance to end
+    sort = portfolio_sort(panel, SIGNALS["mom21"], dates, idx[-1], min_names=3)
+    assert sort.rebalances[0][1] == ("S5", "S6")        # S6 was in the top leg
+    replayed = ls_series(panel.closes, sort.rebalances, idx[-1])
+    pd.testing.assert_series_equal(replayed, sort.ls)
+
+
+def test_top_leg_contributions_reconcile_to_lo_through_a_delisting():
+    # Contribution weighting must match the REALIZED leg: mean(skipna) puts
+    # weight 1/n_live on each surviving member, so after S6 delists S5
+    # carries the whole leg. By construction the contributions then sum to
+    # the lo series exactly -- a stale 1/n_top denominator understates the
+    # survivor and can rank check 5's exclusion candidates wrongly.
+    from trading.alphasearch.robustness import top_leg_contributions
+    from trading.alphasearch.sort import portfolio_sort
+
+    panel = _six_panel(truncate={"S6": 45})
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[30], idx[-1])[:1]
+    sort = portfolio_sort(panel, SIGNALS["mom21"], dates, idx[-1], min_names=3)
+    got = top_leg_contributions(panel.closes, sort.rebalances, idx[-1])
+    assert got.sum() == pytest.approx(sort.lo.sum(), rel=1e-12)
+
+
 def test_check_name_concentration_fails_a_three_name_alpha(tmp_path):
     # Spec section 7's three-name fixture: 3 monsters carry the whole top
     # leg; excluding them collapses the alpha below half -> FAIL.
