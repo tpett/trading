@@ -344,6 +344,39 @@ with a heteroskedasticity/autocorrelation-robust estimator. This does not
 change the gate statistic itself (spec §5 is pre-registered and locked) — it
 is a caveat on how to *read* a marginal pass, not a different pass rule.
 
+**Adjusted-price / raw-quantity mixing caveat (2026-07-09).** Several signals
+combine a Tiingo *adjusted* price series with a *raw* (unadjusted-basis)
+quantity, and adjusted prices bake in FUTURE corporate actions relative to
+any given as-of date (Tiingo recomputes `close` from the full downloaded
+history on every new split/dividend, so an earlier row's adjusted value
+already reflects actions that happen after that row). `div_yield` mixed raw
+`div_cash` with adjusted `close` this way and has been FIXED (this entry) to
+use `close_raw` with each trailing payment split-adjusted into as-of terms —
+see the design spec's dated amendment and the glossary. Two related but
+UNFIXED, bounded distortions are recorded here rather than corrected, since
+neither has run a sweep affected enough to justify unwinding journaled
+trials: (a) `amihud`/`osv`'s dollar-volume term is `close * volume` — Tiingo
+scales volume by the inverse of the same split factor it divides price by,
+so the SPLIT component of the adjustment cancels in the product (dollar
+volume is basis-invariant to splits); the DIVIDEND component of the price
+adjustment has no inverse in volume, so a small future-dividend-adjustment
+tilt survives in both signals' dollar-volume terms — bounded (dividend
+adjustments are typically sub-1% price effects, unlike stock splits) and
+not worth a fix at this scale. (b) The pre-existing Piece 1 value signals
+(`earnings_yield`, `book_to_market`, `src/trading/alphasearch/spec.py`
+`_value_ratio`) compute market cap as raw FILED `shares_outstanding`
+(actual share count as of the filing date, never split-adjusted forward)
+times the as-of `close` (adjusted, i.e. already discounted for any split
+that happens after that date) — the identical raw-quantity/adjusted-price
+mismatch `div_yield` had, on the denominator side. Their 238 already-
+journaled discovery trials (first sweep, above) should be read with this
+caveat: a name that splits later has an understated historical market cap
+in any pre-split trial period, distorting `earnings_yield`/`book_to_market`
+at those dates in the same direction (inflated) as the pre-fix `div_yield`
+bug. No trial has been re-run to correct this — recorded as a caveat on
+existing results, not a fix, per the same discipline as the survivorship
+and classical-SE caveats above.
+
 **Segment sweep (Piece 2) — pre-registered disclosure.** `trading alphasearch
 sweep --segments` expands the sweep to the frozen `SEGMENTS` table
 (`trading.alphasearch.segments`; design:
