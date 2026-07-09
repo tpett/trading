@@ -2,7 +2,10 @@
 
 Per decision date: rank the cross-section of signal scores, form equal-weight
 quantile portfolios (quintiles; terciles below 50 names; skip + record below
-15 -- spec section 5.4), hold to the next decision date. Skipping a date means
+15 -- spec section 5.4; skip + record when the cross-section has fewer
+DISTINCT scores than quantile buckets in use -- a degenerate cross-section,
+e.g. ind_mom on a single-sector universe, 2026-07-09 amendment), hold to the
+next decision date. Skipping a date means
 "don't rebalance", never "delete the period": the prior portfolio is held
 through skipped dates until the next actual rebalance. Output is two dated
 DAILY return series -- ls = mean(top) - mean(bottom), lo = mean(top) -- which
@@ -96,9 +99,21 @@ def portfolio_sort(
             skipped.append(date.date().isoformat())
         else:
             q = quantiles if len(scores) >= tercile_below else 3
-            current_top, current_bottom = assign_quantiles(scores, q)
-            tops.append(set(current_top))
-            names_per_date.append(len(scores))
+            # Degenerate cross-section guard: a single-sector segment universe
+            # makes ind_mom assign ONE identical value to every symbol (and
+            # any other signal can coincidentally tie this thin), so there
+            # are fewer distinct scores than quantile buckets. assign_
+            # quantiles' mergesort would then sort purely by symbol name,
+            # producing a real-looking junk trial. Skip the date -- same
+            # machinery as the <min_names rule (spec section 5.4 extension);
+            # if EVERY date is this degenerate, the SortError below still
+            # fires and journals an honest error trial.
+            if scores.nunique() < q:
+                skipped.append(date.date().isoformat())
+            else:
+                current_top, current_bottom = assign_quantiles(scores, q)
+                tops.append(set(current_top))
+                names_per_date.append(len(scores))
         if current_top is None or current_bottom is None:
             continue
         hold_end = dates[i + 1] if i + 1 < len(dates) else end

@@ -203,6 +203,72 @@ def test_leading_skipped_date_series_starts_at_first_rebalance():
     assert math.isnan(result.turnover_monthly)  # single actual rebalance
 
 
+def _degenerate_spec(tied_calls: set[int]) -> SignalSpec:
+    """Signal returning an all-tied (degenerate) cross-section on the given
+    calls -- plenty of names (>= min_names), but only ONE distinct score, so
+    quantile buckets can't be formed without assign_quantiles' alphabetical
+    tie-break becoming the entire "signal" (e.g. ind_mom on a single-sector
+    segment universe). Other calls return 6 distinct scores (S1..S6 rising)."""
+    calls = {"n": 0}
+
+    def fn(view, as_of):
+        calls["n"] += 1
+        if calls["n"] in tied_calls:
+            return pd.Series({s: 1.0 for s in SIX})
+        return pd.Series({s: float(i) for i, s in enumerate(SIX)})
+
+    return SignalSpec("tied", fn)
+
+
+def test_degenerate_tied_cross_section_is_skipped_like_a_thin_date():
+    # All 6 names score IDENTICALLY on the middle date: plenty of names, but
+    # zero distinct scores. Skipped via the same machinery as the
+    # <min_names rule (spec section 5.4 extension) -- never a junk trial
+    # from assign_quantiles' alphabetical tie-break.
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[0], idx[-1])[:3]
+    assert len(dates) == 3
+    spec = _degenerate_spec(tied_calls={2})
+    result = portfolio_sort(panel, spec, dates, idx[-1],
+                            quantiles=3, tercile_below=0, min_names=3)
+    assert result.skipped_dates == (dates[1].date().isoformat(),)
+    # "Skipped" means "don't rebalance": the portfolio formed on dates[0]
+    # keeps holding through the degenerate dates[1] period.
+    held = result.ls[(result.ls.index > dates[1]) & (result.ls.index <= dates[2])]
+    assert len(held) > 0
+
+
+def test_all_tied_cross_sections_raise_sort_error():
+    # Every date is degenerate (single-sector ind_mom over the whole window)
+    # -> no portfolio ever forms -> the existing "every date skipped"
+    # SortError fires and journals an honest error trial.
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[30], idx[-1])
+    spec = SignalSpec("alltied", lambda view, as_of: pd.Series({s: 1.0 for s in SIX}))
+    with pytest.raises(SortError):
+        portfolio_sort(panel, spec, dates, idx[-1],
+                       quantiles=3, tercile_below=0, min_names=3)
+
+
+def test_partial_ties_with_enough_distinct_values_are_not_skipped():
+    # 6 names, exactly 3 distinct scores (two pairs of ties) -- NOT
+    # degenerate, since 3 distinct values exactly covers the 3 quantile
+    # buckets in use. A normal mixed date is unaffected by the new guard.
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[30], idx[-1])
+    spec = SignalSpec(
+        "partial_tie",
+        lambda view, as_of: pd.Series({"S1": 1.0, "S2": 1.0, "S3": 2.0,
+                                       "S4": 2.0, "S5": 3.0, "S6": 3.0}),
+    )
+    result = portfolio_sort(panel, spec, dates, idx[-1],
+                            quantiles=3, tercile_below=0, min_names=3)
+    assert result.skipped_dates == ()
+
+
 def test_turnover_across_skip_uses_actual_rebalances_only():
     # Turnover pairs consecutive ACTUAL rebalances; the skipped middle date
     # neither contributes a pair nor breaks the pairing across the gap.

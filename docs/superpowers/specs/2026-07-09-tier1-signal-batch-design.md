@@ -94,6 +94,19 @@ requires_options mechanism — a refusal, never silent NaN trials).
 | `ind_mom` | sector cross-sectional mean of mom_12_2, assigned to each member | + industry momentum (Moskowitz-Grinblatt) |
 | `ind_rel_rev` | −(trail21 return − sector mean trail21) | + within-industry reversal (Da-Liu-Schaumburg; 21d horizon at monthly cadence) |
 
+**Note (2026-07-09, not a bug):** on a single-sector segment universe (every
+member sharing the same frozen SEGMENTS sector), `ind_mom` assigns the
+IDENTICAL sector-mean score to every symbol — a structurally degenerate
+cross-section. The portfolio sort's distinct-score guard (spec section 6
+extension: skip + record when a date's cross-section has fewer distinct
+scores than the quantile count in use) skips every date there, and — since
+every date on a single-sector universe skips — the existing all-dates-skipped
+`SortError` fires, journaling an honest error trial. This is expected on any
+single-sector segment, not a defect; `ind_rel_rev` is unaffected (within-
+sector demeaning still varies name to name even on a single-sector universe).
+The CLI's `--segments` refusal hint excludes `ind_mom` from its suggested
+segment-safe signal list for the same reason.
+
 ## 3. Engine extensions (minimal, all reviewed under the same discipline)
 
 1. `panel.py`: `load_bars` (full OHLCV + div_cash, replacing close-only for
@@ -150,6 +163,14 @@ journaled error trial; n≤k regressions fail loudly and count; universe
 incompatibilities refuse at assembly. New: `ivol`/`beta` return NaN below
 their minimum-observation floors (126d for 252d windows, 15d for 21d
 windows); `iv_change`/`dskew` NaN when the prior cell is missing or stale.
+
+**2026-07-09 amendment:** a decision date whose cross-section has fewer
+DISTINCT scores than the quantile count in use (e.g. a single-sector
+segment's `ind_mom`, §2) is now skipped and recorded, same machinery as the
+existing <15-names rule — without this, `portfolio_sort`'s mergesort-on-tie
+would rank purely by symbol name, producing a real-looking junk trial from a
+degenerate signal. If every date on a universe is this degenerate, the
+existing all-dates-skipped `SortError` fires as before.
 
 ## 7. Testing
 

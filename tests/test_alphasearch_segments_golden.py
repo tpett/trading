@@ -170,13 +170,50 @@ def test_bh_mask_spans_combined_journal_not_per_segment(tmp_path):
 def _write_tier1_root(tmp_path):
     """_write_root plus: extended bar schema (per-symbol overnight drift,
     real high/low span, div_cash, split_factor), a fundamentals store (so
-    the Tier-1 spec section 3.4 amendment attaches it to deep pools), and a
+    the Tier-1 spec section 3.4 amendment attaches it to deep pools), a
+    SECOND options samples file with per-(date, symbol) variation, and a
     SECOND two-sector sic map for the flat pool's industry signals (the
-    original all-2836 map keeps the segment expectations intact)."""
-    panel, samples, sic, membership = _write_root(tmp_path)
+    original all-2836 map keeps the segment expectations intact).
+
+    The per-(date, symbol) options variation matters: _write_root's cells
+    repeat the IDENTICAL atm_iv/skew/volume every month (same formula, no
+    date term), so cp_vol/iv_change/dskew would score every symbol
+    identically -- a genuinely degenerate cross-section that the sort's
+    distinct-score guard (2026-07-09 fix 2) now correctly skips. This
+    fixture's cells vary by month too, so the option-volume and prior-cell
+    infra this test exercises produce a real (non-degenerate) cross-section.
+    """
+    panel, _samples, sic, membership = _write_root(tmp_path)
     cache = tmp_path / "data" / "equities-tiingo"
     store = tmp_path / "data" / "fundamentals" / "equities"
     store.mkdir(parents=True)
+    idx = panel.closes[panel.symbols[0]].index
+    lines = []
+    for month_idx, date in enumerate(month_firsts(idx)):
+        iso = date.date().isoformat()
+        for i, sym in enumerate(panel.symbols):
+            # The month term is scaled by (i+1) -- NOT a common additive
+            # offset -- so month-to-month DIFFERENCES (iv_change/dskew) also
+            # vary by symbol; a common offset would cancel in the subtraction
+            # and tie every symbol's innovation, the same degeneracy as
+            # _write_root's cells (see the module docstring above).
+            lines.append(json.dumps({
+                "symbol": sym,
+                "decision_date": iso,
+                "skew_put_atm": 0.02 + 0.005 * i + 0.001 * month_idx * (i + 1),
+                "skew_put_call": 0.01 + 0.002 * i,
+                "contracts": [
+                    {"role": "atm", "bid": 4.0, "ask": 4.2, "mid": 4.1,
+                     "iv": 0.20 + 0.01 * i + 0.002 * month_idx * (i + 1),
+                     "volume": 100 + i},
+                    {"role": "otm_put", "mid": 2.0, "iv": 0.24 + 0.01 * i,
+                     "volume": 50 + i},
+                    {"role": "otm_call", "mid": 1.5, "iv": 0.18 + 0.01 * i,
+                     "volume": 25 + i},
+                ],
+            }))
+    samples = tmp_path / "data" / "options-iv" / "samples-tier1.jsonl"
+    samples.write_text("\n".join(lines) + "\n")
     for i, sym in enumerate(panel.symbols):
         closes = panel.closes[sym]
         opens = closes.shift(1) * (1 + 1e-4 * (i + 1))
@@ -189,7 +226,15 @@ def _write_tier1_root(tmp_path):
         ).to_parquet(cache / f"{sym}.parquet")
         pd.DataFrame(
             {"gross_profitability": [0.10 + 0.02 * i],
-             "ttm_net_income": [1e6 * (i + 1)], "book_equity": [5e6 * (i + 1)],
+             # ttm_net_income carries a per-symbol offset (not a pure (i+1)
+             # scale like assets) so roa = ni/assets is NOT identical across
+             # symbols -- a purely proportional pair here would make roa a
+             # degenerate (all-tied) cross-section and trip the sort's
+             # distinct-score guard (2026-07-09 fix 2), which is the correct
+             # behavior on a genuinely tied signal but not what this fixture
+             # means to exercise.
+             "ttm_net_income": [1e6 * (i + 1) + 5e4 * i],
+             "book_equity": [5e6 * (i + 1)],
              "shares_outstanding": [1e6], "assets": [1e7 * (i + 1)],
              "revenue_ttm": [2e7 * (i + 1)]},
             index=pd.DatetimeIndex([closes.index[0]], name="filed"),
