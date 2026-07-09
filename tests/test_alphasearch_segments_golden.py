@@ -16,8 +16,11 @@ from trading.alphasearch.spec import SIGNALS
 from trading.alphasearch.sweep import (
     SweepError,
     UniverseSpec,
+    build_leaderboard,
     discovery_trials,
+    log_trial,
     run_sweep,
+    trial_config,
     trials_journal,
 )
 
@@ -124,3 +127,35 @@ def test_options_signal_runs_on_opt_segment_but_refuses_deep_segment(tmp_path):
         )
     # All-or-nothing assembly: the refusal journaled NOTHING new.
     assert len(discovery_trials(journal)) == 1
+
+
+def _seed_trial(journal, universe: str, p: float) -> None:
+    """One hand-built discovery trial event carrying exactly the ls fields
+    build_leaderboard reads for the BH mask."""
+    log_trial(
+        journal, kind="discovery",
+        config=trial_config("mom21", universe, WINDOW), ts="t1",
+        result={"ls": {"alpha_annual_pct": 5.0, "alpha_t": 1.9, "p": p}},
+    )
+
+
+def test_bh_mask_spans_combined_journal_not_per_segment(tmp_path):
+    """Boundary construction: a segment trial at p=0.08 clears BH alone
+    (m=1: 0.08 <= 0.10) but must FAIL in the combined 5-trial journal
+    (k=1 threshold 0.10/5 = 0.02, and the p=0.5 flat trials never rescue a
+    higher k). A per-segment FDR reset would flip the combined assertion."""
+    alone = trials_journal(tmp_path / "journal-alone")
+    _seed_trial(alone, "largecap:biotech", 0.08)
+    rows, n = build_leaderboard(alone)
+    assert n == 1
+    assert rows[0].universe == "largecap:biotech" and rows[0].bh_pass
+
+    combined = trials_journal(tmp_path / "journal-combined")
+    _seed_trial(combined, "largecap:biotech", 0.08)
+    for i in range(4):
+        _seed_trial(combined, f"flat-{i}", 0.5)
+    rows, n = build_leaderboard(combined)
+    assert n == 5
+    seg = next(r for r in rows if r.universe == "largecap:biotech")
+    assert seg.p == 0.08 and not seg.bh_pass
+    assert not any(r.bh_pass for r in rows)
