@@ -513,6 +513,26 @@ the holdout stays reserved, and no live promotion path is open for this
 family until it survives realistic costs. Recorded so a future sweep doesn't
 "rediscover" illiquidity as a novel finding.
 
+**Battery pseudo-replication caveat (read post-battery promotions
+skeptically).** Checks 1-4 journal 12 new BH-counted discovery trials per
+battery run, deliberately (spec section 5.6 — no second ledger, no
+trial-hiding), but those 12 are near-duplicate re-evaluations of ONE
+already-significant effect, not 12 independent hypotheses. Piling enough
+near-duplicate, near-zero p-values from a true survivor's own battery onto
+the sorted journal can raise the BH step-up rank k faster than it raises n,
+which LOWERS the effective p-value bar for every OTHER candidate still
+waiting in the queue — the opposite of the "the bar rises as the journal
+grows" caution already documented (glossary, "Multiple testing" section,
+which only covers the demotion direction). A review pilot demonstrated this
+concretely: battery-testing the three amihud survivors (36 added battery
+trials, m=799→835) flips `droa` largecap:finance — the §11 next-best
+non-survivor, t=−3.05, p=0.0023, untouched and unre-examined — from FAIL to
+PASS at q=0.10, purely because the denominator moved under it. Consequence:
+any post-battery leaderboard promotion must be read as skeptically as a
+first-pass survivor and must earn its OWN battery + holdout before being
+trusted — it may NOT be waved through on the strength of an unrelated
+candidate's battery run.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on

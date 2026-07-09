@@ -345,7 +345,12 @@ mean reverses (Da-Liu-Schaumburg): sector-adjusted laggards bounce, leaders fade
   (`trading alphasearch robustness <signal>:<universe>`). Pre-committed
   interrogation instead of ad-hoc survivor-poking: the checks and thresholds
   were written down before any survivor was examined, so passing them can't
-  be the product of tweaking the exam after seeing the student.
+  be the product of tweaking the exam after seeing the student. Caveat: its
+  12 journaled re-evaluations are near-duplicates of ONE effect, not
+  independent hypotheses, so a battery run can pseudo-replicate its way into
+  lowering the BH bar for an UNRELATED marginal trial elsewhere on the
+  leaderboard (experiments log, §11 caveats) — read any post-battery
+  promotion as skeptically as a first-pass survivor.
 - **Sub-period halves (check 1)** — re-run the discovery evaluation on each
   half of the window (2019-01..2021-06 / 2021-07..2023-12). A real effect
   shows the same sign in both halves with |t| ≥ 1; a one-regime wonder
