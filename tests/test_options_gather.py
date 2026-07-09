@@ -17,6 +17,8 @@ import pandas as pd
 import pytest
 
 from trading.research.options_gather import (
+    FAR_MAX_DTE,
+    FAR_MIN_DTE,
     OI_PATH,
     ThetaClient,
     build_cell,
@@ -32,6 +34,7 @@ from trading.research.options_gather import (
     run_gather,
     select_bar_for_decision,
     select_expiration,
+    select_far_expiration,
     select_row_for_date,
     snap_strikes,
 )
@@ -43,26 +46,44 @@ from trading.research.options_iv import DIV_YIELD, RATE, bs_price
 class FakeClient:
     """Serves canned expirations / strikes / history from in-memory dicts.
 
-    ``history`` is keyed by (strike, right) -> list-of-bars; unknown legs return
-    an empty tape (no prints in window). Records every history call so tests can
-    assert de-duplication of collapsed strikes.
+    ``history`` (and ``open_interest``) are keyed by (strike, right) ->
+    list-of-rows, or by (expiration, strike, right) when a test needs
+    per-expiration data (the 3-tuple wins). ``strikes`` is a flat list served
+    for every expiration, or a {expiration: [strikes]} dict. Unknown legs
+    return an empty tape. Records every call so tests can assert request
+    de-duplication.
     """
 
-    def __init__(self, expirations=None, strikes=None, history=None):
+    def __init__(self, expirations=None, strikes=None, history=None, open_interest=None):
         self._expirations = expirations or []
         self._strikes = strikes or []
         self._history = history or {}
+        self._open_interest = open_interest or {}
         self.history_calls: list[tuple] = []
+        self.oi_calls: list[tuple] = []
 
     def list_expirations(self, symbol):
         return list(self._expirations)
 
     def list_strikes(self, symbol, expiration):
+        if isinstance(self._strikes, dict):
+            return list(self._strikes.get(expiration, []))
         return list(self._strikes)
 
+    @staticmethod
+    def _lookup(table, expiration, strike, right):
+        key3 = (expiration, float(strike), right)
+        if key3 in table:
+            return list(table[key3])
+        return list(table.get((float(strike), right), []))
+
     def history_eod(self, symbol, expiration, strike, right, start_date, end_date):
-        self.history_calls.append((strike, right, start_date, end_date))
-        return list(self._history.get((float(strike), right), []))
+        self.history_calls.append((float(strike), right, start_date, end_date))
+        return self._lookup(self._history, expiration, strike, right)
+
+    def history_open_interest(self, symbol, expiration, strike, right, start_date, end_date):
+        self.oi_calls.append((expiration, float(strike), right))
+        return self._lookup(self._open_interest, expiration, strike, right)
 
 
 def _bar(trade_date: str, bid: float, ask: float, close: float, created: str) -> dict:
@@ -860,3 +881,209 @@ def test_extract_open_interest_absent_or_junk_yields_no_key():
     # A vendor-SERVED zero is a real observation, kept (never fabricated, never dropped).
     assert extract_open_interest({"open_interest": 0}) == {"open_interest": 0}
     assert extract_open_interest({"open_interest": 1523.0}) == {"open_interest": 1523}
+
+
+# --- Per-leg OI enrichment (v2) ----------------------------------------------
+
+
+def _enrichment_client() -> FakeClient:
+    """The 90/100/110 cell with OI for two of the three resolved legs."""
+    dte = (date(2019, 4, 18) - date(2019, 3, 1)).days
+    t = dte / 365
+    price_c = bs_price(100.0, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    price_p = bs_price(100.0, 90.0, t, RATE, DIV_YIELD, 0.35, False)
+    price_oc = bs_price(100.0, 110.0, t, RATE, DIV_YIELD, 0.25, True)
+    history = {
+        (100.0, "C"): [_bar("2019-03-01", price_c - 0.05, price_c + 0.05, price_c, "c")],
+        (90.0, "P"): [_bar("2019-03-01", price_p - 0.02, price_p + 0.02, price_p, "c")],
+        (110.0, "C"): [_bar("2019-03-01", price_oc - 0.02, price_oc + 0.02, price_oc, "c")],
+    }
+    open_interest = {
+        (100.0, "C"): [{"date": "2019-03-01", "open_interest": 1500}],
+        (90.0, "P"): [{"date": "2019-03-01", "open_interest": 2200}],
+        # (110.0, "C") has NO OI row -> key absent on that leg.
+    }
+    return FakeClient(
+        expirations=["2019-04-18"], strikes=[90.0, 100.0, 110.0],
+        history=history, open_interest=open_interest,
+    )
+
+
+def test_gather_cell_attaches_oi_additively():
+    cell = gather_cell(_enrichment_client(), "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    assert cell is not None
+    by_role = {c["role"]: c for c in cell["contracts"]}
+    assert by_role["atm"]["open_interest"] == 1500
+    assert by_role["otm_put"]["open_interest"] == 2200
+    assert "open_interest" not in by_role["otm_call"]  # no OI row -> key ABSENT, never 0
+    # v1 fields intact on an enriched leg.
+    assert by_role["atm"]["iv"] == pytest.approx(0.30, abs=2e-3)
+    assert by_role["atm"]["volume"] is None  # _bar carries no volume; unchanged semantics
+
+
+def test_gather_cell_oi_row_on_wrong_date_yields_no_key():
+    client = _enrichment_client()
+    client._open_interest = {
+        (100.0, "C"): [{"date": "2019-02-25", "open_interest": 999}],  # not the bar's date
+    }
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    by_role = {c["role"]: c for c in cell["contracts"]}
+    assert "open_interest" not in by_role["atm"]
+
+
+def test_gather_cell_enrichment_failure_degrades_to_absent_keys():
+    class ExplodingEnrichment(FakeClient):
+        def history_open_interest(self, *args, **kwargs):
+            raise OSError("boom")
+
+    base = _enrichment_client()
+    client = ExplodingEnrichment(
+        expirations=["2019-04-18"], strikes=[90.0, 100.0, 110.0], history=base._history
+    )
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    assert cell is not None  # enrichment failure must never sink a good cell
+    for contract in cell["contracts"]:
+        assert "open_interest" not in contract
+        assert contract["iv"] is not None  # the quote side of the leg is untouched
+
+
+def test_gather_cell_enriches_collapsed_roles_once():
+    """otm_call collapsed onto the ATM strike: one contract, one OI request."""
+    dte = (date(2019, 4, 18) - date(2019, 3, 1)).days
+    t = dte / 365
+    price_c = bs_price(100.0, 100.0, t, RATE, DIV_YIELD, 0.30, True)
+    price_p = bs_price(100.0, 90.0, t, RATE, DIV_YIELD, 0.35, False)
+    client = FakeClient(
+        expirations=["2019-04-18"],
+        strikes=[90.0, 100.0],
+        history={
+            (100.0, "C"): [_bar("2019-03-01", price_c - 0.05, price_c + 0.05, price_c, "c")],
+            (90.0, "P"): [_bar("2019-03-01", price_p - 0.02, price_p + 0.02, price_p, "c")],
+        },
+        open_interest={(100.0, "C"): [{"date": "2019-03-01", "open_interest": 7}]},
+    )
+    gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    oi_for_atm = [c for c in client.oi_calls if c[1] == 100.0 and c[2] == "C"]
+    assert len(oi_for_atm) == 1
+
+
+# --- Far (second expiration) block (v2) --------------------------------------
+
+V1_CELL_KEYS = {
+    "symbol", "decision_date", "spot_at_decision", "target_expiration",
+    "days_to_expiry", "contracts", "skew_put_atm", "skew_put_call",
+}
+
+
+def test_select_far_expiration_picks_next_monthly_in_band():
+    decision = date(2019, 3, 1)
+    near = date(2019, 4, 18)
+    expirations = [
+        "2019-04-18",  # the near itself -> excluded (not strictly after)
+        "2019-05-10",  # a weekly in-band -> ignored (not a standard monthly)
+        "2019-05-17",  # 77 DTE monthly -> pick (the NEXT monthly after near)
+        "2019-06-21",  # 112 DTE -> above the far band
+    ]
+    assert select_far_expiration(expirations, decision, near) == date(2019, 5, 17)
+
+
+def test_select_far_expiration_none_when_band_empty_or_only_near():
+    decision = date(2019, 3, 1)
+    near = date(2019, 4, 18)
+    assert select_far_expiration(["2019-04-18"], decision, near) is None
+    # A monthly in the DTE band that IS the near expiration must not be reused:
+    # decision 2019-03-20 -> 2019-05-17 = 58 DTE (in 55..90) but == near.
+    assert (
+        select_far_expiration(["2019-05-17", "2019-06-21"], date(2019, 3, 20), date(2019, 5, 17))
+        is None  # 2019-06-21 is 93 DTE, above the band
+    )
+
+
+def _near_far_client() -> FakeClient:
+    """Near 2019-04-18 and far 2019-05-17 both with data, priced at their own
+    tenors so the far ATM IV (0.28) is distinguishable from the near (0.30)."""
+    decision = date(2019, 3, 1)
+    t_near = (date(2019, 4, 18) - decision).days / 365
+    t_far = (date(2019, 5, 17) - decision).days / 365
+    near_c = bs_price(100.0, 100.0, t_near, RATE, DIV_YIELD, 0.30, True)
+    near_p = bs_price(100.0, 90.0, t_near, RATE, DIV_YIELD, 0.35, False)
+    far_c = bs_price(100.0, 100.0, t_far, RATE, DIV_YIELD, 0.28, True)
+    far_p = bs_price(100.0, 90.0, t_far, RATE, DIV_YIELD, 0.33, False)
+    history = {
+        ("2019-04-18", 100.0, "C"): [_bar("2019-03-01", near_c - 0.05, near_c + 0.05, near_c, "c")],
+        ("2019-04-18", 90.0, "P"): [_bar("2019-03-01", near_p - 0.02, near_p + 0.02, near_p, "c")],
+        ("2019-05-17", 100.0, "C"): [_bar("2019-03-01", far_c - 0.05, far_c + 0.05, far_c, "c")],
+        ("2019-05-17", 90.0, "P"): [_bar("2019-03-01", far_p - 0.02, far_p + 0.02, far_p, "c")],
+    }
+    open_interest = {
+        ("2019-05-17", 100.0, "C"): [{"date": "2019-03-01", "open_interest": 640}],
+    }
+    return FakeClient(
+        expirations=["2019-04-18", "2019-05-17"],
+        strikes=[90.0, 100.0],
+        history=history,
+        open_interest=open_interest,
+    )
+
+
+def test_gather_cell_composes_near_plus_far_blocks():
+    cell = gather_cell(_near_far_client(), "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None
+    assert set(cell) == V1_CELL_KEYS | {"far"}  # far is the ONLY new top-level key
+    far = cell["far"]
+    assert far["target_expiration"] == "2019-05-17"
+    assert far["days_to_expiry"] == (date(2019, 5, 17) - date(2019, 3, 1)).days
+    assert FAR_MIN_DTE <= far["days_to_expiry"] <= FAR_MAX_DTE
+    far_by_role = {c["role"]: c for c in far["contracts"]}
+    assert far_by_role["atm"]["iv"] == pytest.approx(0.28, abs=3e-3)  # far tenor, own IV
+    assert far_by_role["atm"]["open_interest"] == 640  # far legs are enriched too
+    # Near block untouched by the far gather.
+    near_by_role = {c["role"]: c for c in cell["contracts"]}
+    assert near_by_role["atm"]["iv"] == pytest.approx(0.30, abs=3e-3)
+    assert cell["target_expiration"] == "2019-04-18"
+
+
+def test_gather_cell_far_absent_when_no_far_monthly():
+    client = _near_far_client()
+    client._expirations = ["2019-04-18"]  # nothing after the near monthly
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None
+    assert "far" not in cell  # absent, not null/empty
+    assert set(cell) == V1_CELL_KEYS  # bit-for-bit v1 shape
+
+
+def test_gather_cell_far_legs_dataless_drops_far_only():
+    client = _near_far_client()
+    client._history = {
+        k: v for k, v in client._history.items() if k[0] == "2019-04-18"
+    }  # far expiration listed but its whole tape is empty
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None
+    assert "far" not in cell
+
+
+def test_gather_cell_far_exception_drops_block_only():
+    class FarExploding(FakeClient):
+        def list_strikes(self, symbol, expiration):
+            if expiration == "2019-05-17":
+                raise OSError("terminal hiccup on the far ladder")
+            return super().list_strikes(symbol, expiration)
+
+    base = _near_far_client()
+    client = FarExploding(
+        expirations=["2019-04-18", "2019-05-17"],
+        strikes=[90.0, 100.0],
+        history=base._history,
+    )
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0)
+    assert cell is not None  # near cell survives
+    assert "far" not in cell
+
+
+def test_gather_cell_include_far_false_spends_no_far_requests():
+    client = _near_far_client()
+    cell = gather_cell(client, "AAA", date(2019, 3, 1), 100.0, include_far=False)
+    assert "far" not in cell
+    # Only the near walk's probes happened: (100,C) + (90,P); the otm_call walk
+    # reuses the cached (100,C). Far would have added two more history calls.
+    assert len(client.history_calls) == 2

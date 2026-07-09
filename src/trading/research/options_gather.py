@@ -89,7 +89,7 @@ QUOTE_WINDOW_DAYS = 3
 # are present in the Tiingo cache are candidates, ranked by dollar volume.
 UNIVERSE_MEMBERSHIP_WINDOW = ("2019-01-01", "2026-12-31")
 
-# --- v2 enrichment (open interest) -------------------------------------------
+# --- v2 enrichment (open interest, far expiration) ---------------------------
 # Endpoint path VERIFIED against the live Standard-tier terminal (options-gather-v2
 # plan Task 1 discovery, 2026-07): the EOD tape itself carries no inline
 # open_interest field, but this dedicated route serves it (HTTP 200, one row/day,
@@ -101,6 +101,11 @@ OI_PATH = "/v3/option/history/open_interest"
 # Contract keys the gather may ADD to a leg; only extractor-vetted values ever
 # carry them (absent field -> absent key, never 0).
 _ENRICHMENT_KEYS = ("open_interest",)
+# Far (term-structure) leg: the NEXT standard monthly after the near target.
+# Near sits 25..55 DTE, so the following monthly lands ~55..85; 90 caps a
+# straggler month. Spec: docs/superpowers/specs/2026-07-09-options-gather-v2-design.md.
+FAR_MIN_DTE = 55
+FAR_MAX_DTE = 90
 
 
 # --- HTTP client -----------------------------------------------------------
@@ -425,6 +430,34 @@ def select_expiration(
     return min(pool, key=lambda d: (abs((d - target).days), d))
 
 
+def select_far_expiration(
+    expirations: list[str | date],
+    decision_date: date,
+    near_expiration: date,
+    *,
+    min_dte: int = FAR_MIN_DTE,
+    max_dte: int = FAR_MAX_DTE,
+) -> date | None:
+    """The NEXT standard monthly strictly after ``near_expiration`` inside the
+    far DTE band ``[min_dte, max_dte]``, or None. "Next" means EARLIEST -- the
+    term-structure far leg is the adjacent monthly, so there is no
+    target-distance tiebreak: the first in-band monthly after the near one
+    wins, deterministically.
+    """
+    candidates: list[date] = []
+    for raw in expirations:
+        d = _as_date(raw)
+        if not is_standard_monthly(d):
+            continue
+        if d <= near_expiration:
+            continue
+        if min_dte <= (d - decision_date).days <= max_dte:
+            candidates.append(d)
+    if len(candidates) == 0:
+        return None
+    return min(candidates)
+
+
 def snap_strikes(
     strikes: list[float],
     spot: float,
@@ -548,6 +581,48 @@ def extract_open_interest(row: dict | None) -> dict:
     return {"open_interest": int(number)}
 
 
+def _enrich_bar(
+    client: OptionsClient,
+    symbol: str,
+    exp_str: str,
+    strike: float,
+    right: str,
+    bar: dict,
+    start: str,
+    end: str,
+) -> dict:
+    """A COPY of the leg's decision bar carrying the additive ``open_interest``
+    key when available.
+
+    Order of truth: a field already ON the EOD bar (some terminal builds serve
+    open_interest inline) wins without spending a request; otherwise the
+    dedicated endpoint is queried and the row matching the bar's OWN trade date
+    is extracted. Any failure degrades to key-absent -- enrichment must never
+    sink a leg that already has a usable quote. (No greeks path exists: both
+    greeks endpoints 404 on this tier -- Task 1 discovery -- so only OI is
+    fetched here.)
+    """
+    enriched = dict(bar)
+    for key in _ENRICHMENT_KEYS:  # only extractor-vetted values may carry these keys
+        enriched.pop(key, None)
+    trade_date = row_trade_date(bar)
+    if trade_date is None:
+        return enriched
+
+    oi = extract_open_interest(bar)  # inline-on-EOD wins, zero extra requests
+    if len(oi) == 0:
+        try:
+            rows = client.history_open_interest(symbol, exp_str, strike, right, start, end)
+            oi = extract_open_interest(select_row_for_date(rows, trade_date))
+        except Exception:  # noqa: BLE001 -- degrade to absent, never sink the leg
+            log.warning(
+                "open-interest fetch failed %s %s %s%s -- key absent",
+                symbol, exp_str, strike, right,
+            )
+    enriched.update(oi)
+    return enriched
+
+
 # --- Cell assembly ---------------------------------------------------------
 
 
@@ -568,8 +643,7 @@ _ROLE_IS_CALL = {"atm": True, "otm_put": False, "otm_call": True}
 _ROLE_TYPE = {"atm": "call", "otm_put": "put", "otm_call": "call"}
 
 
-def build_cell(
-    symbol: str,
+def _contracts_and_skews(
     decision_date: date,
     spot: float,
     expiration: date,
@@ -577,16 +651,12 @@ def build_cell(
     *,
     rate: float = RATE,
     div_yield: float = DIV_YIELD,
-) -> dict | None:
-    """Assemble one samples.jsonl cell from the gathered legs.
+) -> tuple[list[dict], float | None, float | None]:
+    """Contracts + (skew_put_atm, skew_put_call) for one expiration's legs.
 
-    ``legs`` maps each role to ``(strike, bar_or_None)``. For every role that
-    produced a bar we compute ``mid`` and invert it for ``iv`` (None when the
-    quote is uninvertible -- ``implied_vol`` handles that). A role with no bar is
-    omitted from ``contracts``. The cell is DROPPED (returns None) when the ATM
-    or OTM-put leg is missing, because there is no usable primary skew signal
-    without both. Skews are computed from the mid-IVs, None when a leg is absent
-    or its IV is None.
+    Factored out of build_cell so the far block (v2) reuses the identical
+    leg->contract semantics: mid from bid/ask, IV from mid, collapsed-call
+    drop, and the additive v2 enrichment keys copied only when present.
     """
     # days_to_expiry (hence t_years) is measured from the DECISION date for every
     # leg, even when a leg's quote fell back to a trade date up to 3 days prior.
@@ -625,41 +695,99 @@ def build_cell(
             else None
         )
         iv_by_role[role] = iv
-        contracts.append(
-            {
-                "role": role,
-                "type": _ROLE_TYPE[role],
-                "strike": float(strike),
-                "bid": bid,
-                "ask": ask,
-                "close": close,
-                "mid": mid,
-                "iv": iv,
-                # Flow proxy: EOD contract volume + trade count on the decision
-                # bar. Only these 3 contracts (ATM / OTM put / OTM call), NOT the
-                # full chain, so it is a THIN put-vs-call demand proxy -- enough
-                # to test "are people piling into the calls?" without a chain pull.
-                "volume": bar.get("volume"),
-                "count": bar.get("count"),
-            }
-        )
-
-    present = {c["role"] for c in contracts}
-    if not {"atm", "otm_put"} <= present:
-        return None  # no ATM or OTM-put leg -> no primary signal, skip the cell
+        contract = {
+            "role": role,
+            "type": _ROLE_TYPE[role],
+            "strike": float(strike),
+            "bid": bid,
+            "ask": ask,
+            "close": close,
+            "mid": mid,
+            "iv": iv,
+            # Flow proxy: EOD contract volume + trade count on the decision
+            # bar. Only these 3 contracts (ATM / OTM put / OTM call), NOT the
+            # full chain, so it is a THIN put-vs-call demand proxy -- enough
+            # to test "are people piling into the calls?" without a chain pull.
+            "volume": bar.get("volume"),
+            "count": bar.get("count"),
+        }
+        # v2 additive enrichment: keys ride only when the gather vetted a
+        # served value onto the bar (absent field -> absent key, never 0).
+        for key in _ENRICHMENT_KEYS:
+            if key in bar:
+                contract[key] = bar[key]
+        contracts.append(contract)
 
     iv_atm = iv_by_role.get("atm")
     iv_put = iv_by_role.get("otm_put")
     iv_call = iv_by_role.get("otm_call")
     skew_put_atm = iv_put - iv_atm if (iv_put is not None and iv_atm is not None) else None
     skew_put_call = iv_put - iv_call if (iv_put is not None and iv_call is not None) else None
+    return contracts, skew_put_atm, skew_put_call
+
+
+def build_cell(
+    symbol: str,
+    decision_date: date,
+    spot: float,
+    expiration: date,
+    legs: dict[str, tuple[float, dict | None]],
+    *,
+    rate: float = RATE,
+    div_yield: float = DIV_YIELD,
+) -> dict | None:
+    """Assemble one samples.jsonl cell from the gathered legs.
+
+    ``legs`` maps each role to ``(strike, bar_or_None)``. For every role that
+    produced a bar we compute ``mid`` and invert it for ``iv`` (None when the
+    quote is uninvertible -- ``implied_vol`` handles that). A role with no bar is
+    omitted from ``contracts``. The cell is DROPPED (returns None) when the ATM
+    or OTM-put leg is missing, because there is no usable primary skew signal
+    without both. Skews are computed from the mid-IVs, None when a leg is absent
+    or its IV is None. The cell's top-level shape is the v1 schema exactly;
+    v2 enrichment (open interest) rides additively inside the contracts.
+    """
+    contracts, skew_put_atm, skew_put_call = _contracts_and_skews(
+        decision_date, spot, expiration, legs, rate=rate, div_yield=div_yield
+    )
+    present = {c["role"] for c in contracts}
+    if not {"atm", "otm_put"} <= present:
+        return None  # no ATM or OTM-put leg -> no primary signal, skip the cell
 
     return {
         "symbol": symbol,
         "decision_date": decision_date.isoformat(),
         "spot_at_decision": spot,
         "target_expiration": expiration.isoformat(),
-        "days_to_expiry": days_to_expiry,
+        "days_to_expiry": (expiration - decision_date).days,
+        "contracts": contracts,
+        "skew_put_atm": skew_put_atm,
+        "skew_put_call": skew_put_call,
+    }
+
+
+def build_far_block(
+    decision_date: date,
+    spot: float,
+    expiration: date,
+    legs: dict[str, tuple[float, dict | None]],
+    *,
+    rate: float = RATE,
+    div_yield: float = DIV_YIELD,
+) -> dict | None:
+    """The additive ``far`` block: the same contract schema as the near legs,
+    at the far monthly. Same ATM+OTM-put requirement as the near cell -- a far
+    block without its primary legs carries no usable term-structure reading,
+    so it is dropped (the CELL stays valid; see gather_cell)."""
+    contracts, skew_put_atm, skew_put_call = _contracts_and_skews(
+        decision_date, spot, expiration, legs, rate=rate, div_yield=div_yield
+    )
+    present = {c["role"] for c in contracts}
+    if not {"atm", "otm_put"} <= present:
+        return None
+    return {
+        "target_expiration": expiration.isoformat(),
+        "days_to_expiry": (expiration - decision_date).days,
         "contracts": contracts,
         "skew_put_atm": skew_put_atm,
         "skew_put_call": skew_put_call,
@@ -669,57 +797,30 @@ def build_cell(
 # --- Per-cell orchestration ------------------------------------------------
 
 
-def gather_cell(
+def _resolve_legs(
     client: OptionsClient,
     symbol: str,
+    exp_str: str,
     decision_date: date,
     spot: float,
+    strikes: list[float],
     *,
-    target_dte: int = TARGET_DTE,
-    min_dte: int = MIN_DTE,
-    max_dte: int = MAX_DTE,
-    put_mult: float = OTM_PUT_MULT,
-    call_mult: float = OTM_CALL_MULT,
-    window_days: int = QUOTE_WINDOW_DAYS,
-    max_candidates: int = MAX_STRIKE_CANDIDATES,
-    rate: float = RATE,
-    div_yield: float = DIV_YIELD,
-) -> dict | None:
-    """Gather one (symbol, decision-date) cell end to end.
+    put_mult: float,
+    call_mult: float,
+    window_days: int,
+    max_candidates: int,
+) -> dict[str, tuple[float, dict]]:
+    """The nearest-strike-with-data walk for ONE expiration (near or far).
 
-    Selects the target expiration, then RESOLVES each role to the nearest strike
-    that actually returns a bar: a listed strike can be dataless (ThetaData lists
-    half-dollar strikes whose /history/eod is empty while the neighbouring whole
-    strike has data), so each role walks its ladder outward from the nominal
-    target -- ``spot`` for ATM, ``put_mult*spot`` / ``call_mult*spot`` for the OTM
-    legs -- up to ``max_candidates`` strikes, taking the first that yields a
-    usable bar. Every ``(strike, right)`` probe is cached for the cell, so a
-    strike probed by one role's walk is reused (never refetched) if another
-    role's walk reaches it. The RESOLVED strike (the one with data) is what the
-    stored contract carries. Returns the cell dict, or None (with a logged
-    reason) when the cell should be skipped.
+    Identical semantics to the v1 gather_cell walk: each role walks outward
+    from its nominal target to the nearest strike that actually returns a
+    bar (up to ``max_candidates``), and every (strike, right) probe is cached
+    so no contract is fetched twice within the cell. Resolved legs are then
+    ENRICHED (open interest) exactly once per distinct (strike, right) --
+    collapsed roles share the enriched bar.
     """
-    expiration = select_expiration(
-        client.list_expirations(symbol),
-        decision_date,
-        target_dte=target_dte,
-        min_dte=min_dte,
-        max_dte=max_dte,
-    )
-    if expiration is None:
-        log.info("skip %s %s: no standard monthly expiration in window", symbol, decision_date)
-        return None
-
-    exp_str = expiration.isoformat()
-    strikes = client.list_strikes(symbol, exp_str)
-    if not strikes:
-        log.info("skip %s %s: empty strike ladder for %s", symbol, decision_date, exp_str)
-        return None
-
     start = (decision_date - timedelta(days=window_days)).isoformat()
     end = (decision_date + timedelta(days=window_days)).isoformat()
-    # (strike, is_call) -> selected bar (or None). Shared across every role's walk
-    # so a probe is spent at most once per cell.
     bar_cache: dict[tuple[float, bool], dict | None] = {}
 
     def resolve_leg(target: float, is_call: bool) -> tuple[float, dict] | None:
@@ -741,17 +842,142 @@ def gather_cell(
         "otm_put": (spot * put_mult, _ROLE_IS_CALL["otm_put"]),
         "otm_call": (spot * call_mult, _ROLE_IS_CALL["otm_call"]),
     }
-    legs: dict[str, tuple[float, dict | None]] = {}
+    resolved: dict[str, tuple[float, dict]] = {}
     for role, (target, is_call) in role_targets.items():
-        resolved = resolve_leg(target, is_call)
-        if resolved is not None:
-            legs[role] = resolved  # (resolved strike, bar)
+        leg = resolve_leg(target, is_call)
+        if leg is not None:
+            resolved[role] = leg
 
+    enriched_cache: dict[tuple[float, bool], dict] = {}
+    legs: dict[str, tuple[float, dict]] = {}
+    for role, (strike, bar) in resolved.items():
+        is_call = _ROLE_IS_CALL[role]
+        key = (strike, is_call)
+        if key not in enriched_cache:
+            right = "C" if is_call else "P"
+            enriched_cache[key] = _enrich_bar(
+                client, symbol, exp_str, strike, right, bar, start, end
+            )
+        legs[role] = (strike, enriched_cache[key])
+    return legs
+
+
+def _gather_far_block(
+    client: OptionsClient,
+    symbol: str,
+    decision_date: date,
+    spot: float,
+    expirations: list[str],
+    near_expiration: date,
+    *,
+    far_min_dte: int,
+    far_max_dte: int,
+    put_mult: float,
+    call_mult: float,
+    window_days: int,
+    max_candidates: int,
+    rate: float,
+    div_yield: float,
+) -> dict | None:
+    """Resolve + build the far block; None (never raise upward from here for
+    data-absence reasons) when the far monthly is missing, its ladder is
+    empty, or its primary legs are dataless."""
+    far_expiration = select_far_expiration(
+        expirations, decision_date, near_expiration, min_dte=far_min_dte, max_dte=far_max_dte
+    )
+    if far_expiration is None:
+        return None
+    far_str = far_expiration.isoformat()
+    strikes = client.list_strikes(symbol, far_str)
+    if len(strikes) == 0:
+        return None
+    legs = _resolve_legs(
+        client, symbol, far_str, decision_date, spot, strikes,
+        put_mult=put_mult, call_mult=call_mult, window_days=window_days,
+        max_candidates=max_candidates,
+    )
+    return build_far_block(
+        decision_date, spot, far_expiration, legs, rate=rate, div_yield=div_yield
+    )
+
+
+def gather_cell(
+    client: OptionsClient,
+    symbol: str,
+    decision_date: date,
+    spot: float,
+    *,
+    target_dte: int = TARGET_DTE,
+    min_dte: int = MIN_DTE,
+    max_dte: int = MAX_DTE,
+    put_mult: float = OTM_PUT_MULT,
+    call_mult: float = OTM_CALL_MULT,
+    window_days: int = QUOTE_WINDOW_DAYS,
+    max_candidates: int = MAX_STRIKE_CANDIDATES,
+    rate: float = RATE,
+    div_yield: float = DIV_YIELD,
+    far_min_dte: int = FAR_MIN_DTE,
+    far_max_dte: int = FAR_MAX_DTE,
+    include_far: bool = True,
+) -> dict | None:
+    """Gather one (symbol, decision-date) cell end to end.
+
+    Selects the target expiration, resolves each role to the nearest strike
+    that actually returns a bar (see _resolve_legs), enriches the resolved
+    legs with open interest (additive; absent on any failure), and assembles
+    the v1-shaped cell. A second (far) expiration block -- the next standard
+    monthly after the near target, DTE 55..90 -- is gathered with the
+    identical walk and attached additively as ``cell["far"]``. A
+    missing/dataless/failing far expiration drops the far block ONLY; the
+    near cell stays valid. Returns the cell dict, or None (with a logged
+    reason) when the cell should be skipped.
+    """
+    expirations = client.list_expirations(symbol)
+    expiration = select_expiration(
+        expirations,
+        decision_date,
+        target_dte=target_dte,
+        min_dte=min_dte,
+        max_dte=max_dte,
+    )
+    if expiration is None:
+        log.info("skip %s %s: no standard monthly expiration in window", symbol, decision_date)
+        return None
+
+    exp_str = expiration.isoformat()
+    strikes = client.list_strikes(symbol, exp_str)
+    if len(strikes) == 0:
+        log.info("skip %s %s: empty strike ladder for %s", symbol, decision_date, exp_str)
+        return None
+
+    legs = _resolve_legs(
+        client, symbol, exp_str, decision_date, spot, strikes,
+        put_mult=put_mult, call_mult=call_mult, window_days=window_days,
+        max_candidates=max_candidates,
+    )
     cell = build_cell(
         symbol, decision_date, spot, expiration, legs, rate=rate, div_yield=div_yield
     )
     if cell is None:
         log.info("skip %s %s: ATM or OTM-put leg not gathered", symbol, decision_date)
+        return None
+
+    if include_far:
+        far = None
+        try:
+            far = _gather_far_block(
+                client, symbol, decision_date, spot, expirations, expiration,
+                far_min_dte=far_min_dte, far_max_dte=far_max_dte,
+                put_mult=put_mult, call_mult=call_mult, window_days=window_days,
+                max_candidates=max_candidates, rate=rate, div_yield=div_yield,
+            )
+        except Exception:  # noqa: BLE001 -- far failure drops the BLOCK only
+            log.warning(
+                "far block failed for %s %s -- dropped, near cell kept",
+                symbol, decision_date, exc_info=True,
+            )
+        if far is not None:
+            cell["far"] = far
     return cell
 
 
