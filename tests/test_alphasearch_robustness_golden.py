@@ -131,6 +131,41 @@ def test_golden_battery_verdict_gates_a_real_holdout(tmp_path):
     assert all(e.get("kind") != "holdout" for e in journal.events())
 
 
+def test_run_battery_refuses_on_cache_drift_before_any_journaling(tmp_path):
+    """Fix (final-review): data caches are gitignored/mutable, unlike the
+    journal. If one cached parquet changes after the discovery sweep --
+    append a bar, edit a close -- the rebuilt panel can produce a full-window
+    alpha that no longer matches the journaled discovery baseline every
+    retention check divides by, WITHOUT portfolio_sort ever raising SortError
+    (the cross-section is still plenty large). run_battery must catch that
+    drift itself and refuse before checks 1-4 journal a single battery
+    trial -- otherwise a hash-replace re-run becomes a free re-roll channel
+    for a marginal candidate."""
+    uspec = _write_universe(tmp_path)
+    journal = trials_journal(tmp_path / "journal")
+    factors = make_factors()
+    run_sweep({uspec.name: uspec}, journal, factors, ts="t0",
+              signals={"mom21": SIGNALS["mom21"]}, window=WINDOW)
+    events_before = len(list(journal.events()))
+
+    # Mutate one symbol's cached bars: bump a single mid-window close. A
+    # uniform rescale of the whole series would cancel out of pct_change()
+    # entirely, so this edits one bar in place instead -- a real single-day
+    # data error, not a scale change. The cross-section stays well above
+    # MIN_NAMES (39 other names untouched), so portfolio_sort succeeds --
+    # the drift must be caught by comparing alphas, not by a SortError.
+    victim = uspec.cache_dir / f"{uspec.symbols[0]}.parquet"
+    frame = pd.read_parquet(victim)
+    mid = len(frame) // 2
+    frame.iloc[mid, frame.columns.get_loc("close")] *= 1.2
+    frame.to_parquet(victim)
+
+    with pytest.raises(SweepError, match="caches drifted"):
+        run_battery(uspec, journal, factors, "t2", "mom21",
+                    discovery_window=WINDOW)
+    assert len(list(journal.events())) == events_before  # journaled NOTHING
+
+
 def test_run_battery_refuses_stale_factors_before_any_journaling(tmp_path):
     """Regression test (controller-approved Task 5 carry-over): factors
     ending mid-window must refuse in run_battery's own pre-check (spec

@@ -567,14 +567,18 @@ def run_battery(
     """Run the frozen battery on ONE current BH survivor (spec section 3).
 
     Refuses non-survivors BEFORE journaling anything (require_survivor).
-    Checks 1-4 journal battery-tagged, BH-counted discovery trials; checks
-    5-7 and the cost/capacity analysis are arithmetic on a locally
-    recomputed full-window sort (identical config to the journaled discovery
-    trial -- deliberately NOT journaled again). The verdict is one
-    kind="battery" event per (signal, universe); re-runs replace by config
-    hash. The promotion rule (frozen): eligible iff checks 1-6 all pass AND
-    the 30 bps cost row retains t >= ELIGIBLE_MIN_COST_T. Never touches
-    holdout state."""
+    Also refuses, before journaling anything, if the recomputed full-window
+    alpha has drifted from the journaled discovery baseline: data caches are
+    gitignored/mutable, so a stale or edited cache would otherwise mix a
+    fresh numerator into every retention denominator below without ever
+    raising SortError. Checks 1-4 journal battery-tagged, BH-counted
+    discovery trials; checks 5-7 and the cost/capacity analysis are
+    arithmetic on a locally recomputed full-window sort (identical config to
+    the journaled discovery trial -- deliberately NOT journaled again). The
+    verdict is one kind="battery" event per (signal, universe); re-runs
+    replace by config hash. The promotion rule (frozen): eligible iff checks
+    1-6 all pass AND the 30 bps cost row retains t >= ELIGIBLE_MIN_COST_T.
+    Never touches holdout state."""
     params = _hashed_params(quantiles, tercile_below, min_names)
     discovery = require_survivor(journal, signal_name, uspec.name,
                                  discovery_window, params)
@@ -596,11 +600,11 @@ def run_battery(
         quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
         tag=f"{signal_name}:{uspec.name}",
     )
-    checks = [check_subperiods(ctx), check_subsets(ctx), check_jitter(ctx),
-              check_offset(ctx)]
-    # Full-window sort recomputed ONCE for checks 5-6 and cost/capacity --
-    # same config as the journaled discovery trial, so journaling it again
-    # would only append a duplicate; spec: checks 5-7 journal no new trials.
+    # Full-window sort recomputed ONCE, reused for checks 5-6 and cost/
+    # capacity -- same config as the journaled discovery trial, so journaling
+    # it again would only append a duplicate; spec: checks 5-7 journal no new
+    # trials. Computed HERE, before checks 1-4 journal a single battery
+    # trial, so the drift guard right below can refuse pre-touch.
     try:
         sort = portfolio_sort(
             panel, spec, panel.decision_dates(start, end), end,
@@ -615,6 +619,26 @@ def run_battery(
             f"the journaled discovery trial is clean; re-run the sweep before "
             f"the battery"
         ) from exc
+    # Data caches are gitignored/mutable (unlike the journal), so they can
+    # drift between the discovery sweep and this battery run WITHOUT the
+    # sort above ever raising -- e.g. one appended or edited bar -- silently
+    # mixing a fresh numerator into every retention denominator below, which
+    # is anchored to the journaled `full_alpha` baseline. Re-derive that same
+    # alpha from the sort just computed and refuse, before checks 1-4
+    # journal a single battery trial (a hash-replace re-run would otherwise
+    # be a free re-roll channel for marginal checks), if it has moved beyond
+    # floating-point noise: identical data must reproduce to within rel
+    # 1e-6; a real drift is orders of magnitude larger.
+    recomputed_alpha = evaluate_alpha(
+        sort.ls, factors, self_financing=True
+    ).alpha_annual_pct
+    if not math.isclose(recomputed_alpha, full_alpha, rel_tol=1e-6):
+        raise SweepError(
+            "caches drifted since the discovery sweep; re-run the sweep for "
+            "this trial before running its battery"
+        )
+    checks = [check_subperiods(ctx), check_subsets(ctx), check_jitter(ctx),
+              check_offset(ctx)]
     checks.append(check_name_concentration(ctx, sort))
     checks.append(check_month_concentration(sort.ls))
     proxy = factor_proxy_flag(discovery.get("ls") or {})
