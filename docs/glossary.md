@@ -260,3 +260,63 @@ sectors plus the fine industries biotech and banks, which deliberately overlap t
 parents. Each segment is an ordinary sweep universe, so every (signal, segment) pair is
 an honestly-counted extra trial — the BH bar spans flat + segment trials in the one
 journal, meaning segmentation *raises* the significance bar; it can never lower it.
+
+## The anomaly zoo (Tier-1 signal batch)
+
+**Momentum 12−2** — total return from 12 months ago to 1 month ago, skipping the
+most recent month because short-term reversal contaminates it (Jegadeesh-Titman).
+The canonical UMD construction.
+
+**Overnight return persistence** — split each day into overnight (prev close→open)
+and intraday; the overnight component carries persistent, clientele-driven
+momentum of its own (Lou-Polk-Skouras).
+
+**Parkinson volatility** — a range-based vol estimator using ln(High/Low)²/(4·ln 2);
+~5x more statistically efficient per day than close-to-close vol. Feeds the
+low-vol anomaly.
+
+**Idiosyncratic volatility (IVOL) puzzle** — the std of a stock's daily FF3
+regression residuals; HIGH-ivol stocks anomalously UNDERPERFORM
+(Ang-Hodrick-Xing-Zhang), the opposite of risk-reward intuition.
+
+**MAX / lottery demand** — the mean of a stock's few biggest recent daily gains;
+lottery-seekers overpay for jackpot-shaped names, which then underperform
+(Bali-Cakici-Whitelaw).
+
+**Betting against beta (BAB)** — leverage-constrained investors overpay for high-β
+stocks, flattening the security market line; low-β outperforms per unit of risk
+(Frazzini-Pedersen).
+
+**Amihud illiquidity** — mean |return| / dollar volume: price impact per dollar
+traded. Illiquid names earn a premium for being hard to trade.
+
+**High-volume return premium** — unusually high recent trading volume (vs its own
+baseline) attracts attention and predicts higher returns
+(Gervais-Kaniel-Mingelgrin).
+
+**Asset growth / investment factor** — firms that grow total assets fastest
+subsequently underperform (Cooper-Gulen-Schill); empire-building is expensive.
+The CMA factor's characteristic cousin.
+
+**Net share issuance** — split-adjusted growth in shares outstanding; issuers
+underperform, buyback firms outperform (Pontiff-Woodgate) — management times the
+market with its own stock.
+
+**Fundamental momentum (ΔROA)** — the year-over-year CHANGE in profitability;
+improving firms keep outperforming beyond what the level explains.
+
+**Option-to-stock volume ratio (O/S)** — option dollar volume relative to stock
+dollar volume; high O/S marks informed (disproportionately bearish) positioning
+ahead of returns (Johnson-So).
+
+**Volatility smirk** — OTM-put implied vol above ATM implied vol; a steep or
+steepening smirk means crash protection is being bid, predicting negative
+returns (Xing-Zhang-Zhao). IV *innovations* (An-Ang-Bali-Cakici) time-difference
+the level: rising implied vol = rising perceived risk.
+
+**Industry momentum** — a sector's own trailing return, assigned to every member;
+industries trend (Moskowitz-Grinblatt), and much of stock momentum is industry
+momentum.
+
+**Within-industry reversal** — a stock's SHORT-term return relative to its sector
+mean reverses (Da-Liu-Schaumburg): sector-adjusted laggards bounce, leaders fade.

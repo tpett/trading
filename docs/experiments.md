@@ -398,6 +398,23 @@ refusal, not a bug — deep pools have no options or fundamentals store, so the
 cross-product check catches the mismatch before any trial is journaled; the
 CLI prints an actionable `hint:` line naming this same two-pass split.
 
+**Tier-1 signal batch registered 2026-07-09, pre-sweep.** 21 new signals
+(9 price/volume incl. `mom_12_2`/`overnight`/`park_vol`/`ivol`/`max5`/`beta`/
+`amihud`/`vol_trend`/`div_yield`, 5 fundamentals incl. the 300-calendar-day
+YoY filing rule, 5 options incl. the option-volume-gated `cp_vol`/`osv`, 2
+industry-relative over the 10 frozen SEGMENTS sectors) are frozen in
+`docs/superpowers/specs/2026-07-09-tier1-signal-batch-design.md` §2 —
+formulas, windows, minimum-observation floors, and signs pre-registered
+BEFORE any trial ran. The pre-registered discovery sweep (that spec §4: all
+21 × every compatible universe, BH q=0.10 across the whole journal including
+the 238 existing trials) has NOT run as of this registration; its results get
+their own entry. Includes one pre-registered prospective amendment to Piece 2
+§3.2: deep-pool segments carry `fundamentals_dir` when the local store exists
+(no fundamentals segment trial predates it, so nothing is spent). New terms
+in the glossary ("The anomaly zoo" section). NOTE: the largecap bar cache is
+the legacy narrow schema (no `div_cash`/`split_factor`), so `div_yield` and
+`net_issuance` journal honest error trials there until it is re-backfilled.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
