@@ -1813,13 +1813,10 @@ ONE terminal per account; a second gets "Invalid session ID". Clear both ports f
 
 ```bash
 ssh mac-m1 'lsof -ti :25503 :25520 | xargs kill 2>/dev/null; sleep 2; lsof -i :25503 -i :25520 || echo PORTS-CLEAR'
-# Find the exact key name/value (41 chars WITH underscores -- never strip them):
-ssh mac-m1 'grep -i theta ~/.config/trading/config.toml'
-# Launch the DOWNLOADED jar (NOT the bootstrap ThetaTerminalv3.jar -- it 401s on the mini):
-ssh mac-m1 'KEY=$(grep -i thetadata_api_key ~/.config/trading/config.toml | cut -d\" -f2); \
-  nohup env THETADATA_API_KEY="$KEY" /opt/homebrew/opt/openjdk/bin/java \
-  -jar ~/thetadata/202607071.jar > ~/thetadata/terminal.log 2>&1 & sleep 20; \
-  tail -5 ~/thetadata/terminal.log'
+# Extract the key (41 chars WITH underscores -- never strip them):
+KEY=$(ssh mac-m1 'grep theta_data_api_key ~/.config/trading/config.toml | cut -d'"'"'"' -f2')
+# Launch from ~/thetadata to keep terminal writes writable (launching elsewhere tries to write /Users/config.toml and dies):
+ssh mac-m1 'cd ~/thetadata && nohup /opt/homebrew/opt/openjdk/bin/java -jar 202607071.jar --api-key "'"$KEY"'" > ~/thetadata/terminal.log 2>&1 & sleep 20; tail -5 ~/thetadata/terminal.log'
 ```
 
 - [ ] **R3: Readiness check**
@@ -1848,9 +1845,21 @@ Interpretation (record the verdict in `docs/options-data-vendors.md`, new subsec
 - **Both 2021 queries fail but AAPL 2026-06 works** → the free stock window (~1yr) can't reach 2021 → the test is INCONCLUSIVE-BY-ENTITLEMENT; record exactly that (do not over-claim either way).
 - Either way: Tiingo remains the equity system of record.
 
-- [ ] **R6: Pin the pools and verify the raw-spot cache**
+- [ ] **R6: Pin the pools, verify Tiingo cache, and verify the raw-spot cache**
 
-The re-gather must hit the SAME pools (alphasearch trials are keyed by universe NAME). Re-running `build_universe` with a longer end-month could re-rank the top-N and shift membership — so pin symbols to exactly what v1 gathered:
+The re-gather must hit the SAME pools (alphasearch trials are keyed by universe NAME). Re-running `build_universe` with a longer end-month could re-rank the top-N and shift membership — so pin symbols to exactly what v1 gathered. First, confirm the mini's ADJUSTED Tiingo cache extends through 2026-07 (it drives the decision calendar) — else 2026 months silently produce no cells:
+
+```bash
+ssh mac-m1 'cd ~/trading && python3 -c "from trading.research.factors import TIINGO_CACHE; import polars as pl; df=pl.read_parquet(TIINGO_CACHE); print(df[\"date\"].max())"'
+```
+
+Expected: 2026-07-xx or later. If earlier, backfill before continuing:
+
+```bash
+ssh mac-m1 'cd ~/trading && ~/.local/bin/uv run python scripts/backfill_tiingo_prices.py --end-date 2026-07-31'
+```
+
+Now pin symbols to exactly what v1 gathered:
 
 ```bash
 ssh mac-m1 'cd ~/trading && python3 -c "
@@ -1869,7 +1878,7 @@ ssh mac-m1 'cd ~/trading && ~/.local/bin/uv run python scripts/backfill_options_
 
 - [ ] **R7: Launch the re-gather (both pools, SEQUENTIAL — 4-request terminal cap means never two gathers at once)**
 
-`--end-month 2026-07` implements spec §3's "2019-01..latest". Add `--skip-greeks` if R4/Task 1 discovery found no greeks endpoint.
+`--end-month 2026-07` implements spec §3's "2019-01..latest".
 
 ```bash
 ssh mac-m1 'cd ~/trading && mkdir -p state/options-iv && nohup sh -c "\
@@ -1886,14 +1895,32 @@ ssh mac-m1 'cd ~/trading && mkdir -p state/options-iv && nohup sh -c "\
 
 Notes: `--fresh` renames each file to its `.v1.jsonl` backup first (and REFUSES if a backup already exists — if a crashed v2 run must resume, re-run WITHOUT `--fresh`: the resume skip does the rest). `--limit-symbols` bypasses universe ranking entirely, which is what pins the pools.
 
-- [ ] **R8: Monitor**
+- [ ] **R8: Monitor + resume on crash**
 
 ```bash
 ssh mac-m1 'tail -5 ~/trading/state/options-iv/gather-v2.log'
 ssh mac-m1 'grep progress ~/trading/state/options-iv/gather-v2.log | tail -3'
 ```
 
-The progress lines print `done/total ... elapsed`; cells/s = done ÷ elapsed. v1 ran ~3.4 cells/s; v2 adds the far block (~2× EOD requests) plus OI (and greeks if served) per resolved leg — expect roughly 0.8–1.5 cells/s, i.e. ~2–4h per pool; budget an overnight for both. If throughput is far below that, check the terminal log for auth/rate errors. A crash: re-run the R7 command WITHOUT `--fresh` (resume skips completed cells — proven under the enriched schema by Task 5's test).
+The progress lines print `done/total ... elapsed`; cells/s = done ÷ elapsed. v1 ran ~3.4 cells/s; v2 adds the far block (~2× EOD requests) plus OI (and greeks if served) per resolved leg — expect roughly 0.8–1.5 cells/s, i.e. ~2–4h per pool; budget an overnight for both. Check the log within ~10 minutes of launch — if errors are climbing or throughput is well under 0.5 cells/s, kill the terminal, fix the issue, and resume.
+
+**On crash:** A crash during pool 1 means pool 2 never backed up — a blanket resume WITHOUT --fresh would silently append 2026 months onto the v1 midcap file and never re-gather pool 2. Resume PER POOL with conditional logic:
+
+```bash
+ssh mac-m1 'pgrep -fl gather_options_iv'
+# Must be empty; nohup survives ssh drops — a second launch double-writes.
+# For each pool, resume WITHOUT --fresh iff that pool's .v1.jsonl exists (already backed up); otherwise WITH --fresh:
+ssh mac-m1 'cd ~/trading && test -f data/options-iv/samples.v1.jsonl && \
+  nohup ~/.local/bin/uv run python scripts/gather_options_iv.py --end-month 2026-07 \
+    --limit-symbols $(cat data/options-iv/samples.symbols.txt) \
+    --out data/options-iv/samples.jsonl >> state/options-iv/gather-v2.log 2>&1 & \
+  echo "resumed pool 1 (backup exists)" || \
+  nohup ~/.local/bin/uv run python scripts/gather_options_iv.py --fresh --end-month 2026-07 \
+    --limit-symbols $(cat data/options-iv/samples.symbols.txt) \
+    --out data/options-iv/samples.jsonl >> state/options-iv/gather-v2.log 2>&1 & \
+  echo "relaunched pool 1 (no backup)"'
+# Repeat for pool 2 (midcap) once pool 1 completes.
+```
 
 - [ ] **R9: Rsync back + verification**
 
@@ -1909,16 +1936,21 @@ uv run python scripts/options_coverage_report.py \
   2>&1 | tee /tmp/claude-coverage-midcap.log
 ```
 
-Acceptance reading (spec §5):
+Acceptance reading (spec §5). Hard preconditions: `cells_v1 > 0` AND `iv_overlap_legs` in the thousands (< 100 overlaps = broken matching). Additionally: `iv_red_flag=false WITH iv_overlap_legs=0` is a FAIL, never a pass (missing backup).
+
 - `cells_v2` ≳ `cells_v1` per pool (v2 adds 2026 months; a large DROP means something broke).
 - Large-cap `leg_volume_rate` must jump from ~0 to ≈ the mid-cap pool's rate (the whole point of re-gathering the large caps).
 - `oi_leg_rate` substantially > 0 (else the OI endpoint verdict was wrong — investigate before anything downstream).
+- `greeks_leg_rate` follows oi_leg_rate (greeks served when available).
 - `far_rate` high but < 1.0 is expected (some months have no monthly in 55..90).
+- `iv_overlap_legs` in the thousands (confirms both gathers priced overlapping contracts).
+- `iv_median_abs_delta` typically < 0.001–0.005 (same contract should price identically).
 - `iv_red_flag` must be false; if true, diff a few matched legs by hand before trusting ANYTHING (same contract + date should produce near-identical mids).
 - Spot-checks: (1) one liquid name's ATM `open_interest` vs public data — order of magnitude (10³–10⁵ for AAPL near-ATM) and the build-then-drop shape across an expiry cycle:
   `python3 -c "import json; [print(c['decision_date'], k['strike'], k.get('open_interest')) for c in map(json.loads, open('data/options-iv/samples.jsonl')) if c['symbol']=='AAPL' for k in c['contracts'] if k['role']=='atm']" | head -24`
   (2) strikes still RAW dollars snapped near `spot_at_decision` (AAPL 2019 rows ~165, not ~40); (3) every `far.days_to_expiry` within 55..90:
   `python3 -c "import json; ds=[c['far']['days_to_expiry'] for c in map(json.loads, open('data/options-iv/samples.jsonl')) if 'far' in c]; print(min(ds), max(ds), len(ds))"`
+- (4) Verify `volume_cell_rate` and `volume_leg_rate` reported (not old `leg_volume_rate` name) and that large-cap's `volume_cell_rate` jumped to mid-cap levels.
 
 - [ ] **R10: Record + close out**
 
