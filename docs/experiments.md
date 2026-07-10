@@ -739,6 +739,101 @@ every signal near the top — that reads as tech beta over 2019–2021, not
 signal, and is a reminder that segment/beta, not the ranker, drives much of
 the in-sample outperformance.
 
+## 14. R2 — the strategy-wrapper ablation (2026-07-10): the momentum "refutation" was largely the wrapper
+
+**Pre-registered** in `docs/superpowers/specs/2026-07-10-wrapper-ablation-
+design.md` before any cell ran. The question: how much of every "tradeable
+form" verdict is the signal, and how much is the inherited momentum-era
+wrapper (regime gate, ATR/time stops, entry-score threshold, the M2
+sizing/cadence machinery)? Three signals with established life —
+`momentum_v1`, `amihud_v1`, `skew_v1` — each run across five wrapper
+configurations (W0 bare → W4 full), on their historical universes/spans,
+holding everything but the wrapper fixed. All 15 journaled in
+`journal/experiments-equities.jsonl`.
+
+**The matrix** (stitched-OOS Sharpe; W4 = the full historical wrapper, the
+control that must reproduce the recorded verdict):
+
+| cell | wrapper state | momentum (bmk 0.96) | amihud·midcap (bmk 0.96) | skew (bmk 0.70) |
+|---|---|---|---|---|
+| **W0** | bare: rank-only, equal-weight, monthly, rank-exit | **0.96** | 0.35 | 0.63 |
+| W1 | + regime gate | 0.69 | 0.27 | 0.59 |
+| W2 | + M2 stops/sizing bundle (regime off) | 0.70 | 0.42 | 0.64 |
+| W3 | + entry threshold (regime off) | 0.69 | 0.44 | 0.83 |
+| **W4** | full wrapper (control) | **0.54** | **0.16** | **0.79** |
+
+**W4-reproduction gate — PASSED** (the spec's hard STOP condition: if the
+full-wrapper cell can't reproduce the recorded verdict, the instrument is
+broken and no cell may be read). Two of three anchors reproduce essentially
+exactly: **amihud W4 = 0.16429, bit-identical** to the standalone amihud_v1
+walk-forward (§ above); **skew W4 = 0.786** vs the recorded OPT-1 0.7875.
+That bit-identity proves the ablation engine with all flags ON ≡ the plain
+engine. Momentum W4 = **0.54** vs the §7-recorded **0.45** is the one
+non-exact anchor, and it is a documented *data-provenance* shift, not a
+harness fault: momentum-w4's config is byte-identical at runtime to
+`config/experiments/tiingo`, and the current survivorship-free universe is
+more complete than when §7 ran (the run reports 11 missing PIT members vs
+§7's 16 — the ticker-alias re-backfill recovered renamed tickers absent in
+§7). The instrument is faithful; the momentum baseline itself rose 0.45 →
+0.54 as the data completed. (Caveat carried forward: the §7 record's 0.45 is
+now stale for this reason.)
+
+**The headline (the pre-registered correction):** the bare momentum
+portfolio — top-20 by `momentum_v1` rank, equal weight, monthly rebalance,
+sold only on rank exit, **no regime gate, no stops, no entry threshold** —
+scores **Sharpe 0.96, matching SPY's 0.96** over the identical stitched-OOS
+segments. The full wrapper drags that to 0.54. W0 exceeds the recorded 0.45
+by +0.51 — far past the pre-registered +0.1 trigger — so per the protocol
+the record gets a **written correction: the recorded momentum verdict
+("honest best ~0.45, does not beat SPY, refuted") was substantially a
+statement about the WRAPPER, not about momentum.** Held simply, momentum
+tracks the market on a risk-adjusted basis; the elaborate risk-management
+wrapper is what turned a market-matching signal into a market-lagging one.
+
+**Precise, and not overstated:** matching SPY's *Sharpe* is not *beating*
+SPY. Bare momentum's total return (+85.9%) still **trails** SPY's stitched
++124.5% — it matches SPY's risk-adjusted return at lower volatility, it does
+not out-return it. The "momentum does not beat SPY" finding stands; what
+falls is the "0.45, refuted" framing — that number was the wrapper's, and
+bare momentum is a full +0.4 Sharpe above it.
+
+**Component attribution** (read only from clean single-flag pairs; the
+pre-run amendment warned that `bare_mode` bundles stops+sizing+cadence, so
+per-component isolation of those is not available — disclosed):
+- **The M2 stops/sizing/cadence bundle is the dominant drag: W0→W2 =
+  0.96 → 0.70, −0.27 Sharpe.** Turning on the simulator's ATR/time stops,
+  fractional sizing, deployment caps and cooldown — as a bundle — destroys a
+  quarter of the bare Sharpe. (Stops vs sizing cannot be separated here.)
+- **Regime gate and entry threshold are each ≈0 alone but −0.16 together.**
+  Regime on/off with the threshold off costs nothing (W2→W1: −0.01);
+  threshold on/off with regime off costs nothing (W2→W3: −0.005); but both
+  on (W2→W4) costs −0.16. They compound: the regime gate cuts market
+  exposure at the same time the threshold shrinks the eligible book, so the
+  portfolio ends up too small and too defensive at once.
+- Whole wrapper, W0→W4: **−0.42 Sharpe.**
+
+**Per-signal readings (each against its own pre-registered logic):**
+- **momentum — corrected** (above): wrapper is the drag; bare ties SPY's
+  Sharpe.
+- **amihud — refutation STANDS, wrapper not the cause:** the wrapper hurts
+  amihud too (bare 0.35 → full 0.16, the full wrapper churning stops on thin
+  microcaps is maximally destructive), but **even bare, amihud long-only
+  (0.35) is nowhere near SPY (0.96)** — it fails the gate in every wrapper
+  form. §11-12's long-only refutation is unaffected; the L/S factor remains
+  real, the tradeable long-only construction remains refuted.
+- **skew — consistent with §9 (edge is tuning/beta, not raw signal):** here
+  the wrapper *helps* (bare 0.63 → full 0.79), and **bare skew (0.63)
+  underperforms even its own options-pool benchmark (0.70)** — only the
+  wrapped/tuned form clears it. That the signal needs the wrapper to look
+  good corroborates §9's model-free verdict that skew's monthly long-only
+  premium is ≈0 OOS and its apparent edge is stop-tuning plus beta.
+
+**No promotion follows from any cell** — this is instrument calibration, not
+discovery (spec §2). What it changes going forward: the construction worth
+testing for a long-only account is a **simple** momentum tilt, not the
+inherited wrapper — which is exactly what R3 (down-cap universe) and R4
+(SPY-plus-tilt paper control) should carry. The holdout remains unspent.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
