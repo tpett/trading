@@ -627,6 +627,38 @@ without its cache-dir/raw-close prerequisites (91-cell junk enumeration,
 caught by the cell-count check, v1 backup pristine, corrected + re-run;
 run-book amended). v1 files retained beside the new ones for forensics.
 
+## 12. Options-v2 + insider batch sweep — null beyond amihud (946 trials)
+
+**Ran 2026-07-09 (master b508037, registry 43) per the approved batch spec:**
+options families (3 new signals + largecap cp_vol/osv enablement + v2-data
+hash-replacement re-runs) across the 7 options universes, then the first
+insider sweep (3 signals x 28 universes). Journal 835 -> 946 deduped
+discovery trials, one leaderboard read.
+
+**RESULT: no new-family signal passes BH at q=0.10.** Best new candidates:
+`npr_90` midcap:pharma-chemicals t=+2.62 (p=0.009), `cluster_buys_90`
+opt-midcap:trade t=+2.22 — an order of magnitude short of the m=946 bar.
+Directional note (recorded, not evidence): the insider purchase signals lean
+positive across segments, consistent with the literature's sign, just
+statistically indistinguishable at this trial count. `iv_term_slope` (the
+flagged-weakest anchor) is inert (best |t|=1.34). The amihud family's rows
+persist as known PASSes (battery near-duplicates included, disclosed) and
+the tradeable form is already refuted (§11 walk-forward).
+
+**The predicted pseudo-replication artifact materialized exactly as
+disclosed:** `droa` largecap:finance shows PASS (t=-3.05, p=0.0023, DSR
+0.000) purely because amihud's battery trials moved the BH denominator — it
+is WRONG-SIGNED versus its registration (fundamental momentum registered
+positive), carries a zero deflated-Sharpe, and per the standing rule earns
+nothing without its own battery + holdout (which its sign makes impossible
+under the frozen cost gate). Read as an artifact, recorded as such.
+
+**Program state after 946 trials:** one real factor found (amihud,
+untradeable long-only in this account), everything else honestly null. The
+holdout (2024+) remains fully unspent. v2 data (OI, term structure, largecap
+volume) and the insider store are in place for future pre-registered
+batches; the engine's cost per hypothesis continues to fall.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
