@@ -597,7 +597,10 @@ trial. The data store is SEC DERA insider-transaction quarterly ZIPs 2018q3+
 (open-market P/S only, FILED-date PIT keying — the transaction date precedes
 filing and is never scored), built by `scripts/build_insider_store.py` into
 `data/insider/equities/` and mapped through the committed cik_map intervals
-(unmapped CIKs counted, never guessed). **Nothing sweeps under this
+(unmapped CIKs counted, never guessed). Disclosed limitation: Form 4/A
+amendments carry their own accessions and the frozen spec has no form-type
+filter, so an amended transaction can appear twice — slight over-counting,
+accepted for the batch sweep. **Nothing sweeps under this
 registration**: the pre-registered discovery sweep belongs to the combined
 options-v2 + insider batch spec (one read after both data sets land), which
 will disclose the full trial count. New glossary section "Insider

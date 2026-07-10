@@ -348,14 +348,18 @@ delisted names — the cleanest PIT anomaly source we identified. The store
 keeps only open-market purchases (`P`) and sales (`S`); awards, exercises,
 gifts and plan transactions are excluded. 10b5-1 (pre-scheduled) trades are
 NOT excluded — the flag is unreliable before 2023 (documented limitation).
-PIT discipline: every signal keys the FILED date, never the transaction date
-(which precedes filing and would be look-ahead).
+Form 4/A amendments carry their OWN accessions and the frozen spec has no
+form-type filter, so an amended transaction can appear twice (original +
+amendment) — slight over-counting, a documented limitation. PIT discipline:
+every signal keys the FILED date, never the transaction date (which precedes
+filing and would be look-ahead).
 
 **Net purchase ratio (NPR, `npr_90`)** — (buy dollars − sell dollars) /
 (buy dollars + sell dollars) over the trailing 90 filed days
 (Lakonishok-Lee). +1 = insiders only bought, −1 = only sold. Sales carry
 less information than purchases (diversification, taxes, option vesting);
-purchases are the deliberate act.
+purchases are the deliberate act. NaN when the trailing window has no
+priced P/S rows — a quiet window scores NaN, never a fabricated 0/0.
 
 **Cluster buying (`cluster_buys_90`)** — the count of DISTINCT insiders with
 at least one open-market purchase in the window. Several insiders buying
@@ -369,7 +373,8 @@ raw unadjusted close — the div_yield lesson: adjusted closes bake in future
 splits, and Form 4 dollars are raw dollars). Officers have the best
 information per dollar traded. Requires both the insider store and
 fundamentals (`shares_outstanding`), so it registers with both refusal
-flags.
+flags. NaN when `shares_outstanding` or `close_raw` is unavailable at the
+as-of date (no market-cap denominator, no score).
 
 ## The robustness battery (Piece 3)
 
