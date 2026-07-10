@@ -19,8 +19,10 @@ The 16 seed signals (Piece 1) are followed by the 21 Tier-1 batch signals
 5 fundamentals (300-calendar-day YoY filing rule), 2 industry-relative
 (the 10 frozen SEGMENTS sectors), then the 3 Form 4 insider signals
 (requires_insider; docs/superpowers/specs/2026-07-09-insider-pipeline-design.md
-section 3). All formulas, windows, floors, and signs are frozen
-pre-registration.
+section 3), then the 3 options-v2 batch signals -- oi_put_call, d_oi,
+iv_term_slope (docs/superpowers/specs/2026-07-09-options-v2-insider-batch-
+design.md section 2), registry 40 -> 43. All formulas, windows, floors, and
+signs are frozen pre-registration.
 """
 
 from __future__ import annotations
@@ -392,6 +394,73 @@ _register("otm_put_iv", _option_signal("otm_put_iv", -1.0), requires_options=Tru
 _register("iv_change", _option_innovation("atm_iv", -1.0), requires_options=True)
 # A steepening put smirk is bearish, consistent with `hedge`'s sign -> negate.
 _register("dskew", _option_innovation("hedge", -1.0), requires_options=True)
+
+
+# --------------------------------------------------------------------------- #
+# Options-v2 batch (docs/superpowers/specs/2026-07-09-options-v2-insider-batch-
+# design.md section 2, FROZEN): oi_put_call/d_oi read the per-leg
+# open_interest columns panel.cell_metrics now exposes; iv_term_slope reads
+# the far block's ATM IV. All three: NaN when the required legs/blocks/prior
+# cells are absent -- never imputed.
+# --------------------------------------------------------------------------- #
+def _oi_put_call(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """log(1+OTM-put leg OI) - log(1+(ATM + OTM-call leg OI)) at the current
+    cell, NEGATED (heavy put OI positioning predicts negative returns,
+    Fodor-Krieger-Doran). NaN when any of the three legs lacks its OWN
+    open_interest key (absent != a served 0) or the cell itself is absent."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        row = view.option_row(symbol)
+        score = math.nan
+        if row is not None:
+            put_oi, atm_oi, call_oi = row["otm_put_oi"], row["atm_oi"], row["otm_call_oi"]
+            if not (math.isnan(put_oi) or math.isnan(atm_oi) or math.isnan(call_oi)):
+                score = -(math.log1p(put_oi) - math.log1p(atm_oi + call_oi))
+        scores[symbol] = score
+    return pd.Series(scores, dtype="float64")
+
+
+def _d_oi(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """NEGATED delta of log(1+total near-leg OI), current cell vs the prior
+    cell (option_row_prior's 45d staleness cap): rising single-name OI
+    predicts lower returns (Fodor-Krieger-Doran 2011). NaN when either cell
+    is missing/stale, or when the current or prior cell's oi_total is NaN
+    (no leg carrying open_interest in that cell -- panel.cell_metrics'
+    partial-sum rule)."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        row = view.option_row(symbol)
+        prior = view.option_row_prior(symbol)
+        score = math.nan
+        if row is not None and prior is not None:
+            now_total, then_total = row["oi_total"], prior["oi_total"]
+            if not (math.isnan(now_total) or math.isnan(then_total)):
+                score = -(math.log1p(now_total) - math.log1p(then_total))
+        scores[symbol] = score
+    return pd.Series(scores, dtype="float64")
+
+
+def _iv_term_slope(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """far-block ATM IV minus near (current cell) ATM IV, RAW sign: an
+    upward-sloping term structure signals near-term calm (term-structure
+    family, Vasquez 2017 -- the weakest literature anchor in this batch,
+    flagged exploratory). NaN when the far block is absent or either ATM IV
+    is missing."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        row = view.option_row(symbol)
+        score = math.nan
+        if row is not None:
+            near_iv, far_iv = row["atm_iv"], row["far_atm_iv"]
+            if not (math.isnan(near_iv) or math.isnan(far_iv)):
+                score = far_iv - near_iv
+        scores[symbol] = score
+    return pd.Series(scores, dtype="float64")
+
+
+_register("oi_put_call", _oi_put_call, requires_options=True)
+_register("d_oi", _d_oi, requires_options=True)
+_register("iv_term_slope", _iv_term_slope, requires_options=True)
 
 
 # --------------------------------------------------------------------------- #
