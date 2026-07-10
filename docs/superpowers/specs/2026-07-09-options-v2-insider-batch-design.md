@@ -1,7 +1,6 @@
 # Options-v2 + Insider Batch — the combined pre-registered sweep (design spec)
 
-**Status:** DRAFT pending developer approval, 2026-07-09. The sweep runs only
-after approval. Data prerequisites are COMPLETE and verified: gather v2
+**Status:** APPROVED by the developer 2026-07-09; sweep authorized. Data prerequisites are COMPLETE and verified: gather v2
 (largecap 7,399 cells / midcap 11,235; IV median |Δ| = 0.0 vs v1 on ~50k
 overlap legs; volume 100% both pools; OI 99.9% of legs; far blocks 81% / 50%)
 and the Form 4 store (925k rows, spot-checked vs public filings).
