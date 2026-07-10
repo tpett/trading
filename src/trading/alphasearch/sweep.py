@@ -660,11 +660,15 @@ def _rederive_long_only_row(
         )
         charged_lo, skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
         # Fix (final review, 2026-07-10): same alignment as run_battery's
-        # long_only_gate -- a leading skipped decision date shifts
-        # charged_lo's first observation past the nominal window start, so
-        # the SPY comparator must cover that SAME (shorter) horizon rather
-        # than the full nominal window (anti-conservative otherwise).
-        lo_window_start = charged_lo.index[0] if len(charged_lo) > 0 else start
+        # long_only_gate -- anchor SPY's benchmark window to the first ACTUAL
+        # DECISION date (sort.rebalances[0][0]), not charged_lo.index[0]:
+        # portfolio_sort builds hold segments strictly after the decision
+        # date, so charged_lo.index[0] is the first REALIZED RETURN day and
+        # already compounds the move from the decision date to that day --
+        # one trading day later than SPY needs to match the identical
+        # economic horizon. sort.rebalances is non-empty whenever portfolio_
+        # sort succeeds (SortError on empty tops is caught below).
+        lo_window_start = sort.rebalances[0][0]
         lo_sharpe = annualized_sharpe(charged_lo)
         lo_total = total_return(charged_lo)
         spy_stats = spy_benchmark(spy_closes, lo_window_start, end)

@@ -930,12 +930,30 @@ def test_run_battery_gate_aligns_spy_window_to_the_actual_lo_start(
     sort = portfolio_sort(panel, spec, dates, end)
     assert sort.rebalances[0][0] == cutoff          # confirms the lead skip
     charged, _skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
-    aligned = spy_benchmark(spy, charged.index[0], end)
-    stale = spy_benchmark(spy, start, end)          # the pre-fix (buggy) window
+    # The correct anchor is the first ACTUAL DECISION date, not charged's
+    # first REALIZED RETURN day: portfolio_sort builds hold segments strictly
+    # after the decision date (sort.py), so charged.index[0] is already one
+    # trading day later and compounds a shorter horizon than SPY needs to
+    # match.
+    aligned = spy_benchmark(spy, sort.rebalances[0][0], end)
+    stale = spy_benchmark(spy, start, end)          # the pre-FIX2 (buggy) window
+    off_by_one = spy_benchmark(spy, charged.index[0], end)  # the FIX2 (still off-by-one) window
     assert aligned.total_return != pytest.approx(stale.total_return)
+    assert aligned.total_return != pytest.approx(off_by_one.total_return)
     assert outcome.long_only_gate["spy_total_return"] == pytest.approx(
         aligned.total_return
     )
     assert outcome.long_only_gate["spy_sharpe"] == pytest.approx(
         aligned.sharpe_annual
     )
+    # Independent invariant catching either a one-day-early OR one-day-late
+    # anchor: the SPY window must start exactly at the first decision date,
+    # and its daily-return observation count must equal the number of
+    # trading sessions from that decision date through `end` -- exactly one
+    # MORE obs than the charged.index[0] (FIX2) anchor yields, since that
+    # anchor starts one session later. Both the pre-FIX2 `start` anchor and
+    # the FIX2 `charged.index[0]` anchor fail this.
+    spy_window = spy.loc[(spy.index >= sort.rebalances[0][0]) & (spy.index <= end)]
+    assert spy_window.index[0] == sort.rebalances[0][0]
+    assert aligned.n_obs == len(spy_window) - 1
+    assert aligned.n_obs == off_by_one.n_obs + 1

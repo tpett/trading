@@ -795,12 +795,14 @@ def run_battery(
     # horizons (anti-conservative when the market fell during the skipped
     # lead-in: SPY's full-window total would be dragged down by a decline
     # the signal never had to sit through). Anchor SPY's benchmark window to
-    # charged_lo's own first observation so both totals compound the
-    # identical horizon. A no-op on the current largecap discovery config
-    # (no leading skips there -- charged_lo.index[0] == the first return day
-    # after `start`'s own rebalance), but reachable under R3's thinner
-    # small/micro-cap cross-sections.
-    lo_window_start = charged_lo.index[0] if len(charged_lo) > 0 else start
+    # the first ACTUAL DECISION date, not charged_lo.index[0]: portfolio_sort
+    # builds hold segments strictly after the decision date (sort.py), so
+    # charged_lo.index[0] is the first REALIZED RETURN day and already
+    # compounds the move from the decision date to that day -- one trading
+    # day later than SPY needs to match the identical economic horizon.
+    # sort.rebalances is guaranteed non-empty here: SortError above already
+    # refused an empty `tops`, which populates in lockstep with rebalances.
+    lo_window_start = sort.rebalances[0][0]
     lo_sharpe = annualized_sharpe(charged_lo)
     lo_total = total_return(charged_lo)
     spy_stats = spy_benchmark(spy, lo_window_start, end)
