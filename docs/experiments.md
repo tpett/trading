@@ -616,6 +616,17 @@ Saudi PIF Lucid injections, JAB's 2019 Coty tender. filed >= trans_date
 everywhere. The family now awaits the combined options-v2 + insider batch
 sweep.
 
+**Gather v2 COMPLETE + verified 2026-07-09:** largecap 7,399 cells /
+midcap 11,235 (both > v1: 6,767 / 10,301), zero errors either pool. Coverage
+gate PASSED: IV median |delta| = 0.0 on ~50k overlapping legs (v2 reproduces
+v1's IVs exactly on the same contracts), leg volume 100% on BOTH pools (the
+largecap volume gap is closed -> cp_vol/osv become largecap-eligible), OI on
+99.9% of legs, far-expiration blocks on 81% (largecap) / 50% (midcap) of
+cells. One ops incident, fully recovered: the midcap run initially launched
+without its cache-dir/raw-close prerequisites (91-cell junk enumeration,
+caught by the cell-count check, v1 backup pristine, corrected + re-run;
+run-book amended). v1 files retained beside the new ones for forensics.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
