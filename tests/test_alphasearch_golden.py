@@ -64,7 +64,7 @@ def test_golden_sweep_end_to_end(tmp_path):
                                ts="t1", window=WINDOW)
 
     # Every registered signal became exactly one journaled trial.
-    assert n_trials == len(SIGNALS) == 40
+    assert n_trials == len(SIGNALS) == 43
     assert {(r.signal, r.universe) for r in rows} == {
         (s, "largecap") for s in SIGNALS
     }
@@ -78,6 +78,14 @@ def test_golden_sweep_end_to_end(tmp_path):
     # honest all-NaN error trial (like div_yield); the other two insider
     # signals run end-to-end on the real-files store.
     assert "officer_buy_90" in errored
+    # make_cell's cells carry no per-leg open_interest and no far block ->
+    # oi_put_call/d_oi/iv_term_slope are honest all-NaN error trials on this
+    # fixture (never a fabricated cross-section); the sweep still spends a
+    # trial and records the error rather than crashing.
+    assert {"oi_put_call", "d_oi", "iv_term_slope"} <= errored
+    assert not any(
+        r.bh_pass for r in rows if r.signal in {"oi_put_call", "d_oi", "iv_term_slope"}
+    )
     for name in ("npr_90", "cluster_buys_90"):
         row = next(r for r in rows if r.signal == name)
         assert row.error is None
@@ -103,5 +111,5 @@ def test_golden_sweep_end_to_end(tmp_path):
     assert [(r.signal, r.alpha_t, r.p) for r in rows2] == [
         (r.signal, r.alpha_t, r.p) for r in rows
     ]
-    assert len(list(journal.events())) == 80
-    assert len(discovery_trials(journal)) == 40
+    assert len(list(journal.events())) == 86
+    assert len(discovery_trials(journal)) == 43
