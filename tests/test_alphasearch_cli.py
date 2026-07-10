@@ -213,6 +213,12 @@ def test_sweep_segments_refusal_prints_signal_family_hint(tmp_path, monkeypatch,
     # excluded from the suggestion so the hint never steers an operator into
     # a predictable SortError/skip.
     assert "ind_mom" not in err
+    # requires_insider signals are excluded from the segment-safe list for
+    # the same reason as fundamentals: their store may not be synced, and a
+    # hint containing them would hand the operator a still-failing command.
+    assert "npr_90" not in err
+    assert "cluster_buys_90" not in err
+    assert "officer_buy_90" not in err
     assert "opt-largecap:<segment>" in err
 
 

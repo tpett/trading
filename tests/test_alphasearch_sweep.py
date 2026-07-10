@@ -139,6 +139,22 @@ def test_fundamentals_signal_without_store_refused(tmp_path):
     assert "--signals" in message
 
 
+def test_insider_signal_without_store_refused(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel(with_insider=False)
+    with pytest.raises(SweepError) as excinfo:
+        run_sweep(
+            _universe(tmp_path), journal, make_factors(), ts="t1",
+            signals=_subset("npr_90"), window=WINDOW,
+            panel_factory=lambda _u, _f: panel,
+        )
+    assert list(journal.events()) == []             # refused at assembly: no trials
+    message = str(excinfo.value)
+    assert "data/insider/equities" in message
+    assert "scripts/build_insider_store.py" in message
+    assert "--signals" in message
+
+
 def test_discovery_trial_with_stale_factors_is_journaled_as_error(tmp_path):
     # Factors ending well before the window end must refuse loudly (naming the
     # factor end date, the window end, and the fix) rather than let
@@ -645,6 +661,16 @@ def test_deep_universe_refuses_fundamentals_signals_end_to_end(tmp_path):
     with pytest.raises(SweepError, match="requires fundamentals"):
         run_sweep({uspec.name: uspec}, journal, make_factors(), ts="t1",
                   signals=_subset("earnings_yield"), window=WINDOW)
+    assert list(journal.events()) == []
+
+
+def test_deep_universe_refuses_insider_signals_end_to_end(tmp_path):
+    # insider_dir=None -> panel.insider == {} -> the requires_insider refusal.
+    journal = trials_journal(tmp_path / "journal")
+    uspec = _write_deep_universe(tmp_path)
+    with pytest.raises(SweepError, match="requires insider"):
+        run_sweep({uspec.name: uspec}, journal, make_factors(), ts="t1",
+                  signals=_subset("cluster_buys_90"), window=WINDOW)
     assert list(journal.events()) == []
 
 

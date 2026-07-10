@@ -136,6 +136,7 @@ def segment_universes(
     universes: dict[str, UniverseSpec] = {}
     excluded: list[dict] = []
     fundamentals_dir = root / "data" / "fundamentals" / "equities"
+    insider_dir = root / "data" / "insider" / "equities"
     for cap, indices, cache_name, samples_name in _CAPS:
         cache_dir = root / "data" / cache_name
         members = _window_members(membership_path, indices)
@@ -170,6 +171,11 @@ def segment_universes(
                     fundamentals_dir=(
                         fundamentals_dir if fundamentals_dir.is_dir() else None
                     ),
+                    # Same store-exists conditional as fundamentals_dir
+                    # (Tier-1 spec section 3.4 pattern): None only ever means
+                    # "no insider store built yet". No insider segment trial
+                    # predates this, so nothing is spent.
+                    insider_dir=insider_dir if insider_dir.is_dir() else None,
                     symbols=deep,
                     sic_map_path=sic_map_path,
                 )
@@ -186,6 +192,7 @@ def segment_universes(
                     cache_dir=cache_dir,
                     samples=samples,
                     fundamentals_dir=fundamentals_dir,
+                    insider_dir=insider_dir,
                     symbols=opt,
                     sic_map_path=sic_map_path,
                 )

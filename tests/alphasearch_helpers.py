@@ -58,6 +58,7 @@ def assemble_panel(
     fundamentals: dict[str, pd.DataFrame],
     factors: pd.DataFrame,
     *,
+    insider: dict[str, pd.DataFrame] | None = None,
     has_option_volume: bool = False,
     sectors: dict[str, str] | None = None,
 ) -> PanelData:
@@ -68,6 +69,7 @@ def assemble_panel(
     closes = {s: frame["close"] for s, frame in bars.items()}
     return PanelData(
         closes=closes, options=options, fundamentals=fundamentals,
+        insider={} if insider is None else insider,
         symbols=tuple(sorted(bars)), bars=bars, factors=factors,
         features=compute_rolling_features(closes, factors),
         has_option_volume=has_option_volume,
@@ -83,6 +85,7 @@ def make_panel(
     with_options: bool = True,
     with_fundamentals: bool = True,
     with_option_volume: bool = True,
+    with_insider: bool = True,
     factors: pd.DataFrame | None = None,
 ) -> PanelData:
     """Symbol S<i> drifts at (i - n/2)*2bp/day plus small seeded noise (same
@@ -95,7 +98,18 @@ def make_panel(
     fixture in test_alphasearch_tier1.py, not this general-purpose panel).
     Fundamentals file THREE times so the
     300-day YoY rule and the post-cutoff perturbation are both exercised on
-    long fixtures (positions 0 / 63% / 95% of the index)."""
+    long fixtures (positions 0 / 63% / 95% of the index).
+
+    Insider fixture (with_insider, deterministic, NO rng use -- closes must
+    stay bit-identical): at every month-first FILED date, symbol i gets
+    (i % 8) distinct buyers (owner_cik 1000*(i+1)+j, the first an officer,
+    the second a director) buying 100*(i+1) sh @ 10, plus ONE ten-pct seller
+    of 50*(i+1) sh @ 10. i % 8 == 0 symbols are covered-but-buyless
+    (cluster_buys' real 0; npr -1). trans_date = filed - 20d, so month-first
+    filings just after a cutoff carry trans_dates BEFORE it -- the
+    straddling rows the lookahead perturbation needs to catch trans_date
+    keying. 8 distinct cluster values keeps segment-free sorts
+    non-degenerate (>= 3 buckets)."""
     rng = np.random.default_rng(seed)
     idx = pd.date_range(start, periods=periods, freq="B", tz="UTC")
     names = [f"S{i:02d}" for i in range(n_symbols)]
@@ -153,10 +167,34 @@ def make_panel(
                 },
                 index=filed,
             )
+    insider: dict[str, pd.DataFrame] = {}
+    if with_insider:
+        for i, sym in enumerate(names):
+            rows: list[dict] = []
+            for date in month_firsts(idx):
+                trans = date - pd.Timedelta(20, unit="D")
+                for j in range(i % 8):
+                    rows.append({
+                        "filed": date, "trans_date": trans, "code": "P",
+                        "shares": 100.0 * (i + 1), "price": 10.0,
+                        "value": 1000.0 * (i + 1),
+                        "owner_cik": 1000 * (i + 1) + j,
+                        "is_officer": j == 0, "is_director": j == 1,
+                        "is_ten_pct": False,
+                    })
+                rows.append({
+                    "filed": date, "trans_date": trans, "code": "S",
+                    "shares": 50.0 * (i + 1), "price": 10.0,
+                    "value": 500.0 * (i + 1), "owner_cik": 9000 + i,
+                    "is_officer": False, "is_director": False,
+                    "is_ten_pct": True,
+                })
+            insider[sym] = pd.DataFrame(rows).set_index("filed")
     sectors = {sym: ("manufacturing-tech" if i % 2 == 0 else "finance")
                for i, sym in enumerate(names)}
     return assemble_panel(
         bars, options, fundamentals, factors,
+        insider=insider,
         has_option_volume=with_options and with_option_volume,
         sectors=sectors,
     )

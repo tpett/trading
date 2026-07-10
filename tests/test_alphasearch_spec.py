@@ -175,17 +175,21 @@ def test_fundamentals_family_values_and_neutrality():
 
 
 def test_registry_is_complete_with_correct_requirements():
-    assert len(SIGNALS) == 37  # 16 seeds + 21 Tier-1 (9+5+5+2)
+    assert len(SIGNALS) == 40  # 16 seeds + 21 Tier-1 (9+5+5+2) + 3 insider
     options_family = {"vrp", "hedge", "excite", "atm_iv", "smile", "atm_spread",
                       "cp_vol", "osv", "otm_put_iv", "iv_change", "dskew"}
     volume_family = {"cp_vol", "osv"}
+    # officer_buy_90 needs shares_outstanding: it is IN the fundamentals
+    # family (dual-flagged) as well as the insider family (spec section 3).
     fundamentals_family = {"gross_profitability", "earnings_yield",
                            "book_to_market", "asset_growth", "net_issuance",
-                           "roa", "droa", "rev_growth"}
+                           "roa", "droa", "rev_growth", "officer_buy_90"}
+    insider_family = {"npr_90", "cluster_buys_90", "officer_buy_90"}
     for name, spec in SIGNALS.items():
         assert spec.requires_options == (name in options_family)
         assert spec.requires_option_volume == (name in volume_family)
         assert spec.requires_fundamentals == (name in fundamentals_family)
+        assert spec.requires_insider == (name in insider_family)
 
 
 def test_register_enforces_option_volume_implies_options():

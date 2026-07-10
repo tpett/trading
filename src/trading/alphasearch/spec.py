@@ -17,8 +17,10 @@ The 16 seed signals (Piece 1) are followed by the 21 Tier-1 batch signals
 (docs/superpowers/specs/2026-07-09-tier1-signal-batch-design.md section 2):
 9 price/volume, 5 options (cp_vol/osv gated on requires_option_volume),
 5 fundamentals (300-calendar-day YoY filing rule), 2 industry-relative
-(the 10 frozen SEGMENTS sectors). All formulas, windows, floors, and signs
-are frozen pre-registration.
+(the 10 frozen SEGMENTS sectors), then the 3 Form 4 insider signals
+(requires_insider; docs/superpowers/specs/2026-07-09-insider-pipeline-design.md
+section 3). All formulas, windows, floors, and signs are frozen
+pre-registration.
 """
 
 from __future__ import annotations
@@ -44,6 +46,10 @@ class SignalSpec:
     # Leg volume exists only in the mid-cap gather; signals reading it are
     # refused at sweep assembly on volume-less universes (spec section 2).
     requires_option_volume: bool = False
+    # Form 4 insider store (data/insider/equities); signals reading it are
+    # refused at sweep assembly on store-less universes (insider spec
+    # section 3), mirroring requires_fundamentals.
+    requires_insider: bool = False
 
 
 SIGNALS: dict[str, SignalSpec] = {}
@@ -56,6 +62,7 @@ def _register(
     requires_options: bool = False,
     requires_fundamentals: bool = False,
     requires_option_volume: bool = False,
+    requires_insider: bool = False,
 ) -> None:
     # Leg volume lives on option cells; a signal that reads it without also
     # requiring options would slip past the options-store refusal in
@@ -69,6 +76,7 @@ def _register(
         requires_options=requires_options,
         requires_fundamentals=requires_fundamentals,
         requires_option_volume=requires_option_volume,
+        requires_insider=requires_insider,
     )
 
 
@@ -569,3 +577,82 @@ _register("ind_mom", _ind_mom)
 # laggards vs their sector mean recover -- the minus lives IN the formula,
 # so registration is raw (spec section 2 defines the signal WITH the minus).
 _register("ind_rel_rev", _ind_rel_rev)
+
+
+# --------------------------------------------------------------------------- #
+# Insider (Form 4) family (requires_insider; spec 2026-07-09-insider-pipeline
+# section 3, FROZEN). All three read the trailing-90-FILED-day window via
+# PanelView.insider_window: None = never covered at as_of -> NaN; an empty
+# frame = covered-but-quiet, a REAL observation. Scoring keys the FILED date
+# ONLY -- TRANS_DATE precedes filing and keying on it is look-ahead.
+# --------------------------------------------------------------------------- #
+def _npr_90(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """(sum buy value - sum sell value) / (sum buy value + sum sell value)
+    over the trailing 90 filed days. NaN when the window holds no P/S value
+    (denominator <= 0): footnote-priced NaN values are skipped by sum(), so
+    an all-NaN window is honestly missing, never 0/0."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        window = view.insider_window(symbol)
+        score = math.nan
+        if window is not None and len(window):
+            buys = float(window.loc[window["code"] == "P", "value"].sum())
+            sells = float(window.loc[window["code"] == "S", "value"].sum())
+            total = buys + sells
+            if total > 0:
+                score = (buys - sells) / total
+        scores[symbol] = score
+    return pd.Series(scores, dtype="float64")
+
+
+def _cluster_buys_90(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """Count of DISTINCT owner ciks with >= 1 open-market purchase in the
+    window. 0 is a REAL value (covered names with no buys); NaN only when
+    the symbol has no insider row EVER filed <= as_of (never-covered !=
+    quiet -- the spec section 3 distinction, encoded by insider_window's
+    None-vs-empty contract)."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        window = view.insider_window(symbol)
+        if window is None:
+            scores[symbol] = math.nan
+        else:
+            scores[symbol] = float(
+                window.loc[window["code"] == "P", "owner_cik"].nunique()
+            )
+    return pd.Series(scores, dtype="float64")
+
+
+def _officer_buy_90(view: PanelView, as_of: pd.Timestamp) -> pd.Series:
+    """Officer open-market purchase value over the window, scaled by market
+    cap on the RAW price basis: shares_outstanding (latest visible filing) x
+    close_raw at as_of. Raw basis is the div_yield lesson -- the adjusted
+    close bakes in FUTURE corporate actions, and Form 4 dollar values are
+    raw dollars, so the denominator must be too. NaN when never covered or
+    when shares_outstanding / close_raw are unavailable; 0.0 when covered
+    with no officer buying (a real quiet)."""
+    scores: dict[str, float] = {}
+    for symbol in view.symbols:
+        window = view.insider_window(symbol)
+        score = math.nan
+        if window is not None:
+            shares = _fundamental_field(view, symbol, "shares_outstanding")
+            bars = view.bars(symbol)
+            close_raw = float(bars["close_raw"].iloc[-1]) if len(bars) else math.nan
+            if (not math.isnan(shares) and shares > 0
+                    and not math.isnan(close_raw) and close_raw > 0):
+                officer = window[(window["code"] == "P") & window["is_officer"]]
+                score = float(officer["value"].sum()) / (shares * close_raw)
+        scores[symbol] = score
+    return pd.Series(scores, dtype="float64")
+
+
+# Net purchase ratio (Lakonishok-Lee): insider net buying predicts returns.
+_register("npr_90", _npr_90, requires_insider=True)
+# Cluster buying: several DISTINCT insiders buying together is conviction
+# (the strongest Form 4 configuration in the literature).
+_register("cluster_buys_90", _cluster_buys_90, requires_insider=True)
+# Officer purchases carry the most information per dollar; market-cap scale
+# needs fundamentals shares_outstanding -> BOTH flags (spec section 3).
+_register("officer_buy_90", _officer_buy_90,
+          requires_insider=True, requires_fundamentals=True)

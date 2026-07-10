@@ -222,6 +222,9 @@ class UniverseSpec:
     cache_dir: Path
     samples: Path | None
     fundamentals_dir: Path | None
+    # Form 4 insider store; None = no store, requires_insider signals are
+    # refused at sweep assembly (mirrors fundamentals_dir).
+    insider_dir: Path | None = None
     # Piece 2: an explicit universe (segment pools). None = derive from the
     # samples allowlist (Piece 1 behavior). The segment's identity in the
     # hashed trial config is its NAME (spec section 3.3); the symbol list is
@@ -241,12 +244,14 @@ def default_universes(root: Path) -> dict[str, UniverseSpec]:
             root / "data" / "equities-tiingo",
             root / "data" / "options-iv" / "samples.jsonl",
             root / "data" / "fundamentals" / "equities",
+            insider_dir=root / "data" / "insider" / "equities",
         ),
         "midcap": UniverseSpec(
             "midcap",
             root / "data" / "equities-midcap-tiingo",
             root / "data" / "options-iv" / "samples-midcap.jsonl",
             root / "data" / "fundamentals" / "equities",
+            insider_dir=root / "data" / "insider" / "equities",
         ),
     }
 
@@ -274,6 +279,7 @@ def build_universe_panel(
 ) -> PanelData:
     return build_panel(
         spec.cache_dir, spec.samples, spec.fundamentals_dir,
+        insider_dir=spec.insider_dir,
         symbols=spec.symbols, factors=factors,
         sectors=_universe_sectors(spec.sic_map_path),
     )
@@ -310,6 +316,14 @@ def _check_universe_supports(panel: PanelData, spec: SignalSpec, universe: str) 
             "Re-gather this universe's cells with a volume-carrying "
             "`scripts/gather_options_iv.py` run, or work around it by "
             "passing --signals without the option-volume family"
+        )
+    if spec.requires_insider and not panel.insider:
+        raise SweepError(
+            f"signal {spec.name!r} requires insider transactions; universe "
+            f"{universe!r} has none. Expected store: data/insider/equities "
+            "(UniverseSpec.insider_dir points at it). Populate it with "
+            "`scripts/build_insider_store.py`; or work around it by passing "
+            "--signals with a non-insider signal subset"
         )
 
 

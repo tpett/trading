@@ -16,6 +16,7 @@ Pure I/O + indexing: no clock reads; as_of is always a parameter.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -27,6 +28,8 @@ import pandas as pd
 from trading.alphasearch.evaluate import TRADING_DAYS
 from trading.fundamentals.store import FundamentalsStore
 from trading.symbols import load_symbol_allowlist
+
+logger = logging.getLogger(__name__)
 
 
 class PanelError(ValueError):
@@ -121,6 +124,7 @@ def options_from_cells(cells: Iterable[dict]) -> dict[str, pd.DataFrame]:
 
 MAX_PRIOR_OPTION_AGE_DAYS = 45  # spec section 2: iv_change/dskew staleness cap
 MIN_YOY_AGE_DAYS = 300  # spec section 2: the YoY filing rule
+INSIDER_WINDOW_DAYS = 90  # insider spec section 3: trailing filed-date window
 
 
 def cells_have_volume(cells: Iterable[dict]) -> bool:
@@ -173,6 +177,54 @@ def load_fundamentals(root: Path, symbols: Iterable[str]) -> dict[str, pd.DataFr
         frame = store.read(symbol)
         if not frame.empty:
             out[symbol] = frame
+    return out
+
+
+INSIDER_SOURCE_MARKER = ".source"
+
+
+def load_insider(root: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame]:
+    """Per-symbol Form 4 insider frames (FILED-date index, the store schema
+    scripts/build_insider_store.py writes) for symbols that have any.
+    Returns {} without creating anything when the store dir is absent --
+    assembly must never invent an empty store (the fundamentals rule).
+
+    Warns ONCE per call when:
+    - The store's .source marker carries a "GAPS:<quarters>" suffix
+      (scripts/build_insider_store.py stamps this when a quarterly download/parse
+      failed): the store is still usable, but an incomplete build must announce
+      itself rather than silently under-count insider activity.
+    - Parquet files exist but the .source marker is absent: indicates a partial/
+      torn build (parquets written, marker never reached)."""
+    if not root.exists():
+        return {}
+    marker = root / INSIDER_SOURCE_MARKER
+    if marker.exists():
+        text = marker.read_text().strip()
+        _, _, gaps = text.partition("GAPS:")
+        if gaps:
+            logger.warning(
+                "insider store %s is missing coverage for quarter(s): %s "
+                "(incomplete build -- see scripts/build_insider_store.py)",
+                root, gaps,
+            )
+    else:
+        # Check if there are parquet files but no marker (partial/torn build)
+        has_parquets = any((root / f"{s.replace('/', '-')}.parquet").exists()
+                           for s in symbols)
+        if has_parquets:
+            logger.warning(
+                "insider store %s has parquet files but no .source marker "
+                "(partial/torn build -- marker never reached)",
+                root,
+            )
+    out: dict[str, pd.DataFrame] = {}
+    for symbol in sorted(set(symbols)):
+        path = root / f"{symbol.replace('/', '-')}.parquet"
+        if path.exists():
+            frame = pd.read_parquet(path)
+            if not frame.empty:
+                out[symbol] = frame
     return out
 
 
@@ -421,6 +473,23 @@ class PanelView:
         prior = window.loc[:cutoff]
         return None if prior.empty else prior.iloc[-1]
 
+    def insider_window(
+        self, symbol: str, days: int = INSIDER_WINDOW_DAYS
+    ) -> pd.DataFrame | None:
+        """Form 4 rows FILED in (as_of - days, as_of] -- calendar days, PIT
+        by FILING date (TRANS_DATE precedes filing and must never key
+        anything). None when the symbol has NO insider row filed at or
+        before as_of (never-covered: the signal-table NaN case); an EMPTY
+        frame means covered-but-quiet, a real observation (cluster_buys_90
+        scores it 0, never NaN)."""
+        frame = self._panel.insider.get(symbol)
+        if frame is None or frame.empty:
+            return None
+        visible = frame.loc[: self.as_of]
+        if visible.empty:
+            return None
+        return visible[visible.index > self.as_of - pd.Timedelta(days, unit="D")]
+
     def bars(self, symbol: str) -> pd.DataFrame:
         """The symbol's bars (BAR_COLUMNS) up to and including as_of; an
         empty BAR_COLUMNS frame when the symbol has none."""
@@ -464,6 +533,10 @@ class PanelData:
     closes: dict[str, pd.Series]
     options: dict[str, pd.DataFrame] = field(default_factory=dict)
     fundamentals: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # symbol -> Form 4 open-market transactions (filed-date index, the
+    # data/insider/equities store schema). Absent store -> {} -> the
+    # requires_insider refusal at sweep assembly.
+    insider: dict[str, pd.DataFrame] = field(default_factory=dict)
     symbols: tuple[str, ...] = ()
     corrupt_cells: int = 0
     bars: dict[str, pd.DataFrame] = field(default_factory=dict)
@@ -516,11 +589,15 @@ def build_panel(
     samples: Path | None,
     fundamentals_dir: Path | None,
     *,
+    insider_dir: Path | None = None,
     symbols: tuple[str, ...] | None = None,
     factors: pd.DataFrame | None = None,
     sectors: dict[str, str] | None = None,
 ) -> PanelData:
     """Assemble one universe's PanelData.
+
+    `insider_dir` mirrors `fundamentals_dir` (absent/None -> empty dict ->
+    `requires_insider` refusal at sweep assembly).
 
     Two universe sources (Piece 2 spec section 3.3):
 
@@ -567,12 +644,14 @@ def build_panel(
     fundamentals = (
         load_fundamentals(fundamentals_dir, closes) if fundamentals_dir is not None else {}
     )
+    insider = load_insider(insider_dir, closes) if insider_dir is not None else {}
     universe = tuple(s for s in allowlist if s in bars)
     features = compute_rolling_features(closes, factors) if factors is not None else {}
     return PanelData(
         closes={s: closes[s] for s in universe},
         options={s: options[s] for s in universe if s in options},
         fundamentals={s: fundamentals[s] for s in universe if s in fundamentals},
+        insider={s: insider[s] for s in universe if s in insider},
         symbols=universe,
         corrupt_cells=corrupt,
         bars={s: bars[s] for s in universe},
