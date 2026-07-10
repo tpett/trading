@@ -82,6 +82,69 @@ def test_leaderboard_empty_journal_is_fine(tmp_path, capsys):
     assert payload["trials"] == 0 and payload["rows"] == []
 
 
+# --------------------------------------------------------------------------- #
+# --long-only leaderboard (R1 gate amendment)
+# --------------------------------------------------------------------------- #
+def _fake_long_only_rows():
+    from trading.alphasearch.sweep import LongOnlyRow
+
+    return [
+        LongOnlyRow(signal="mom21", universe="largecap", window=DISCOVERY_WINDOW,
+                    config_hash="abc123", lo_sharpe=0.9, lo_total_return=0.35,
+                    spy_sharpe=0.6, spy_total_return=0.25, beats_spy=True,
+                    skipped_no_spread=0, error=None),
+        LongOnlyRow(signal="rvol21", universe="largecap", window=DISCOVERY_WINDOW,
+                    config_hash="def456", lo_sharpe=None, lo_total_return=None,
+                    spy_sharpe=None, spy_total_return=None, beats_spy=None,
+                    skipped_no_spread=None, error="unknown universe 'largecap:gone'"),
+    ]
+
+
+def test_long_only_leaderboard_requires_spy_cache(tmp_path, capsys, monkeypatch):
+    # No SPY stub: the (possibly-present-on-disk) real cache must NOT be
+    # silently used -- force the absent-cache path explicitly.
+    monkeypatch.setattr("trading.alphasearch.costs.load_spy_closes",
+                        lambda *a, **k: None)
+    rc = cli.main(["alphasearch", "leaderboard", "--long-only",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no SPY cache" in err
+    assert "data/equities-tiingo" in err
+
+
+def test_long_only_leaderboard_renders_table(tmp_path, capsys, monkeypatch):
+    _stub_spy(monkeypatch)
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.sweep.build_long_only_leaderboard",
+                        lambda *a, **k: _fake_long_only_rows())
+    rc = cli.main(["alphasearch", "leaderboard", "--long-only",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "mom21" in out and "YES" in out
+    assert "unknown universe" in out
+    assert "1/2 trials" in out
+    assert "data/equities-tiingo/SPY.parquet" in out
+
+
+def test_long_only_leaderboard_json(tmp_path, capsys, monkeypatch):
+    _stub_spy(monkeypatch)
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.sweep.build_long_only_leaderboard",
+                        lambda *a, **k: _fake_long_only_rows())
+    rc = cli.main(["alphasearch", "leaderboard", "--long-only",
+                   "--journal-dir", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["rows"]) == 2
+    assert payload["rows"][0]["signal"] == "mom21"
+    assert payload["rows"][0]["beats_spy"] is True
+    assert payload["rows"][1]["error"] is not None
+
+
 def test_sweep_unknown_signal_rejected_before_any_io(tmp_path, capsys):
     rc = cli.main(["alphasearch", "sweep", "--signals", "nope,mom21",
                    "--journal-dir", str(tmp_path)])

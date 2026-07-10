@@ -178,6 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated signal subset for the sweep; every run is still "
         "a journaled trial",
     )
+    alphasearch.add_argument(
+        "--long-only",
+        action="store_true",
+        help="leaderboard only: rank every journaled discovery trial by "
+        "cost-charged long-only Sharpe vs SPY buy-and-hold over the trial's "
+        "own window (R1 gate amendment); trials that can't be re-derived "
+        "from current data show honestly as n/a",
+    )
     alphasearch.add_argument("--journal-dir", default="journal", help="journal root")
     alphasearch.add_argument(
         "--factors-dir", default="data/factors", help="Ken French factor cache directory"
@@ -856,6 +864,27 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
     journal = engine.trials_journal(Path(args.journal_dir))
 
     if args.action == "leaderboard":
+        if args.long_only:
+            spy_closes = _load_spy_closes()
+            if spy_closes is None:
+                return 1
+            factors = _load_alphasearch_factors(args)
+            if factors is None:
+                return 1
+            universes = engine.default_universes(Path("."))
+            try:
+                from trading.alphasearch.segments import segment_universes
+
+                seg_universes, _excluded = segment_universes(Path("."))
+                universes = {**universes, **seg_universes}
+            except engine.SweepError:
+                # Segment universes unavailable (no SIC map synced, etc.):
+                # their trials still show up, honestly n/a below, rather
+                # than aborting the whole view.
+                pass
+            rows = engine.build_long_only_leaderboard(journal, universes, factors, spy_closes)
+            _print_long_only_leaderboard(rows, as_json=args.json)
+            return 0
         # The auditable view: recomputed from the journal alone, no new trials.
         rows, count = engine.build_leaderboard(journal)
         _print_alphasearch_leaderboard(rows, count, as_json=args.json)
@@ -1162,6 +1191,48 @@ def _print_alphasearch_leaderboard(rows, count: int, *, as_json: bool) -> None:
         "[dim]t-stats use classical OLS SEs on daily data; volatility "
         "clustering typically inflates them 10-30% vs HAC — read marginal "
         "passes skeptically[/dim]"
+    )
+
+
+def _print_long_only_leaderboard(rows, *, as_json: bool) -> None:
+    if as_json:
+        from dataclasses import asdict
+
+        print(json.dumps({"rows": [asdict(r) for r in rows]}))
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    def num(value, fmt="{:+.2f}"):
+        return "-" if value is None else fmt.format(value)
+
+    def pct(value):
+        return "-" if value is None else f"{value:+.1%}"
+
+    console = Console() if sys.stdout.isatty() else Console(width=200)
+    table = Table(
+        title=f"alphasearch leaderboard — long-only vs SPY (cost-charged, "
+        f"{len(rows)} discovery trials)"
+    )
+    for col in ["signal", "universe", "window", "lo Sharpe", "SPY Sharpe",
+                "lo total", "SPY total", "beats SPY", "n/a reason"]:
+        table.add_column(col, justify="right")
+    for r in rows:
+        table.add_row(
+            r.signal, r.universe, r.window,
+            num(r.lo_sharpe), num(r.spy_sharpe),
+            pct(r.lo_total_return), pct(r.spy_total_return),
+            "-" if r.beats_spy is None else ("YES" if r.beats_spy else "no"),
+            r.error or "",
+        )
+    console.print(table)
+    console.print(
+        f"{sum(1 for r in rows if r.error is not None)}/{len(rows)} trials "
+        "n/a (data/registry has changed since the trial was journaled; the "
+        "raw daily series is never stored, only re-derivable from current "
+        "caches). SPY series: data/equities-tiingo/SPY.parquet.",
+        highlight=False,
     )
 
 

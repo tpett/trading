@@ -29,7 +29,7 @@ import pandas as pd
 
 from trading.alphasearch import stats
 from trading.alphasearch.evaluate import AlphaResult, evaluate_alpha
-from trading.alphasearch.panel import PanelData, build_panel
+from trading.alphasearch.panel import PanelData, PanelError, build_panel
 from trading.alphasearch.sort import (
     MIN_NAMES,
     QUANTILES,
@@ -565,6 +565,126 @@ def battery_verdict(journal: Journal, config_hash: str) -> dict | None:
         if event.get("kind") == "battery" and event.get("config_hash") == config_hash:
             return event
     return None
+
+
+# --------------------------------------------------------------------------- #
+# --long-only leaderboard (R1 gate amendment spec section 4 deliverable 2):
+# re-derives EVERY journaled discovery trial's cost-charged long-only series
+# from CURRENT data and ranks it against SPY buy-and-hold over the trial's
+# own window. A DISPLAY, never a re-journaling -- no trial is re-scored, no
+# event is written, no touch is spent. Only the raw daily lo series can't be
+# recovered from the journal (the journal keeps summary stats, not the
+# series), so this necessarily re-runs the sort; trials whose signal/universe
+# no longer resolves, or whose data can't reproduce it, show honestly as n/a.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class LongOnlyRow:
+    signal: str
+    universe: str
+    window: str
+    config_hash: str
+    lo_sharpe: float | None
+    lo_total_return: float | None
+    spy_sharpe: float | None
+    spy_total_return: float | None
+    beats_spy: bool | None      # None when re-derivation failed (n/a)
+    skipped_no_spread: int | None
+    error: str | None           # set -> every numeric field above is None
+
+
+def _rederive_long_only_row(
+    trial: dict,
+    universes: dict[str, UniverseSpec],
+    panels: dict[str, PanelData],
+    spy_closes: pd.Series,
+) -> LongOnlyRow:
+    from trading.alphasearch.costs import cost_charged_lo, spy_benchmark
+    from trading.alphasearch.evaluate import annualized_sharpe, total_return
+
+    signal_name, universe_name, window = trial["signal"], trial["universe"], trial["window"]
+    config_hash = trial["config_hash"]
+
+    def _na(error: str) -> LongOnlyRow:
+        return LongOnlyRow(
+            signal=signal_name, universe=universe_name, window=window,
+            config_hash=config_hash, lo_sharpe=None, lo_total_return=None,
+            spy_sharpe=None, spy_total_return=None, beats_spy=None,
+            skipped_no_spread=None, error=error,
+        )
+
+    if signal_name not in SIGNALS:
+        return _na(f"unknown signal {signal_name!r} (registry has changed)")
+    if universe_name not in universes:
+        return _na(f"unknown universe {universe_name!r} (not resolved for this view)")
+    panel = panels.get(universe_name)
+    if panel is None:
+        return _na(f"panel for universe {universe_name!r} could not be assembled")
+    spec = SIGNALS[signal_name]
+    params = trial.get("params") or {}
+    subset = params.get("symbol_subset")
+    try:
+        start, end = _window_bounds(window)
+        dates = panel.decision_dates(start, end, offset=int(params.get("calendar_offset", 0)))
+        sort = portfolio_sort(
+            panel, spec, dates, end,
+            quantiles=int(params.get("quantiles", QUANTILES)),
+            tercile_below=int(params.get("tercile_below", TERCILE_BELOW)),
+            min_names=int(params.get("min_names", MIN_NAMES)),
+            symbol_subset=tuple(subset) if subset is not None else None,
+        )
+        charged_lo, skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
+        lo_sharpe = annualized_sharpe(charged_lo)
+        lo_total = total_return(charged_lo)
+        spy_stats = spy_benchmark(spy_closes, start, end)
+    except (SweepError, SortError, ValueError, IndexError, np.linalg.LinAlgError) as exc:
+        return _na(f"{type(exc).__name__}: {exc}")
+    beats = (
+        not math.isnan(lo_sharpe) and not math.isnan(spy_stats.sharpe_annual)
+        and lo_sharpe >= spy_stats.sharpe_annual
+        and not math.isnan(lo_total) and not math.isnan(spy_stats.total_return)
+        and lo_total > spy_stats.total_return
+    )
+    return LongOnlyRow(
+        signal=signal_name, universe=universe_name, window=window,
+        config_hash=config_hash,
+        lo_sharpe=None if math.isnan(lo_sharpe) else lo_sharpe,
+        lo_total_return=None if math.isnan(lo_total) else lo_total,
+        spy_sharpe=(
+            None if math.isnan(spy_stats.sharpe_annual) else spy_stats.sharpe_annual
+        ),
+        spy_total_return=(
+            None if math.isnan(spy_stats.total_return) else spy_stats.total_return
+        ),
+        beats_spy=beats, skipped_no_spread=skipped, error=None,
+    )
+
+
+def build_long_only_leaderboard(
+    journal: Journal,
+    universes: dict[str, UniverseSpec],
+    factors: pd.DataFrame,
+    spy_closes: pd.Series,
+    *,
+    panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
+        build_universe_panel
+    ),
+) -> list[LongOnlyRow]:
+    """Every journaled discovery trial, re-derived and ranked by cost-charged
+    long-only Sharpe vs SPY buy-and-hold (spec section 4 deliverable 2).
+    Rows sorted by lo_sharpe descending, n/a (unrankable) rows last."""
+    trials = discovery_trials(journal)
+    panels: dict[str, PanelData] = {}
+    for name, uspec in universes.items():
+        try:
+            panels[name] = panel_factory(uspec, factors)
+        except PanelError:
+            continue   # every trial in this universe honestly shows n/a below
+    rows = [
+        _rederive_long_only_row(trial, universes, panels, spy_closes)
+        for trial in trials
+    ]
+    rows.sort(key=lambda r: (r.lo_sharpe is None, -(r.lo_sharpe or 0.0)))
+    return rows
 
 
 # --------------------------------------------------------------------------- #

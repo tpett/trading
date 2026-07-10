@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from alphasearch_helpers import make_factors, make_panel
+from alphasearch_helpers import make_factors, make_panel, make_spy_closes
 from trading.alphasearch.panel import PanelError
 from trading.alphasearch.spec import SIGNALS, SignalSpec
 from trading.alphasearch.sweep import (
@@ -15,6 +15,7 @@ from trading.alphasearch.sweep import (
     SweepError,
     UniverseSpec,
     build_leaderboard,
+    build_long_only_leaderboard,
     default_universes,
     discovery_trials,
     holdout_passes,
@@ -753,3 +754,85 @@ def test_build_universe_panel_derives_sectors_from_the_sic_map(tmp_path):
     panel = build_universe_panel(uspec, make_factors())
     # Sectors only (the 10-way partition); industries never masquerade as one.
     assert panel.sectors == {"AAA": "pharma-chemicals", "BBB": "finance"}
+
+
+# --------------------------------------------------------------------------- #
+# --long-only leaderboard (R1 gate amendment spec section 4 deliverable 2)
+# --------------------------------------------------------------------------- #
+def test_long_only_leaderboard_rederives_a_real_trial(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, make_spy_closes(),
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.signal == "mom21" and row.universe == "largecap"
+    assert row.window == WINDOW
+    assert row.error is None
+    assert row.lo_sharpe is not None
+    assert row.spy_sharpe is not None
+    assert isinstance(row.beats_spy, bool)
+    assert row.skipped_no_spread == 0   # make_panel's bars always carry high/low
+
+
+def test_long_only_leaderboard_reports_na_for_unresolvable_universe(tmp_path):
+    # A trial journaled under a universe name no longer in the resolved set
+    # (e.g. a segment whose SIC map went missing) shows honestly as n/a,
+    # never silently dropped.
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap:gone", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=8.0, alpha_t=3.0, p=0.01))
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), make_factors(), make_spy_closes(),
+    )
+    assert len(rows) == 1
+    assert rows[0].error is not None and "unknown universe" in rows[0].error
+    assert rows[0].lo_sharpe is None and rows[0].beats_spy is None
+
+
+def test_long_only_leaderboard_reports_na_for_unknown_signal(tmp_path):
+    # A signal since removed from the registry: honest n/a, not a crash.
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    log_trial(journal, kind="discovery",
+              config=trial_config("no_longer_exists", "largecap", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=8.0, alpha_t=3.0, p=0.01))
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), make_factors(), make_spy_closes(),
+        panel_factory=lambda _u, _f: make_panel(),
+    )
+    assert len(rows) == 1
+    assert rows[0].error is not None and "unknown signal" in rows[0].error
+
+
+def test_long_only_leaderboard_sorts_by_sharpe_with_na_last(tmp_path):
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21", "rev5"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    log_trial(journal, kind="discovery",
+              config=trial_config("gone", "largecap", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=1.0, alpha_t=1.0, p=0.5))
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, make_spy_closes(),
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 3
+    ranked = [r for r in rows if r.error is None]
+    assert len(ranked) == 2
+    assert ranked[0].lo_sharpe >= ranked[1].lo_sharpe
+    assert rows[-1].error is not None   # the n/a row sorts last
