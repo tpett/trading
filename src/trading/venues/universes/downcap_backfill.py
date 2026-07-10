@@ -59,6 +59,7 @@ def _fetch_waiting_on_rate_limit(cache, adapter, symbol, start, end, wait_s):
         try:
             return cache.fetch(symbol, start, end, adapter.fetch_ohlcv)
         except RateLimitError:
+            print(f"  rate-limited on {symbol}; waiting {wait_s:.0f}s", flush=True)
             _sleep(wait_s)
 
 

@@ -41,6 +41,14 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_venue_config("equities", Path(args.config_dir))
+    if config.data.bar_source != "tiingo":
+        print(
+            f"FATAL: down-cap roster is Tiingo-only (fetched from Tiingo's "
+            f"supported_tickers ZIP), but {args.config_dir} sets "
+            f"data.bar_source={config.data.bar_source!r}",
+            file=sys.stderr,
+        )
+        return 1
     adapter = make_adapter(config)
     cache = OhlcvCache(Path(args.cache_dir), config.data.refetch_days, source="tiingo")
 
@@ -72,6 +80,7 @@ def main() -> int:
             print(f"  {line}")
     if result.coverage < args.min_coverage:
         print(f"\nWARN: coverage {result.coverage:.1%} < {args.min_coverage:.0%} floor")
+        return 1
     print("\nbackfill done")
     return 0
 
