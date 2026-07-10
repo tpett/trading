@@ -700,9 +700,44 @@ leaderboard, BH-survivor status unchanged), but per the ALREADY-recorded
 §11-12 walk-forward, its tradeable long-only form was refuted before this
 amendment existed — the new gate formalizes exactly the judgment that
 refutation was already making informally. No park decision changes as a
-result of this amendment alone; a future `--long-only` read of the amihud
-trials would need to re-derive their series from current data to state a
-number, which this record does not attempt (out of scope: no sweep re-run).
+result of this amendment alone.
+
+### The `--long-only` re-read (2026-07-10, display only — no journaling, no promotion)
+
+Ran `trading alphasearch leaderboard --long-only` over the full journal.
+Of 946 trials, **863 re-derived** a cost-charged long-only series from
+current data; **83 show honestly as n/a** (data can no longer re-derive the
+book — never silently scored 0 or dropped).
+
+**The number that matters most is a warning, not a result: 390 of 863
+(45%) "beat SPY" long-only, after Corwin-Schultz costs, over their own
+discovery window.** That is the overfitting surface made visible, not
+evidence of edge. Selecting a signal's top quintile and holding it over a
+bull-heavy 2019–2023 window will beat SPY roughly half the time by
+construction; an in-sample beat is a *necessary, nowhere-near-sufficient*
+screen. This is precisely why the amended gate is prospective and why
+promotion still requires the battery **and** the once-only holdout on top of
+this display. The board is "candidates that clear step one," nothing more.
+
+**amihud:midcap tops the board yet is already refuted.** Its in-sample
+long-only Sharpe reaches +2.46 (vs SPY +1.12 on that sub-window) with
+total returns into the thousands of percent — the microcap-illiquidity
+explosion, on names a $1k account cannot actually accumulate. Its OOS
+walk-forward (§ above) already failed at 0.16. There is no cleaner
+illustration that in-sample leaderboard rank ≠ tradeable edge; the amihud
+park decision is unchanged.
+
+**What the long-only lens surfaces that the L/S gate under-weighted**
+(recorded as candidates to carry into the R2/R3 work, NOT promotions):
+`atm_spread` on **largecap** (+1.38 vs SPY +0.80) and on
+opt-largecap:services (+1.45); `vrp` on largecap (+1.29); `mom252` on
+midcap (+1.39). These are tradeable large-cap constructions that the
+four-factor L/S screen treated as only "suggestive" (§10's vrp/atm_spread
+note) — worth a real look under the new objective. **Caveat the board makes
+visible:** the `opt-largecap:manufacturing-tech` segment recurs under nearly
+every signal near the top — that reads as tech beta over 2019–2021, not
+signal, and is a reminder that segment/beta, not the ranker, drives much of
+the in-sample outperformance.
 
 ## Known caveats affecting these numbers
 
