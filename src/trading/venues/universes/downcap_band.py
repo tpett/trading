@@ -96,8 +96,11 @@ def evaluate_band(
     has_shares = not math.isnan(shares) and shares > 0
     if not has_shares:
         return BandEval(None, False, tradeable, math.nan, spread, dollar_volume)
-    close_raw = float(bars["close_raw"].iloc[-1])
-    market_cap = market_cap_raw(shares, close_raw)
+    if bars.empty:
+        market_cap = math.nan
+    else:
+        close_raw = float(bars["close_raw"].iloc[-1])
+        market_cap = market_cap_raw(shares, close_raw) if close_raw > 0 else math.nan
     cap_band = band_of(market_cap)
     band = cap_band if (tradeable and cap_band is not None) else None
     return BandEval(band, True, tradeable, market_cap, spread, dollar_volume)

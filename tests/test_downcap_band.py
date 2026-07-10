@@ -39,6 +39,19 @@ def test_median_dollar_volume_hand_computed():
     assert db.median_dollar_volume(bars) == pytest.approx(1_000_000.0)
 
 
+def test_median_dollar_volume_discriminates_from_mean():
+    # Pins median-not-mean: 62 sessions @ $1M/day dollar-volume + 1 session
+    # @ $50M/day. Mean over the trailing-63 window is ~$1.79M, but the
+    # median stays at $1M. If the implementation used `.mean()` instead of
+    # `.median()`, this assertion would fail.
+    bars = _bars(n=63, close=10.0, volume=100_000.0)  # $1M/day baseline
+    bars = bars.copy()
+    bars.iloc[-1, bars.columns.get_loc("volume")] = 5_000_000.0  # $50M spike day
+    mean_dv = float((bars["close"] * bars["volume"]).mean())
+    assert mean_dv != pytest.approx(1_000_000.0)
+    assert db.median_dollar_volume(bars) == pytest.approx(1_000_000.0)
+
+
 def test_evaluate_band_in_band_micro():
     bars = _bars(close_raw=10.0, close=10.0, volume=100_000.0)
     ev = db.evaluate_band(bars, shares=20_000_000.0)  # $200M -> micro
@@ -87,3 +100,20 @@ def test_cap_ignores_future_split_lookahead_guard():
     assert ev_pre.market_cap == ev_post.market_cap == pytest.approx(200_000_000.0)
     # Sanity: a cap computed on the adjusted close WOULD have leaked the split.
     assert (20_000_000.0 * float(post["close"].iloc[-1])) != pytest.approx(200_000_000.0)
+
+
+def test_evaluate_band_empty_bars_fail_closed():
+    """A name with PIT shares_outstanding but no cached bars (e.g. PanelView
+    returns an empty frame) must fail closed to NaN/None, never raise."""
+    empty = _bars(n=0)
+    ev = db.evaluate_band(empty, shares=20_000_000.0)
+    assert ev.band is None
+    assert ev.has_shares is True
+    assert math.isnan(ev.market_cap)
+
+
+def test_evaluate_band_nonpositive_close_raw_fail_closed():
+    bars = _bars(close_raw=0.0, close=10.0, volume=100_000.0)
+    ev = db.evaluate_band(bars, shares=20_000_000.0)
+    assert ev.band is None
+    assert math.isnan(ev.market_cap)
