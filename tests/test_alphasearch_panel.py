@@ -158,6 +158,12 @@ def test_cell_metrics_matches_signal_scan_semantics():
     assert m["atm_spread"] == (4.2 - 4.0) / 4.1
     assert math.isclose(m["smile"], (0.34 + 0.28) / 2 - 0.30, rel_tol=1e-12)
     assert set(OPTION_COLUMNS) == set(m)
+    # _cell carries no open_interest key on any leg and no far block.
+    assert math.isnan(m["otm_put_oi"])
+    assert math.isnan(m["atm_oi"])
+    assert math.isnan(m["otm_call_oi"])
+    assert math.isnan(m["oi_total"])
+    assert math.isnan(m["far_atm_iv"])
 
 
 def test_options_from_cells_builds_float_frames():
@@ -557,17 +563,79 @@ def _enriched_cell(symbol: str, date: str) -> dict:
     return cell
 
 
+_OI_FAR_COLUMNS = {"otm_put_oi", "atm_oi", "otm_call_oi", "oi_total", "far_atm_iv"}
+
+
 def test_cell_metrics_identical_on_v2_enriched_cell():
-    """Enrichment keys and the far block are INVISIBLE to cell_metrics: every
-    OPTION_COLUMNS value matches the un-enriched v1 cell exactly."""
+    """Greeks (delta/gamma/theta/vega) enrichment is INVISIBLE to
+    cell_metrics: every pre-existing OPTION_COLUMNS value matches the
+    un-enriched v1 cell exactly. Per-leg OI and the far block ARE read
+    (2026-07-09 oi_put_call/d_oi/iv_term_slope), so those columns
+    legitimately differ -- exercised by the dedicated tests below."""
     v1 = cell_metrics(_cell("AAA", "2020-01-02"))
     v2 = cell_metrics(_enriched_cell("AAA", "2020-01-02"))
     assert set(v2) == set(OPTION_COLUMNS)
     for key in OPTION_COLUMNS:
+        if key in _OI_FAR_COLUMNS:
+            continue
         if isinstance(v1[key], float) and math.isnan(v1[key]):
             assert math.isnan(v2[key])
         else:
             assert v2[key] == v1[key], key
+
+
+def test_cell_metrics_per_leg_oi_nan_when_key_absent_real_value_when_present():
+    # _cell's legs carry no open_interest key at all -> NaN, never a
+    # fabricated 0 (absent != a served 0, same rule as leg volume).
+    bare = cell_metrics(_cell("AAA", "2020-01-02"))
+    assert math.isnan(bare["otm_put_oi"])
+    assert math.isnan(bare["atm_oi"])
+    assert math.isnan(bare["otm_call_oi"])
+    # _enriched_cell sets open_interest=1500 on every leg.
+    enriched = cell_metrics(_enriched_cell("AAA", "2020-01-02"))
+    assert enriched["otm_put_oi"] == 1500
+    assert enriched["atm_oi"] == 1500
+    assert enriched["otm_call_oi"] == 1500
+
+
+def test_cell_metrics_per_leg_oi_real_zero_is_honest():
+    cell = _enriched_cell("AAA", "2020-01-02")
+    put_leg = next(c for c in cell["contracts"] if c["role"] == "otm_put")
+    put_leg["open_interest"] = 0
+    m = cell_metrics(cell)
+    assert m["otm_put_oi"] == 0  # a served 0 is real, not "absent"
+
+
+def test_cell_metrics_oi_total_nan_when_no_leg_carries_the_key():
+    m = cell_metrics(_cell("AAA", "2020-01-02"))
+    assert math.isnan(m["oi_total"])
+
+
+def test_cell_metrics_oi_total_sums_only_legs_carrying_the_key():
+    cell = _enriched_cell("AAA", "2020-01-02")  # every leg OI=1500 (3 legs)
+    del cell["contracts"][1]["open_interest"]  # otm_put loses its OI key
+    m = cell_metrics(cell)
+    assert m["oi_total"] == 1500 + 1500  # atm + otm_call only, put excluded
+
+
+def test_cell_metrics_far_atm_iv_absent_without_far_block():
+    m = cell_metrics(_cell("AAA", "2020-01-02"))
+    assert math.isnan(m["far_atm_iv"])
+
+
+def test_cell_metrics_far_atm_iv_absent_when_far_atm_leg_missing():
+    cell = _enriched_cell("AAA", "2020-01-02")
+    cell["far"]["contracts"] = [
+        c for c in cell["far"]["contracts"] if c["role"] != "atm"
+    ]
+    m = cell_metrics(cell)
+    assert math.isnan(m["far_atm_iv"])
+
+
+def test_cell_metrics_far_atm_iv_present_when_far_block_carries_it():
+    # _enriched_cell's far block has role="atm" with iv=0.31.
+    m = cell_metrics(_enriched_cell("AAA", "2020-01-02"))
+    assert m["far_atm_iv"] == 0.31
 
 
 def test_load_options_parses_mixed_v1_and_v2_lines(tmp_path):

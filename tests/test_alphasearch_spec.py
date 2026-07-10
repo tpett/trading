@@ -155,6 +155,140 @@ def test_options_signals_nan_without_cells():
         assert _score(name, bare, as_of).isna().all()
 
 
+# --------------------------------------------------------------------------- #
+# Options-v2 batch: oi_put_call, d_oi, iv_term_slope (registry 40 -> 43)
+# --------------------------------------------------------------------------- #
+
+
+def _oi_cell(
+    symbol: str, date: str, *, put_oi=None, atm_oi=None, call_oi=None, far_atm_iv=None,
+) -> dict:
+    """A cell shaped like _options_panel's, with optional per-leg OI and an
+    optional far block (role=atm only, enough to exercise iv_term_slope).
+    A None leg OI omits the open_interest key entirely (leg-present-but-
+    unmeasured, distinct from a served 0)."""
+    contracts = [
+        {"role": "atm", "bid": 4.0, "ask": 4.2, "mid": 4.1, "iv": 0.30},
+        {"role": "otm_put", "iv": 0.34},
+        {"role": "otm_call", "iv": 0.28},
+    ]
+    for contract, oi in zip(contracts, (atm_oi, put_oi, call_oi), strict=True):
+        if oi is not None:
+            contract["open_interest"] = oi
+    cell = {"symbol": symbol, "decision_date": date, "skew_put_atm": 0.05,
+            "skew_put_call": 0.02, "contracts": contracts}
+    if far_atm_iv is not None:
+        cell["far"] = {"contracts": [{"role": "atm", "iv": far_atm_iv}]}
+    return cell
+
+
+def _panel_from_cells(cells: list[dict], as_of: pd.Timestamp, symbols=("AAA",)) -> PanelData:
+    idx = pd.date_range("2020-01-02", periods=60, freq="B", tz="UTC")
+    closes = {s: pd.Series(100.0, index=idx) for s in symbols}
+    return PanelData(closes=closes, options=options_from_cells(cells),
+                     fundamentals={}, symbols=symbols)
+
+
+def test_oi_put_call_sign_and_formula():
+    as_of = pd.Timestamp("2020-01-02", tz="UTC")
+    date = as_of.date().isoformat()
+    cells = [
+        _oi_cell("HEAVY_PUT", date, put_oi=5000, atm_oi=100, call_oi=100),
+        _oi_cell("LIGHT_PUT", date, put_oi=10, atm_oi=100, call_oi=100),
+    ]
+    panel = _panel_from_cells(cells, as_of, symbols=("HEAVY_PUT", "LIGHT_PUT"))
+    scores = _score("oi_put_call", panel, as_of)
+    want_heavy = -(math.log1p(5000) - math.log1p(200))
+    want_light = -(math.log1p(10) - math.log1p(200))
+    assert math.isclose(scores["HEAVY_PUT"], want_heavy, rel_tol=1e-12)
+    assert math.isclose(scores["LIGHT_PUT"], want_light, rel_tol=1e-12)
+    # Heavy put OI positioning is LESS attractive (negated formula).
+    assert scores["HEAVY_PUT"] < scores["LIGHT_PUT"]
+
+
+def test_oi_put_call_nan_when_any_leg_lacks_oi_key():
+    as_of = pd.Timestamp("2020-01-02", tz="UTC")
+    date = as_of.date().isoformat()
+    cells = [_oi_cell("AAA", date, put_oi=100, atm_oi=100, call_oi=None)]
+    panel = _panel_from_cells(cells, as_of)
+    assert math.isnan(_score("oi_put_call", panel, as_of)["AAA"])
+
+
+def test_oi_put_call_nan_when_cell_absent():
+    as_of = pd.Timestamp("2020-01-02", tz="UTC")
+    panel = _panel_from_cells([], as_of)
+    assert math.isnan(_score("oi_put_call", panel, as_of)["AAA"])
+
+
+def test_d_oi_sign_and_formula():
+    prior_date = pd.Timestamp("2020-01-02", tz="UTC")
+    as_of = pd.Timestamp("2020-02-03", tz="UTC")
+    cells = [
+        _oi_cell("RISING", prior_date.date().isoformat(), put_oi=100, atm_oi=100, call_oi=100),
+        _oi_cell("RISING", as_of.date().isoformat(), put_oi=1000, atm_oi=1000, call_oi=1000),
+        _oi_cell("FALLING", prior_date.date().isoformat(), put_oi=1000, atm_oi=1000, call_oi=1000),
+        _oi_cell("FALLING", as_of.date().isoformat(), put_oi=100, atm_oi=100, call_oi=100),
+    ]
+    panel = _panel_from_cells(cells, as_of, symbols=("RISING", "FALLING"))
+    scores = _score("d_oi", panel, as_of)
+    want_rising = -(math.log1p(3000) - math.log1p(300))
+    assert math.isclose(scores["RISING"], want_rising, rel_tol=1e-12)
+    # Rising OI predicts LOWER returns -> less attractive than falling OI.
+    assert scores["RISING"] < scores["FALLING"]
+
+
+def test_d_oi_nan_when_prior_is_stale_or_absent():
+    as_of = pd.Timestamp("2020-03-01", tz="UTC")
+    date = as_of.date().isoformat()
+    only_current = _panel_from_cells(
+        [_oi_cell("AAA", date, put_oi=100, atm_oi=100, call_oi=100)], as_of
+    )
+    assert math.isnan(_score("d_oi", only_current, as_of)["AAA"])  # no prior cell
+    stale_prior = pd.Timestamp("2020-01-02", tz="UTC")  # > 45 days before as_of
+    stale = _panel_from_cells(
+        [_oi_cell("AAA", stale_prior.date().isoformat(), put_oi=100, atm_oi=100, call_oi=100),
+         _oi_cell("AAA", date, put_oi=200, atm_oi=200, call_oi=200)],
+        as_of,
+    )
+    assert math.isnan(_score("d_oi", stale, as_of)["AAA"])
+
+
+def test_d_oi_nan_when_no_leg_carries_oi_in_either_cell():
+    prior_date = pd.Timestamp("2020-02-03", tz="UTC")
+    as_of = pd.Timestamp("2020-02-20", tz="UTC")
+    cells = [
+        _oi_cell("AAA", prior_date.date().isoformat()),  # no OI at all
+        _oi_cell("AAA", as_of.date().isoformat(), put_oi=100, atm_oi=100, call_oi=100),
+    ]
+    panel = _panel_from_cells(cells, as_of)
+    assert math.isnan(_score("d_oi", panel, as_of)["AAA"])
+
+
+def test_iv_term_slope_sign_and_formula():
+    as_of = pd.Timestamp("2020-01-02", tz="UTC")
+    date = as_of.date().isoformat()
+    cells = [_oi_cell("AAA", date, far_atm_iv=0.40)]  # near atm_iv is 0.30
+    panel = _panel_from_cells(cells, as_of)
+    score = _score("iv_term_slope", panel, as_of)["AAA"]
+    assert math.isclose(score, 0.40 - 0.30, rel_tol=1e-12)
+    assert score > 0  # upward-sloping term structure is attractive (raw sign)
+
+
+def test_iv_term_slope_nan_when_far_block_absent():
+    as_of = pd.Timestamp("2020-01-02", tz="UTC")
+    date = as_of.date().isoformat()
+    cells = [_oi_cell("AAA", date)]  # no far key at all
+    panel = _panel_from_cells(cells, as_of)
+    assert math.isnan(_score("iv_term_slope", panel, as_of)["AAA"])
+
+
+def test_options_v2_batch_nan_without_cells():
+    as_of = pd.Timestamp("2020-01-02", tz="UTC")
+    panel = _panel_from_cells([], as_of)
+    for name in ("oi_put_call", "d_oi", "iv_term_slope"):
+        assert math.isnan(_score(name, panel, as_of)["AAA"])
+
+
 def test_fundamentals_family_values_and_neutrality():
     idx = pd.date_range("2020-01-02", periods=10, freq="B", tz="UTC")
     closes = {"AAA": pd.Series(50.0, index=idx), "BBB": pd.Series(50.0, index=idx)}
@@ -175,9 +309,11 @@ def test_fundamentals_family_values_and_neutrality():
 
 
 def test_registry_is_complete_with_correct_requirements():
-    assert len(SIGNALS) == 40  # 16 seeds + 21 Tier-1 (9+5+5+2) + 3 insider
+    # 16 seeds + 21 Tier-1 (9+5+5+2) + 3 insider + 3 options-v2 batch.
+    assert len(SIGNALS) == 43
     options_family = {"vrp", "hedge", "excite", "atm_iv", "smile", "atm_spread",
-                      "cp_vol", "osv", "otm_put_iv", "iv_change", "dskew"}
+                      "cp_vol", "osv", "otm_put_iv", "iv_change", "dskew",
+                      "oi_put_call", "d_oi", "iv_term_slope"}
     volume_family = {"cp_vol", "osv"}
     # officer_buy_90 needs shares_outstanding: it is IN the fundamentals
     # family (dual-flagged) as well as the insider family (spec section 3).

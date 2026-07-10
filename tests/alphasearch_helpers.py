@@ -23,10 +23,21 @@ def make_cell(
     skew_put_atm: float = 0.05,
     skew_put_call: float = 0.02,
     with_volume: bool = True,
+    atm_oi: float | None = None,
+    put_oi: float | None = None,
+    call_oi: float | None = None,
+    far_atm_iv: float | None = None,
 ) -> dict:
     """One samples.jsonl-shaped options cell with all three legs present.
     with_volume=False reproduces the largecap gather (no volume keys on any
-    leg); True reproduces the mid-cap gather (volumes 100/50/25)."""
+    leg); True reproduces the mid-cap gather (volumes 100/50/25).
+
+    2026-07-09 options-v2 batch (oi_put_call/d_oi/iv_term_slope): atm_oi/
+    put_oi/call_oi set each leg's open_interest key; None (the default)
+    OMITS the key entirely (leg-present-but-unmeasured), keeping every
+    existing caller's cell shape OI-absent. far_atm_iv, when given, adds a
+    minimal far block (role=atm only) carrying that IV; None (the default)
+    omits "far" entirely."""
     contracts = [
         {"role": "atm", "bid": 4.0, "ask": 4.2, "mid": 4.1, "iv": atm_iv},
         {"role": "otm_put", "mid": 2.0, "iv": put_iv},
@@ -35,13 +46,19 @@ def make_cell(
     if with_volume:
         for contract, volume in zip(contracts, (100, 50, 25), strict=True):
             contract["volume"] = volume
-    return {
+    for contract, oi in zip(contracts, (atm_oi, put_oi, call_oi), strict=True):
+        if oi is not None:
+            contract["open_interest"] = oi
+    cell = {
         "symbol": symbol,
         "decision_date": date,
         "skew_put_atm": skew_put_atm,
         "skew_put_call": skew_put_call,
         "contracts": contracts,
     }
+    if far_atm_iv is not None:
+        cell["far"] = {"contracts": [{"role": "atm", "iv": far_atm_iv}]}
+    return cell
 
 
 def month_firsts(idx: pd.DatetimeIndex) -> list[pd.Timestamp]:
@@ -85,6 +102,7 @@ def make_panel(
     with_options: bool = True,
     with_fundamentals: bool = True,
     with_option_volume: bool = True,
+    with_open_interest: bool = True,
     with_insider: bool = True,
     factors: pd.DataFrame | None = None,
 ) -> PanelData:
@@ -109,7 +127,14 @@ def make_panel(
     filings just after a cutoff carry trans_dates BEFORE it -- the
     straddling rows the lookahead perturbation needs to catch trans_date
     keying. 8 distinct cluster values keeps segment-free sorts
-    non-degenerate (>= 3 buckets)."""
+    non-degenerate (>= 3 buckets).
+
+    with_open_interest (2026-07-09 options-v2 batch, default True so
+    oi_put_call/d_oi/iv_term_slope produce real values on this general-
+    purpose fixture): every leg gets a per-symbol constant open_interest
+    (atm/put/call distinct so oi_put_call is non-degenerate) and every cell
+    gets a far block with a distinct ATM IV -- OI is constant month to
+    month, so d_oi is a real (zero) delta rather than NaN."""
     rng = np.random.default_rng(seed)
     idx = pd.date_range(start, periods=periods, freq="B", tz="UTC")
     names = [f"S{i:02d}" for i in range(n_symbols)]
@@ -143,6 +168,10 @@ def make_panel(
                     skew_put_atm=0.02 + 0.005 * i,
                     skew_put_call=0.01 + 0.002 * i,
                     with_volume=with_option_volume,
+                    atm_oi=1000.0 + i if with_open_interest else None,
+                    put_oi=1200.0 + i if with_open_interest else None,
+                    call_oi=900.0 + i if with_open_interest else None,
+                    far_atm_iv=(0.22 + 0.01 * i) if with_open_interest else None,
                 ))
         options = options_from_cells(cells)
     fundamentals: dict[str, pd.DataFrame] = {}
