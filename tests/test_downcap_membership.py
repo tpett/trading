@@ -143,18 +143,81 @@ def test_future_filing_does_not_affect_earlier_date_membership():
     assert mar_row["market_cap"] == pytest.approx(5_000_000_000.0)
     assert mar_row["band"] is None
 
-    # Membership: MIC's only recorded in-band months are Jan/Feb. NOTE (known
-    # _coalesce edge case, flagged separately): because MIC never reappears in
-    # ANY band after exiting, the interval is left OPEN ("") rather than
-    # closed at March -- _coalesce only closes an interval when the SAME
-    # symbol has a LATER qualifying month to compare against, not from the
-    # discovery window's own calendar. The diagnostics table (asserted above)
-    # is the authoritative per-month record; this asserts the membership
-    # table's actual (not idealized) shape.
+    # Membership: MIC's only in-band months are Jan/Feb, then it exits (band
+    # goes to None) for the March decision -- a permanent exit within the
+    # discovery window. _coalesce resolves `end` from the full monthly
+    # decision-date calendar, not from the symbol's next qualifying month, so
+    # the interval CLOSES at March (exclusive) rather than staying open.
     rows = build.membership[build.membership["symbol"] == "MIC"]
     assert set(rows["band"]) == {"micro"}
+    assert len(rows) == 1
     assert rows["start"].iloc[0] == jan
-    assert rows["end"].iloc[0] == ""
+    assert rows["end"].iloc[0] == mar
+
+
+def test_permanent_exit_closes_interval():
+    # MIC: 20M sh * $10 = $200M (micro, in-band) for Jan/Feb, then the price
+    # jumps to $300 (20M * $300 = $6B, above the $2B cap) from the Mar
+    # decision onward and never returns -> a permanent exit within the
+    # discovery window.
+    # PERM: same shares, price stays $10 for the whole window -> in-band
+    # through the final (Apr) decision -> stays open.
+    idx = pd.date_range("2018-06-01", periods=420, freq="B", tz="UTC")
+    exit_date = pd.Timestamp("2019-03-01", tz="UTC")
+    close_raw = pd.Series(10.0, index=idx)
+    close_raw.loc[close_raw.index >= exit_date] = 300.0
+
+    roster = _roster(["MIC", "PERM"])
+    bars = {"MIC": _bars(close_raw.to_numpy()), "PERM": _bars(10.0)}
+    store = _Store({"MIC": 20_000_000.0, "PERM": 20_000_000.0})
+    build = dm.build_band_membership(roster, bars, store,
+                                     discovery_window="2019-01-01..2019-04-30")
+
+    dates = dm.monthly_decision_dates(
+        dm.load_calendar(bars),
+        pd.Timestamp("2019-01-01", tz="UTC"), pd.Timestamp("2019-04-30", tz="UTC"),
+    )
+    jan, _feb, mar, _apr = [d.date().isoformat() for d in dates]
+
+    mic_rows = build.membership[build.membership["symbol"] == "MIC"]
+    assert len(mic_rows) == 1
+    assert mic_rows["start"].iloc[0] == jan
+    assert mic_rows["end"].iloc[0] == mar        # closed: next decision date after Feb
+
+    perm_rows = build.membership[build.membership["symbol"] == "PERM"]
+    assert len(perm_rows) == 1
+    assert perm_rows["start"].iloc[0] == jan
+    assert perm_rows["end"].iloc[0] == ""        # still a member through the final (Apr) decision
+
+
+def test_reentry_after_gap_is_separate_interval():
+    # MIC: in-band Jan/Feb ($10 -> $200M, micro), OUT Mar/Apr ($300 -> $6B,
+    # above the cap), back IN-band May ($10 -> $200M) through the final
+    # decision -> two separate intervals: a closed one and an open one.
+    idx = pd.date_range("2018-06-01", periods=420, freq="B", tz="UTC")
+    out_start = pd.Timestamp("2019-03-01", tz="UTC")
+    back_start = pd.Timestamp("2019-05-01", tz="UTC")
+    close_raw = pd.Series(10.0, index=idx)
+    close_raw.loc[(close_raw.index >= out_start) & (close_raw.index < back_start)] = 300.0
+
+    roster = _roster(["MIC"])
+    bars = {"MIC": _bars(close_raw.to_numpy())}
+    store = _Store({"MIC": 20_000_000.0})
+    build = dm.build_band_membership(roster, bars, store,
+                                     discovery_window="2019-01-01..2019-05-31")
+
+    dates = dm.monthly_decision_dates(
+        dm.load_calendar(bars),
+        pd.Timestamp("2019-01-01", tz="UTC"), pd.Timestamp("2019-05-31", tz="UTC"),
+    )
+    jan, _feb, mar, _apr, may = [d.date().isoformat() for d in dates]
+
+    rows = build.membership[build.membership["symbol"] == "MIC"].sort_values("start")
+    assert len(rows) == 2
+    assert rows["start"].iloc[0] == jan
+    assert rows["end"].iloc[0] == mar            # closed: exits after Feb -> next decision date Mar
+    assert rows["start"].iloc[1] == may
+    assert rows["end"].iloc[1] == ""             # in-band through the final (May) decision
 
 
 def test_dollar_volume_only_fallback_ignores_cap():

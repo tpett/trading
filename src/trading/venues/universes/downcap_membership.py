@@ -59,15 +59,30 @@ class MembershipBuild:
     diagnostics: pd.DataFrame
 
 
-def _coalesce(month_rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
-    """(band, symbol, month_iso) rows in date order -> coalesced
-    (band, symbol, start, end) intervals. A break in contiguous months OR a
-    band change starts a new interval. `end` is the month-start of the first
-    month NO LONGER in that (band) -- EXCLUSIVE -- or "" when in-band through
-    the final month processed."""
-    # index months so contiguity is "adjacent in the ordered month list"
-    all_months = sorted({m for _, _, m in month_rows})
+def _coalesce(
+    month_rows: list[tuple[str, str, str]], all_months: list[str]
+) -> list[tuple[str, str, str, str]]:
+    """(band, symbol, month_iso) rows in date order, plus `all_months` -- the
+    FULL ordered monthly decision-date calendar for the discovery window
+    (not just the months some symbol qualified in) -- -> coalesced
+    (band, symbol, start, end) intervals.
+
+    A run is a maximal sequence of CONSECUTIVE decision dates (consecutive in
+    `all_months`, the real calendar) where the symbol is in the same band. A
+    gap in the calendar OR a band change ends the run and starts a new one.
+    `end` is the decision date immediately after the run's last in-band date
+    in `all_months` -- EXCLUSIVE -- or "" ONLY when that last in-band date is
+    the FINAL entry of `all_months` (still a member at window end). Because
+    `end` is always resolved from the real calendar rather than from the next
+    *qualifying* month, a permanent exit closes its interval instead of being
+    left open, and a re-entry after a gap starts a genuinely separate
+    interval."""
     pos = {m: i for i, m in enumerate(all_months)}
+
+    def close(prev_pos: int) -> str:
+        nxt = prev_pos + 1
+        return all_months[nxt] if nxt < len(all_months) else ""
+
     per_symbol: dict[str, list[tuple[str, str]]] = {}
     for band, symbol, month in month_rows:
         per_symbol.setdefault(symbol, []).append((month, band))
@@ -83,10 +98,10 @@ def _coalesce(month_rows: list[tuple[str, str, str]]) -> list[tuple[str, str, st
                 prev_pos = pos[month]
                 continue
             if cur_band is not None:
-                out.append((cur_band, symbol, cur_start, month))  # exclusive end
+                out.append((cur_band, symbol, cur_start, close(prev_pos)))
             cur_band, cur_start, prev_pos = band, month, pos[month]
         if cur_band is not None:
-            out.append((cur_band, symbol, cur_start, ""))  # open: in-band through the end
+            out.append((cur_band, symbol, cur_start, close(prev_pos)))
     return out
 
 
@@ -139,7 +154,10 @@ def build_band_membership(
             elif ev.tradeable:
                 month_rows.append((FALLBACK_BAND, symbol, month_iso))
 
-    membership = pd.DataFrame(_coalesce(month_rows), columns=MEMBERSHIP_COLUMNS)
+    all_months = [d.date().isoformat() for d in dates]
+    membership = pd.DataFrame(
+        _coalesce(month_rows, all_months), columns=MEMBERSHIP_COLUMNS
+    )
     membership = membership.sort_values(["band", "symbol", "start"]).reset_index(drop=True)
     diagnostics = pd.DataFrame(diag_rows, columns=DIAGNOSTICS_COLUMNS)
     return MembershipBuild(membership=membership, diagnostics=diagnostics)
