@@ -73,6 +73,9 @@ class PortfolioState:
     benchmark_start_price: float = 0.0  # benchmark close at bootstrap (buy-and-hold baseline)
     created_at: str = ""
     last_run_key: str | None = None
+    # R2 ablation (bare_mode only): "YYYY-MM" of the last monthly rebalance;
+    # None = never rebalanced. Unused (stays None) outside bare_mode.
+    bare_last_rebalance_month: str | None = None
 
 
 def initial_state(
@@ -109,6 +112,9 @@ def state_from_dict(payload: dict) -> PortfolioState:
             benchmark_start_price=float(payload["benchmark_start_price"]),
             created_at=payload["created_at"],
             last_run_key=payload["last_run_key"],
+            # Old (pre-R2) state files predate this key: absent means "never
+            # rebalanced under bare_mode", same as a freshly initialized state.
+            bare_last_rebalance_month=payload.get("bare_last_rebalance_month"),
         )
     except StateError:
         raise

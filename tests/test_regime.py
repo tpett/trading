@@ -111,3 +111,17 @@ def test_regime_is_frozen():
     regime = Regime(state="risk_on", exposure_multiplier=1.0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         regime.state = "risk_off"
+
+
+def test_disabled_flag_defaults_off():
+    assert CONFIG.disabled is False
+
+
+def test_disabled_regime_is_always_full_risk_on_even_in_a_downtrend():
+    # R2 ablation (W0/W2/W3): disabled=True must short-circuit BEFORE the
+    # SMA/vol read, so even a fixture that would otherwise score risk_off
+    # (the exact bars from test_downtrend_is_risk_off) comes back full-on.
+    bars = _bars_from_rets(_decaying_jitter(300, drift=-0.004))
+    disabled = dataclasses.replace(CONFIG, disabled=True)
+    regime = compute_regime(bars, bars.index[-1], disabled)
+    assert regime == Regime(state="risk_on", exposure_multiplier=1.0)

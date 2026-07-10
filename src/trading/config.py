@@ -71,6 +71,12 @@ class RegimeConfig:
     exposure_risk_on: float
     exposure_neutral: float
     exposure_risk_off: float
+    # Ablation flag (R2 spec, additive, default off): no combination of the
+    # numeric thresholds above can force the gate to always read risk_on --
+    # "last < sma_slow" is driven by real price action, not a tunable knob --
+    # so a config-only disable is impossible. When True, compute_regime skips
+    # the SMA/vol computation entirely and always returns risk_on/1.0x.
+    disabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,15 @@ class PortfolioConfig:
     atr_window: int
     session_close_buffer_minutes: int  # session venues only; see costs.trades_24_7
     exit_style: str  # "frozen" (default) or "trailing" (experiment flag)
+    # Ablation flag (R2 spec, additive, default off): W0 "bare" cell -- top-N
+    # by rank, equal weight, monthly rebalance, sell only on rank exit (or a
+    # forced exit -- delisted/untradable/quarantined -- which always applies,
+    # data integrity, not wrapper). Replaces evaluate_entries/evaluate_exits
+    # with trading.simulator.bare for this venue; entry_score_threshold,
+    # stop_atr_multiple, regime_flush_atr_multiple, time_stop_bars, cooldown,
+    # max_daily_deployment_pct are all ignored while this is set. See
+    # trading/simulator/core.py::step.
+    bare_mode: bool = False
 
 
 @dataclass(frozen=True)

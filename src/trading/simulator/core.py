@@ -15,6 +15,7 @@ import pandas as pd
 
 from trading.config import VenueConfig
 from trading.pipeline import RankingsResult
+from trading.simulator.bare import evaluate_entries_bare, evaluate_exits_bare, rank_only_top_n
 from trading.simulator.entries import evaluate_entries
 from trading.simulator.exits import evaluate_exits
 from trading.simulator.fills import Fill, apply_fills, release_settlements
@@ -115,6 +116,19 @@ def step(
     run_key = make_run_key(config.name, decision_ts)
     warnings: list[str] = []
     skips: list[Skip] = []
+    # R2 ablation (cell W0), additive and default off: the entire block below
+    # gated by this flag is new code; when it's False (every venue's default
+    # config, and every existing test) execution falls straight through to
+    # the ORIGINAL, byte-for-byte unmodified evaluate_exits/evaluate_entries
+    # calls in the else branches -- see tests/test_ablation_equivalence.py
+    # for the golden-fixture proof this preserves.
+    bare = config.portfolio.bare_mode
+    is_rebalance = False
+    top_symbols: list[str] = []
+    if bare:
+        month = decision_ts.strftime("%Y-%m")
+        is_rebalance = state.bare_last_rebalance_month != month
+        top_symbols = rank_only_top_n(rankings, config, decision_ts)
 
     # Phase 1: settle yesterday's sale proceeds, then fill pending orders.
     release_settlements(state, decision_ts.date())
@@ -122,7 +136,14 @@ def step(
     skips.extend(fill_skips)
 
     # Phase 2: exits (before entries, against the unfiltered ranking).
-    exit_orders, exit_skips, exit_warnings = evaluate_exits(state, rankings, config, decision_ts)
+    if bare:
+        exit_orders, exit_skips, exit_warnings = evaluate_exits_bare(
+            state, rankings, decision_ts, top_symbols, is_rebalance
+        )
+    else:
+        exit_orders, exit_skips, exit_warnings = evaluate_exits(
+            state, rankings, config, decision_ts
+        )
     skips.extend(exit_skips)
     warnings.extend(exit_warnings)
 
@@ -145,16 +166,29 @@ def step(
     # Phase 4: entries (regime- and breaker-gated; staleness decided upstream).
     entry_orders: list[PendingOrder] = []
     if allow_entries:
-        entry_orders, entry_skips = evaluate_entries(
-            state, rankings, config, decision_ts, snapshot.value, earnings=earnings
-        )
-        skips.extend(entry_skips)
+        if bare:
+            if state.breaker_tripped:
+                skips.append(Skip("*", "entry", "circuit_breaker"))
+            elif is_rebalance:
+                entry_orders, entry_skips = evaluate_entries_bare(
+                    state, rankings, config, decision_ts, snapshot.value, top_symbols
+                )
+                skips.extend(entry_skips)
+            else:
+                skips.append(Skip("*", "entry", "bare_mode_not_rebalance_day"))
+        else:
+            entry_orders, entry_skips = evaluate_entries(
+                state, rankings, config, decision_ts, snapshot.value, earnings=earnings
+            )
+            skips.extend(entry_skips)
     else:
         skips.append(Skip("*", "entry", stale_reason or "entries_disabled"))
 
     new_orders = [*exit_orders, *entry_orders]
     state.pending_orders = [*state.pending_orders, *new_orders]
     state.last_run_key = run_key
+    if bare and is_rebalance:
+        state.bare_last_rebalance_month = month
 
     return StepResult(
         state=state,

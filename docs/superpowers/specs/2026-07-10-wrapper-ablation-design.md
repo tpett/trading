@@ -37,7 +37,17 @@ held fixed so ONLY the wrapper varies:
   bottleneck; the momentum conclusion stands.
 - If W0(momentum) materially exceeds 0.45 (≥ +0.1 Sharpe) → the record's
   central conclusion is partly a wrapper artifact; experiments.md gets a
-  written correction, and W1-W3 identify which component drags.
+  written correction.
+- **Component attribution (amended pre-run, 2026-07-10, before any cell
+  executed):** which component drags is read from **Wi vs W4** (each Wi
+  differs from the full wrapper by exactly one named axis; time-stop and
+  trend-break exits — unnamed engine components discovered during the build
+  — are held constant across W1-W4 and are therefore excluded from
+  attribution). W0 vs W4 measures the WHOLE wrapper including those unnamed
+  components; W0-anchored per-component attribution is NOT valid with these
+  cells and is not claimed. Known coupling, disclosed: W2 (stops on, regime
+  off) cannot exercise the regime-flush stop — regime.disabled forces
+  risk-on, so only the plain ATR stop and time-stop act there.
 - Same logic per signal. W4 must reproduce the historical numbers within
   noise or the ablation harness itself is broken (STOP, debug, never
   reinterpret).
