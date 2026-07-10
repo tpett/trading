@@ -56,8 +56,8 @@ def test_trailing_effective_spread_hand_computed_two_and_three_days():
         )
         return 2 * (math.exp(alpha) - 1) / (1 + math.exp(alpha))
 
-    log_hl_sq = [math.log(h / l) ** 2 for h, l in zip([101.0, 102.0, 103.0],
-                                                       [99.0, 98.0, 97.0], strict=True)]
+    log_hl_sq = [math.log(h / low) ** 2 for h, low in zip([101.0, 102.0, 103.0],
+                                                           [99.0, 98.0, 97.0], strict=True)]
     beta1 = log_hl_sq[1] + log_hl_sq[0]
     gamma1 = math.log(102.0 / 98.0) ** 2
     beta2 = log_hl_sq[2] + log_hl_sq[1]

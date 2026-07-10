@@ -419,15 +419,76 @@ as-of date (no market-cap denominator, no score).
   costume.
 - **Cost-adjusted alpha** — the L/S series re-regressed after charging
   parametric one-way costs (10/30/50 bps × turnover × both legs) at every
-  rebalance. The promotion rule requires t ≥ 2.0 at 30 bps.
+  rebalance. DIAGNOSTIC only since the R1 amendment (below) — no longer read
+  by the eligibility gate, still printed as a fragility read.
 - **Amihud λ (price impact)** — |daily return| / dollar volume, averaged
   over 252 days: the price move a dollar of trading buys. The amihud
   signal's own construction, reused as an impact price.
 - **Capacity curve** — net alpha at book sizes $10k/$100k/$1M per side,
   charging each rebalanced name its own λ × (book / names-per-leg) on entry
   and exit. First-order model — an honest sketch of how fast paper alpha
-  drowns in impact, not a fill simulator.
-- **Holdout-eligible** — the battery's verdict (checks 1-6 pass AND the
-  30 bps cost row keeps t ≥ 2.0), journaled as one `kind="battery"` event
-  per candidate. The holdout command refuses candidates without it — a
-  written prospective amendment to the Piece 1 holdout protocol.
+  drowns in impact, not a fill simulator. Diagnostic only (see above).
+- **Holdout-eligible** — the battery's verdict, journaled as one
+  `kind="battery"` event per candidate. Since the R1 amendment (below):
+  checks 1-6 pass AND the cost-charged long-only series beats SPY
+  buy-and-hold (Sharpe and total return, both over discovery) — see "the
+  long-only gate" section. The holdout command refuses candidates without
+  it — a written prospective amendment to the Piece 1 holdout protocol.
+
+---
+
+## The long-only gate (R1 amendment, 2026-07-10)
+
+The engine's original gate (four-factor L/S alpha) certifies returns in a
+construction this account cannot trade — a long/short spread strips out the
+four premia a long-only investor actually collects. "Beating the market"
+from this seat means the long-only portfolio, after realistic costs,
+outperforms SPY — that's what the amended gate measures. See
+`docs/superpowers/specs/2026-07-10-longonly-gate-amendment.md`.
+
+- **Long-only gate / promotion statistic** — the signal's existing `lo`
+  series (equal-weight top quantile, monthly rebalance — Piece 1's
+  tradability annotation, now promoted to the actual gate), charged
+  spread-based costs (below), evaluated over the discovery window. A
+  candidate is promotion-eligible when its annualized Sharpe ≥ SPY
+  buy-and-hold's AND its total return exceeds SPY's, both over the
+  identical window. The four-factor L/S regression is retained as a
+  mandatory DIAGNOSTIC (alpha, loadings, R² printed with every candidate —
+  know what you're being paid for) but is no longer the filter; BH-FDR
+  keeps running on the L/S p-values unchanged and becomes a reported
+  property, not the gate.
+- **Corwin-Schultz (CS) effective-spread estimator** — a 2012 estimator of a
+  stock's bid-ask spread from daily high/low prices alone (no quote data
+  needed): two consecutive days' own high-low ranges (β) vs the TWO-DAY
+  high-low range spanning both (γ) isolate the spread component from the
+  volatility component (`trading.alphasearch.costs.trailing_effective_spread`).
+  Implementation note: β and γ are averaged over the trailing 21-session
+  window BEFORE the (nonlinear, two-nested-sqrt) alpha/spread transform is
+  applied — the original paper's month-level aggregation convention.
+  Computing a spread estimate PER DAY and averaging those (a per-day
+  floor-at-zero then mean) instead inflates the result by roughly an order
+  of magnitude: a Monte Carlo check (GBM ticks, a KNOWN zero spread) shows
+  the per-day approach reads ~75bps of "spread" out of pure noise, while
+  averaging the components first reads ~0. Floored at 2bps (large-cap
+  reality), capped at 5% (data sanity).
+- **Spread-based rebalance charge** — the R1 cost model: at each rebalance,
+  every name ENTERING the long-only leg is charged half its effective
+  spread at its new 1/n weight, every name EXITING the analogue at the OLD
+  leg size (mirrors the battery's Amihud capacity-curve shape, spread
+  instead of impact). Charged to the `lo` series on the first return day
+  after the decision date (reuses `apply_rebalance_charges`). Book-size
+  impact beyond the spread is NOT modeled at the account's $1k size
+  (fractional shares, no commissions make it negligible) — documented,
+  revisit if the account grows.
+- **SPY buy-and-hold benchmark** — the frozen comparator: SPY's own daily
+  closes (`data/equities-tiingo/SPY.parquet`) over the identical window,
+  Sharpe and total return computed the same way as the candidate's charged
+  `lo` series. Refuses loudly (no silent substitute) when the cache lacks a
+  SPY parquet — the whole point is comparing against the ACTUAL benchmark
+  an investor in this seat would have held.
+- **`--long-only` leaderboard view** — re-reads every journaled discovery
+  trial and re-derives its cost-charged long-only series from CURRENT data
+  (the journal keeps summary stats, not the raw daily series), ranking it
+  against SPY over the trial's own window. A display, never a
+  re-journaling: no trial is re-scored. Trials whose signal/universe no
+  longer resolves show honestly as n/a.

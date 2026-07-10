@@ -114,3 +114,24 @@ midcap:trade). Record per-check numbers, cost table, capacity curve, and
 verdicts in experiments.md §11; update the park decision with evidence. The
 pilot spends no holdout touches regardless of verdicts (the park stands
 until the developer says otherwise).
+
+## Amendments
+
+- **2026-07-10 (R1, `2026-07-10-longonly-gate-amendment.md`):** amends §3's
+  frozen promotion rule prospectively. Checks 1-7 and their frozen
+  thresholds are UNTOUCHED. What changes is the final eligibility gate: "the
+  30 bps row of the cost table retains t ≥ 2.0" is superseded by "the
+  Corwin-Schultz (2012) spread-charged long-only series' annualized Sharpe
+  over the discovery window is ≥ SPY buy-and-hold's Sharpe over the
+  identical window AND its total return exceeds SPY's total return" — a
+  survivor is holdout-eligible iff checks 1-6 all pass AND this long-only-
+  vs-SPY comparison passes. §4's cost-adjusted alpha table and capacity
+  curve are retained exactly as specified, now DIAGNOSTIC only (no longer
+  read by the eligibility gate). §5's holdout pre-check extension is
+  unaffected in mechanism — it still reads the verdict's `eligible` bit —
+  only what that bit MEANS changed. New machinery lives in
+  `trading.alphasearch.costs` (a leaf module: the spread estimator,
+  per-name rebalance charging, and the SPY benchmark loader), imported by
+  both `robustness.py` (the battery gate) and `sweep.py` (the leaderboard's
+  `--long-only` view, which re-reads every journaled trial under the new
+  lens without re-journaling anything).

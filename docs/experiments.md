@@ -659,6 +659,48 @@ holdout (2024+) remains fully unspent. v2 data (OI, term structure, largecap
 volume) and the insider store are in place for future pre-registered
 batches; the engine's cost per hypothesis continues to fall.
 
+## 13. R1 — the long-only gate amendment (2026-07-10, no new trials)
+
+**Not a sweep run — a gate-definition change**, recorded here because it
+changes how every number above (and every future promotion decision) is
+read. Full rationale: `docs/superpowers/specs/2026-07-10-longonly-gate-
+amendment.md`.
+
+**The finding that forced it:** twice now (§10's OPT-1/OPT-2 skew studies,
+§11-12's amihud family) the program proved a signal "real" under the
+four-factor L/S gate and watched it die in tradeable, long-only form —
+amihud's own record above says it plainly: "one real factor found (amihud,
+untradeable long-only in this account)." The L/S gate certifies a
+construction (equal-dollar long AND short, no financing cost, no spread)
+this account cannot trade. "Beating the market" from this seat means: the
+long-only portfolio, after realistic spread-based costs, outperforms SPY
+buy-and-hold over the identical window. That's what the amended gate now
+measures — see the glossary's "the long-only gate" section for the full
+term set (Corwin-Schultz spread estimator, spread-based rebalance charge,
+SPY benchmark, `--long-only` leaderboard view).
+
+**Prospective, not retroactive:** no already-journaled trial is re-scored.
+The existing journal (946 discovery trials, amihud the lone BH survivor
+family) is unchanged; `trading alphasearch leaderboard --long-only` re-READS
+it under the new lens as a display, never re-journaling anything. The
+four-factor L/S regression stays a mandatory diagnostic on every future
+candidate (know what you're being paid for) and BH-FDR keeps running on the
+L/S p-values exactly as before — it's now a reported property, not the
+promotion filter. The robustness battery's checks 1-6 and their frozen
+thresholds are untouched; only its final eligibility comparator moved from
+"30bps L/S cost row retains t≥2" to "cost-charged long-only beats SPY on
+Sharpe and total return."
+
+**Immediate implication for the amihud family:** its L/S alpha remains a
+real, statistically significant DIAGNOSTIC finding (persists on the
+leaderboard, BH-survivor status unchanged), but per the ALREADY-recorded
+§11-12 walk-forward, its tradeable long-only form was refuted before this
+amendment existed — the new gate formalizes exactly the judgment that
+refutation was already making informally. No park decision changes as a
+result of this amendment alone; a future `--long-only` read of the amihud
+trials would need to re-derive their series from current data to state a
+number, which this record does not attempt (out of scope: no sweep re-run).
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
