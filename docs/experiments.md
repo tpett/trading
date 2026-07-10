@@ -686,10 +686,13 @@ it under the new lens as a display, never re-journaling anything. The
 four-factor L/S regression stays a mandatory diagnostic on every future
 candidate (know what you're being paid for) and BH-FDR keeps running on the
 L/S p-values exactly as before — it's now a reported property, not the
-promotion filter. The robustness battery's checks 1-6 and their frozen
-thresholds are untouched; only its final eligibility comparator moved from
-"30bps L/S cost row retains t≥2" to "cost-charged long-only beats SPY on
-Sharpe and total return."
+promotion filter. The robustness battery changes in two ratified ways (see
+the R1 spec's Ratifications section): its checks 1-6 keep their frozen
+thresholds but re-anchor their statistics onto the cost-charged LO-minus-SPY
+ACTIVE return series (raw-LO retention would mostly test whether the market
+regime repeated — beta — not the signal's edge over the benchmark), and its
+final eligibility comparator moved from "30bps L/S cost row retains t≥2" to
+"cost-charged long-only beats SPY on Sharpe and total return."
 
 **Immediate implication for the amihud family:** its L/S alpha remains a
 real, statistically significant DIAGNOSTIC finding (persists on the

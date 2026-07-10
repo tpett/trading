@@ -57,22 +57,30 @@ def trailing_effective_spread(
 
     Averages the beta/gamma TWO-DAY COMPONENTS over the trailing `window`
     sessions FIRST, then runs the (alpha -> spread) transform ONCE per row on
-    those averaged components -- the original paper's month-level aggregation
-    convention, not a per-day spread computed then averaged.
+    those averaged components. This is a documented BIAS CORRECTION and an
+    orchestrator-RATIFIED deviation (2026-07-10) from the amendment spec
+    section 3's literal per-day text -- NOT the CS 2012 paper's own
+    convention, whose baseline computes alpha/spread per two-day pair and
+    averages those spreads (with negative-handling variants).
 
-    This is a deliberate, empirically-verified choice, not a literal per-day
-    "compute spread, then average" reading: averaging the OUTPUT of the
-    alpha/spread transform (which is dominated by two nested sqrt()s of noisy
-    daily inputs, then floored at 0) is a one-sided truncation of noise that
-    inflates the mean by an order of magnitude. A Monte Carlo check (GBM tick
-    price with a KNOWN zero spread, one-minute ticks, 4000 simulated days)
-    confirms it: the raw (unfloored) per-day alpha averages to ~0 as expected,
-    but flooring each day's negative estimate at 0 BEFORE averaging drags the
-    mean to ~75bps out of a true 0bps spread -- an artifact of the estimator's
-    per-day noise, not a real cost. Averaging beta/gamma first (this
-    function) reproduces the real-AAPL sanity check (single-digit bps,
-    test_alphasearch_costs.py) that a naive daily-floor-then-average does not
-    (it lands AAPL at 30-90bps against its real few-bps effective spread).
+    Why the deviation: at daily granularity the per-pair route's
+    negatives-floored-at-0 average is a one-sided truncation of noise that
+    inflates the mean by an order of magnitude. A Monte Carlo check (GBM
+    tick price with a KNOWN zero spread, one-minute ticks, 4000 simulated
+    days) quantifies it: the raw (unfloored) per-day alpha averages to ~0 as
+    expected, but flooring each day's negative estimate at 0 BEFORE
+    averaging drags the mean to ~75bps out of a true 0bps spread.
+    Component-averaging first (this function) cuts the same zero-spread mean
+    bias to ~12bps -- a residual, CONSERVATIVE (cost-overstating)
+    window-level truncation bias, mostly absorbed by the 2bps floor for
+    liquid names -- and it alone satisfies the spec's own AAPL acceptance
+    criterion (single-digit bps, test_alphasearch_costs.py);
+    per-pair-then-average lands AAPL at 30-90bps against its real few-bps
+    effective spread.
+
+    Caveat: no overnight-gap adjustment (CS 2012's open-vs-prior-close
+    correction is omitted) -- mildly ANTI-conservative for gappy names,
+    immaterial under the 2bps floor at this universe's liquidity.
 
     Negative results (beta_bar/gamma_bar dominated by market-wide vol, not
     spread) are floored at 0; the caller applies the final [SPREAD_FLOOR,

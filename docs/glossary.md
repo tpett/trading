@@ -378,6 +378,13 @@ as-of date (no market-cap denominator, no score).
 
 ## The robustness battery (Piece 3)
 
+*R1 re-anchor note (2026-07-10):* the check descriptions below were written
+for the original L/S-alpha anchor. Since the R1 amendment, checks 1-6 keep
+their frozen THRESHOLDS but score the cost-charged LO-minus-SPY **active
+return series** (see "the long-only gate" section) — read "alpha" in the
+retention/sign rules below as "annualized active return", and check 1's t as
+the active series' mean/se t.
+
 - **Robustness battery** — the pre-registered, frozen set of seven checks a
   BH survivor must face before it may spend its once-only holdout touch
   (`trading alphasearch robustness <signal>:<universe>`). Pre-committed
@@ -464,13 +471,19 @@ outperforms SPY — that's what the amended gate measures. See
   volatility component (`trading.alphasearch.costs.trailing_effective_spread`).
   Implementation note: β and γ are averaged over the trailing 21-session
   window BEFORE the (nonlinear, two-nested-sqrt) alpha/spread transform is
-  applied — the original paper's month-level aggregation convention.
-  Computing a spread estimate PER DAY and averaging those (a per-day
-  floor-at-zero then mean) instead inflates the result by roughly an order
-  of magnitude: a Monte Carlo check (GBM ticks, a KNOWN zero spread) shows
-  the per-day approach reads ~75bps of "spread" out of pure noise, while
-  averaging the components first reads ~0. Floored at 2bps (large-cap
-  reality), capped at 5% (data sanity).
+  applied. This is a documented BIAS CORRECTION, ratified 2026-07-10 as a
+  deviation from both the amendment spec §3's literal per-day text and the
+  CS 2012 paper's own baseline (which computes a spread per two-day pair and
+  averages those): at daily granularity the per-pair floor-at-zero-then-mean
+  is a one-sided truncation of noise that inflates the result by roughly an
+  order of magnitude — a Monte Carlo check (GBM ticks, a KNOWN zero spread)
+  reads ~75bps of "spread" out of pure noise per-pair, vs ~12bps
+  component-averaged (a residual, conservative window-level bias, mostly
+  absorbed by the floor). Only the component-averaged form satisfies §3's
+  own AAPL single-digit-bps acceptance criterion. Caveat: no overnight-gap
+  adjustment (mildly anti-conservative for gappy names, immaterial under
+  the floor). Floored at 2bps (large-cap reality), capped at 5% (data
+  sanity).
 - **Spread-based rebalance charge** — the R1 cost model: at each rebalance,
   every name ENTERING the long-only leg is charged half its effective
   spread at its new 1/n weight, every name EXITING the analogue at the OLD
@@ -486,6 +499,14 @@ outperforms SPY — that's what the amended gate measures. See
   `lo` series. Refuses loudly (no silent substitute) when the cache lacks a
   SPY parquet — the whole point is comparing against the ACTUAL benchmark
   an investor in this seat would have held.
+- **Active return series (battery re-anchor)** — the daily cost-charged
+  long-only return minus SPY's daily return (inner-joined calendars). The
+  orchestrator-ratified statistic the battery's checks 1-6 score under R1:
+  raw-LO retention across sub-periods/subsets would mostly test whether the
+  MARKET regime repeated (beta), not whether the signal's edge over the
+  benchmark did — the active series isolates exactly the edge the §2 gate
+  certifies. Same frozen thresholds; check 1's t is the active series'
+  mean/(sd/√n).
 - **`--long-only` leaderboard view** — re-reads every journaled discovery
   trial and re-derives its cost-charged long-only series from CURRENT data
   (the journal keeps summary stats, not the raw daily series), ranking it
