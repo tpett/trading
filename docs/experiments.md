@@ -587,6 +587,22 @@ first-pass survivor and must earn its OWN battery + holdout before being
 trusted — it may NOT be waved through on the strength of an unrelated
 candidate's battery run.
 
+**Form 4 insider family registered 2026-07-09, pre-sweep.** 3 purchase-side
+signals (`npr_90`, `cluster_buys_90`, `officer_buy_90`) are frozen in
+`docs/superpowers/specs/2026-07-09-insider-pipeline-design.md` §3 —
+definitions, signs (+ all three), and NaN conventions (cluster's
+0-vs-never-covered distinction; officer's raw-price basis and dual
+`requires_insider`+`requires_fundamentals` flags) pre-registered BEFORE any
+trial. The data store is SEC DERA insider-transaction quarterly ZIPs 2018q3+
+(open-market P/S only, FILED-date PIT keying — the transaction date precedes
+filing and is never scored), built by `scripts/build_insider_store.py` into
+`data/insider/equities/` and mapped through the committed cik_map intervals
+(unmapped CIKs counted, never guessed). **Nothing sweeps under this
+registration**: the pre-registered discovery sweep belongs to the combined
+options-v2 + insider batch spec (one read after both data sets land), which
+will disclose the full trial count. New glossary section "Insider
+transactions (the Form 4 family)".
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on

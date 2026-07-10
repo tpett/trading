@@ -338,6 +338,39 @@ momentum.
 **Within-industry reversal** — a stock's SHORT-term return relative to its sector
 mean reverses (Da-Liu-Schaumburg): sector-adjusted laggards bounce, leaders fade.
 
+## Insider transactions (the Form 4 family)
+
+**Form 4** — the SEC filing corporate insiders (officers, directors, >10%
+owners) must submit within 2 business days of trading their own company's
+stock. Our source is the SEC DERA "Insider Transactions Data Sets" quarterly
+bulk files: official, free, as-reported forever (never restated), covering
+delisted names — the cleanest PIT anomaly source we identified. The store
+keeps only open-market purchases (`P`) and sales (`S`); awards, exercises,
+gifts and plan transactions are excluded. 10b5-1 (pre-scheduled) trades are
+NOT excluded — the flag is unreliable before 2023 (documented limitation).
+PIT discipline: every signal keys the FILED date, never the transaction date
+(which precedes filing and would be look-ahead).
+
+**Net purchase ratio (NPR, `npr_90`)** — (buy dollars − sell dollars) /
+(buy dollars + sell dollars) over the trailing 90 filed days
+(Lakonishok-Lee). +1 = insiders only bought, −1 = only sold. Sales carry
+less information than purchases (diversification, taxes, option vesting);
+purchases are the deliberate act.
+
+**Cluster buying (`cluster_buys_90`)** — the count of DISTINCT insiders with
+at least one open-market purchase in the window. Several insiders buying
+independently is far stronger evidence than one large buy. 0 is a real value
+(a covered, quiet name); NaN is reserved for names with no Form 4 history at
+all as of the date (never-covered ≠ quiet).
+
+**Officer purchases (`officer_buy_90`)** — officer open-market purchase
+dollars scaled by market cap on the RAW price basis (shares outstanding ×
+raw unadjusted close — the div_yield lesson: adjusted closes bake in future
+splits, and Form 4 dollars are raw dollars). Officers have the best
+information per dollar traded. Requires both the insider store and
+fundamentals (`shares_outstanding`), so it registers with both refusal
+flags.
+
 ## The robustness battery (Piece 3)
 
 - **Robustness battery** — the pre-registered, frozen set of seven checks a
