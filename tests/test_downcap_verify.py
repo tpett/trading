@@ -19,14 +19,27 @@ def _row(date, symbol, band, *, delisted=False, tradeable=True, has_shares=True,
 
 
 def test_go_when_all_thresholds_met():
+    # Populate BOTH bands so all three universes (downcap, downcap:small,
+    # downcap:micro) genuinely clear >= 15/month -- downcap is micro U small
+    # so it must not pass vacuously off a single populated band.
     rows = []
     for m in ("2019-01-01", "2019-02-01"):
-        for i in range(20):                       # 20 in-band names/month, >= 15
+        for i in range(20):                       # 20 micro names/month, >= 15
             rows.append(_row(m, f"MIC{i}", "micro", delisted=(i < 4)))  # 20% delisted
+        for i in range(20):                       # 20 small names/month, >= 15
+            rows.append(_row(m, f"SML{i}", "small", delisted=(i < 4)))  # 20% delisted
     gate = dv.compute_gate(_diag(rows))
     assert gate.survivorship_ok is True           # 20% >= 15%
     assert gate.shares_coverage_ok is True        # all tradeable have shares
     assert gate.breadth_ok is True
+    for b in gate.breadth:
+        assert b.reason == "pass"
+    downcap = next(b for b in gate.breadth if b.name == "downcap")
+    small = next(b for b in gate.breadth if b.name == "downcap:small")
+    micro = next(b for b in gate.breadth if b.name == "downcap:micro")
+    assert downcap.min_month_count == 40           # 20 micro + 20 small, each month
+    assert small.min_month_count == 20
+    assert micro.min_month_count == 20
     assert gate.fallback_triggered is False
     assert gate.go is True
 
@@ -77,6 +90,53 @@ def test_render_report_states_go_and_metrics():
     assert "survivorship" in text.lower()
     assert "shares-coverage" in text.lower()
     assert "breadth" in text.lower()
+
+
+def test_empty_universe_forces_no_go_and_is_recorded():
+    # micro genuinely passes (>= 15/month, both months). small has ZERO
+    # tradeable in-band rows anywhere -- downcap:small must be recorded as
+    # empty (not a vacuous pass), and that alone must force go=False even
+    # though survivorship/shares-coverage/the other universes are fine.
+    rows = []
+    for m in ("2019-01-01", "2019-02-01"):
+        for i in range(20):
+            rows.append(_row(m, f"MIC{i}", "micro", delisted=(i < 4)))
+    gate = dv.compute_gate(_diag(rows))
+
+    micro = next(b for b in gate.breadth if b.name == "downcap:micro")
+    small = next(b for b in gate.breadth if b.name == "downcap:small")
+    assert micro.ok is True
+    assert micro.reason == "pass"
+    assert small.ok is False
+    assert small.reason == "empty"
+    assert small.min_month_count == 0
+
+    assert gate.survivorship_ok is True
+    assert gate.shares_coverage_ok is True
+    assert gate.breadth_ok is False
+    assert gate.go is False                        # empty universe is NOT a pass
+
+    text = dv.render_report(gate)
+    assert "downcap:small" in text
+    small_line = next(line for line in text.splitlines() if "downcap:small" in line)
+    assert "PASS" not in small_line
+    assert "DROP" in small_line and "empty" in small_line.lower()
+
+
+def test_empty_diagnostics_fails_closed():
+    # A total-backfill-failure diagnostics artifact (zero rows) must fail
+    # closed (NO-GO) rather than raise -- boolean-indexing an all-object
+    # zero-row frame can raise a spurious KeyError on an unrelated column.
+    empty = _diag([])
+    gate = dv.compute_gate(empty)
+    assert gate.go is False
+    assert gate.survivorship_ok is False
+    assert gate.shares_coverage_ok is False
+    assert gate.breadth_ok is False
+    for b in gate.breadth:
+        assert b.ok is False
+    text = dv.render_report(gate)                  # must not raise either
+    assert "NO-GO" in text
 
 
 def test_breadth_excludes_untradeable_in_band_rows():

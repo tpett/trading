@@ -28,6 +28,13 @@ class UniverseBreadth:
     name: str
     min_month_count: int
     ok: bool
+    # "pass" (>= BREADTH_MIN every month), "sub15" (nonempty band, but some
+    # month fell below BREADTH_MIN), or "empty" (zero tradeable in-band
+    # candidate-months anywhere in the window). All non-"pass" reasons are
+    # gate failures (ok=False) -- "empty" is the extreme case of "sub15", not
+    # an exemption from it (spec section 4: a universe with any sub-15 month,
+    # including zero, is dropped from the sweep and RECORDED).
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -48,19 +55,45 @@ class GateResult:
 def _breadth_for(tradeable_in_band: pd.DataFrame, name: str, bands: set[str]) -> UniverseBreadth:
     sub = tradeable_in_band[tradeable_in_band["band"].isin(bands)]
     if sub.empty:
-        # A band with ZERO candidate-months anywhere in the window is a
-        # distinct failure mode (an empty band -> no membership intervals at
-        # all -> self-evidently nothing to sweep) from a THIN month in an
-        # otherwise-populated band, which is what this gate exists to catch.
-        # Do not fail the breadth gate on it; an empty band shows up as an
-        # empty MEMBERSHIP_COLUMNS slice downstream, not silently here.
-        return UniverseBreadth(name, 0, True)
+        # A band with ZERO tradeable in-band candidate-months anywhere in the
+        # window is the EXTREME case of a sub-15 month, not an exemption from
+        # it: zero < BREADTH_MIN just like any other shortfall. Fail the
+        # gate and record it distinctly ("empty") so the report and any
+        # downstream consumer can tell "genuinely swept and passed" apart
+        # from "nothing to sweep -- dropped" (spec section 4: "a universe
+        # with any sub-15 month is dropped from the sweep, RECORDED, not
+        # silently skipped").
+        return UniverseBreadth(name, 0, False, "empty")
     per_month = sub.groupby("date")["symbol"].nunique()
     min_count = int(per_month.min())
-    return UniverseBreadth(name, min_count, min_count >= BREADTH_MIN)
+    ok = min_count >= BREADTH_MIN
+    return UniverseBreadth(name, min_count, ok, "pass" if ok else "sub15")
 
 
 def compute_gate(diagnostics: pd.DataFrame) -> GateResult:
+    if diagnostics.empty:
+        # A total-backfill-failure diagnostics artifact (zero rows) must FAIL
+        # CLOSED, not crash: boolean-indexing an all-object zero-row frame
+        # (e.g. `diagnostics[diagnostics["tradeable"]]`) raises a spurious
+        # `KeyError` on an unrelated column in this pandas version, since it
+        # drops columns when building the empty result. Short-circuit before
+        # any of that filtering with a clean, honest NO-GO.
+        breadth = [
+            UniverseBreadth(name, 0, False, "empty") for name in _UNIVERSE_BANDS
+        ]
+        return GateResult(
+            survivorship_pct=0.0,
+            shares_coverage_pct=0.0,
+            spread_median=float("nan"),
+            spread_iqr=float("nan"),
+            spread_pct_le_2=float("nan"),
+            breadth=breadth,
+            survivorship_ok=False,
+            shares_coverage_ok=False,
+            breadth_ok=False,
+            fallback_triggered=True,
+            go=False,
+        )
     in_band = diagnostics[diagnostics["band"].notna()]
     tradeable = diagnostics[diagnostics["tradeable"]]
     # Breadth counts TRADEABLE in-band candidate-months only. In real A4
@@ -129,10 +162,13 @@ def render_report(gate: GateResult) -> str:
         "- breadth (min tradeable names / month, each universe):",
     ]
     for b in gate.breadth:
-        lines.append(
-            f"    {b.name}: min {b.min_month_count}/month "
-            f"(>= {BREADTH_MIN}? {'PASS' if b.ok else 'DROP'})"
-        )
+        if b.reason == "pass":
+            state = "PASS"
+        elif b.reason == "empty":
+            state = "DROP (empty: no tradeable candidate-months in window)"
+        else:
+            state = f"DROP (sub-15 month, min {b.min_month_count}/month)"
+        lines.append(f"    {b.name}: min {b.min_month_count}/month -- {state}")
     if gate.fallback_triggered:
         lines += ["", "AMENDMENT TRIGGERED:", render_amendment(gate)]
     return "\n".join(lines)
