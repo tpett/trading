@@ -220,6 +220,48 @@ def test_check_offset_passes_on_a_stable_fixture(tmp_path):
     assert event["params"]["calendar_offset"] == 1  # hashed perturbation
 
 
+def test_check_offset_reports_the_active_stat_not_the_ls_stat(tmp_path):
+    """Regression guard for the defect this branch already shipped once: the
+    R1 amendment re-anchors checks 1-6 from the journaled L/S alpha onto the
+    cost-charged LO-minus-SPY ACTIVE series, but every other check_offset
+    test above uses a near-zero-vol synthetic SPY (make_spy_closes' default
+    vol=0.01 is quiet relative to the fixture's own drift spread), under
+    which the two anchors land close enough that a silent revert to scoring
+    ls_series/evaluate_alpha instead of active_series/cost_charged_lo could
+    slip past unnoticed. Here we independently recompute the SAME
+    re-evaluation OUTSIDE the production check path and pin the reported
+    statistic to the active-series number -- and separately show the L/S
+    anchor is a MATERIALLY different number on this fixture, so a regression
+    back to L/S scoring would fail the equality assertion below, not pass it
+    silently."""
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel(n_symbols=40)
+    factors = make_factors()
+    spy = make_spy_closes()
+    ctx = _ctx(journal, panel, factors, spy=spy)
+    got = check_offset(ctx)
+
+    # Independently reproduce check_offset's own re-evaluation (calendar
+    # offset 1, same window/quantiles/min_names) and derive both candidate
+    # statistics OUTSIDE run_battery/check_offset's code path.
+    result, sort = evaluate_trial_with_sort(
+        panel, ctx.spec, ctx.window, factors,
+        quantiles=ctx.quantiles, tercile_below=ctx.tercile_below,
+        min_names=ctx.min_names, calendar_offset=1,
+    )
+    charged, _skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
+    expected_active = annualized_active_pct(active_series(charged, spy))
+    ls_alpha = result["ls"]["alpha_annual_pct"]     # the OLD (pre-R1) anchor
+
+    # The two anchors are provably NOT interchangeable on this fixture.
+    assert abs(ls_alpha - expected_active) > 1.0
+    # The production check reports the ACTIVE statistic, not the L/S one.
+    assert got.detail["active_annual_pct"] == pytest.approx(
+        expected_active, rel=1e-9
+    )
+    assert got.detail["active_annual_pct"] != pytest.approx(ls_alpha, rel=1e-2)
+
+
 def _result_like(*, alpha_annual_pct: float, alpha_t: float, p: float) -> dict:
     leg = {
         "alpha_annual_pct": alpha_annual_pct, "alpha_t": alpha_t, "p": p,
@@ -822,3 +864,4 @@ def test_run_battery_gate_fails_when_spy_side_is_nan(tmp_path):
     assert gate["passed"] is False
     assert gate["spy_sharpe"] is None or math.isnan(gate["spy_sharpe"])
     assert outcome.eligible is False
+
