@@ -793,3 +793,71 @@ def test_build_panel_threads_membership(tmp_path):
         membership={"AAA": (("2019-01-01", ""),)},
     )
     assert panel.membership == {"AAA": (("2019-01-01", ""),)}
+
+
+def _membership_panel(membership: dict, symbols: tuple[str, ...]) -> PanelData:
+    """A minimal closes-only PanelData for PanelView.symbols filter tests --
+    only `symbols`/`membership` matter here, so bars/closes are stub frames."""
+    idx = pd.date_range("2018-12-01", "2019-12-31", freq="B", tz="UTC")
+    return PanelData(
+        closes={s: pd.Series(1.0, index=idx, dtype="float64") for s in symbols},
+        symbols=symbols,
+        membership=membership,
+    )
+
+
+def test_membership_filter_boundaries_are_start_inclusive_end_exclusive():
+    # ALWAYS is present the whole span (empty end) so the filter is
+    # discriminating: it never disappears, so any exclusion below is
+    # entirely attributable to MEMBER's interval boundaries.
+    panel = _membership_panel(
+        membership={
+            "MEMBER": (("2019-02-01", "2019-04-01"),),
+            "ALWAYS": (("2018-01-01", ""),),
+        },
+        symbols=("MEMBER", "ALWAYS"),
+    )
+
+    def member_included(as_of: str) -> bool:
+        view = panel.view(pd.Timestamp(as_of, tz="UTC"))
+        assert "ALWAYS" in view.symbols          # sanity: filter is discriminating
+        return "MEMBER" in view.symbols
+
+    assert member_included("2019-02-01") is True    # start -- inclusive
+    assert member_included("2019-03-01") is True    # inside the interval
+    assert member_included("2019-04-01") is False   # end -- exclusive
+    assert member_included("2019-01-31") is False   # before the interval
+
+
+def test_empty_membership_preserves_symbol_order_exactly():
+    idx = pd.date_range("2019-01-01", periods=5, freq="B", tz="UTC")
+    symbols = ("MSFT", "AAPL", "NVDA")  # deliberately NOT sorted
+    panel = PanelData(
+        closes={s: pd.Series(1.0, index=idx, dtype="float64") for s in symbols},
+        symbols=symbols,
+        membership={},
+    )
+    view = panel.view(pd.Timestamp("2019-01-03", tz="UTC"))
+    # Tuple equality, not set: the default path must preserve order exactly --
+    # a reorder here could silently shift quintile ties downstream.
+    assert view.symbols == ("MSFT", "AAPL", "NVDA")
+
+
+def test_membership_filter_handles_reentry_gap():
+    panel = _membership_panel(
+        membership={
+            "REENTRANT": (
+                ("2019-01-01", "2019-03-01"),  # present Jan-Feb
+                ("2019-05-01", ""),            # absent Mar-Apr, present again from May
+            ),
+        },
+        symbols=("REENTRANT",),
+    )
+
+    def included(as_of: str) -> bool:
+        view = panel.view(pd.Timestamp(as_of, tz="UTC"))
+        return "REENTRANT" in view.symbols
+
+    assert included("2019-02-01") is True    # first interval
+    assert included("2019-04-01") is False   # in the gap between intervals
+    assert included("2019-06-01") is True    # re-entered via the second interval

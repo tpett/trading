@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from trading.alphasearch.panel import BAR_COLUMNS, PanelData
+from trading.alphasearch.sweep import UniverseSpec, build_universe_panel
 from trading.venues.universes.downcap_membership import (
     MEMBERSHIP_COLUMNS,
     load_band_membership,
@@ -60,3 +62,50 @@ def test_empty_membership_leaves_symbols_unfiltered():
     panel = PanelData(closes={"X": bars["X"]["close"]}, symbols=("X",), bars=bars)
     view = panel.view(pd.Timestamp("2019-01-03", tz="UTC"))
     assert set(view.symbols) == {"X"}           # default {} -> unchanged behavior
+
+
+def _write_bar_cache(tmp_path, symbols):
+    idx = pd.date_range("2019-01-01", periods=10, freq="B", tz="UTC")
+    cache = tmp_path / "cache"
+    cache.mkdir(exist_ok=True)
+    for symbol in symbols:
+        frame = pd.DataFrame(
+            {c: (1.0 if c != "volume" else 1e5) for c in BAR_COLUMNS}, index=idx
+        )[BAR_COLUMNS]
+        frame.to_parquet(cache / f"{symbol}.parquet")
+    return cache
+
+
+def test_universespec_partial_membership_config_raises(tmp_path):
+    cache = _write_bar_cache(tmp_path, ("AAA", "SML"))
+    membership_csv = tmp_path / "band_membership.csv"
+    _write_membership(membership_csv)
+
+    only_intervals = UniverseSpec(
+        "u", cache, None, None, symbols=("AAA",),
+        membership_intervals=membership_csv, bands=None,
+    )
+    with pytest.raises(ValueError, match="membership_intervals"):
+        build_universe_panel(only_intervals)
+
+    only_bands = UniverseSpec(
+        "u", cache, None, None, symbols=("AAA",),
+        membership_intervals=None, bands=("micro",),
+    )
+    with pytest.raises(ValueError, match="bands"):
+        build_universe_panel(only_bands)
+
+    # Both None: unfiltered default, no error (Piece 1/2 behavior unchanged).
+    neither = UniverseSpec("u", cache, None, None, symbols=("AAA",))
+    panel = build_universe_panel(neither)
+    assert panel.membership == {}
+
+    # Both set: filtered as today, no error -- SML actually carries a "small"
+    # row in the fixture CSV, so this proves the guard doesn't disturb the
+    # real filtering path, not just that it fails to raise.
+    both = UniverseSpec(
+        "u", cache, None, None, symbols=("SML",),
+        membership_intervals=membership_csv, bands=("small",),
+    )
+    panel = build_universe_panel(both)
+    assert panel.membership == {"SML": (("2019-01-01", ""),)}

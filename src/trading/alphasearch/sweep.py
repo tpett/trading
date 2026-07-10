@@ -283,8 +283,21 @@ def _universe_sectors(sic_map_path: Path | None) -> dict[str, str]:
 def build_universe_panel(
     spec: UniverseSpec, factors: pd.DataFrame | None = None
 ) -> PanelData:
+    has_intervals = spec.membership_intervals is not None
+    has_bands = spec.bands is not None
+    if has_intervals != has_bands:
+        # A one-sided config (e.g. a typo that sets membership_intervals but
+        # forgets bands, or vice versa) must never silently fall through to
+        # the unfiltered default below -- that would run the sweep on the
+        # FULL panel instead of the intended down-cap band, a silent science
+        # error nobody would notice until the results looked off.
+        raise ValueError(
+            f"universe {spec.name!r}: membership_intervals and bands must both be "
+            f"set or both be None, got membership_intervals={spec.membership_intervals!r} "
+            f"bands={spec.bands!r}"
+        )
     membership = None
-    if spec.membership_intervals is not None and spec.bands is not None:
+    if has_intervals and has_bands:
         # Lazy import: downcap_membership imports UniverseSpec from this module,
         # so a top-level import here would be a cycle (same pattern as
         # _universe_sectors' lazy segments import).
