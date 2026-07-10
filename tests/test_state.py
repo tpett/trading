@@ -125,3 +125,18 @@ def test_position_without_peak_close_loads_as_none():
         del position["peak_close"]
     restored = state_from_dict(payload)
     assert all(p.peak_close is None for p in restored.positions.values())
+
+
+def test_bare_last_rebalance_month_round_trips():
+    state = _populated_state()
+    state.bare_last_rebalance_month = "2026-07"
+    restored = state_from_dict(to_state_dict(state))
+    assert restored == state
+
+
+def test_state_without_bare_last_rebalance_month_loads_as_none():
+    # Old (pre-R2) state files have no bare_last_rebalance_month key.
+    payload = to_state_dict(_populated_state())
+    del payload["bare_last_rebalance_month"]
+    restored = state_from_dict(payload)
+    assert restored.bare_last_rebalance_month is None

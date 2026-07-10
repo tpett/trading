@@ -27,6 +27,10 @@ def test_load_equities_config():
     # Kill switch flipped off: yfinance earnings dates proved unreliable
     # in practice (see README's "Earnings blackout" section).
     assert config.portfolio.earnings_blackout_enabled is False
+    # R2 ablation flags: additive, must default off so every pre-existing
+    # config (this one included) is unaffected until a config opts in.
+    assert config.regime.disabled is False
+    assert config.portfolio.bare_mode is False
 
 
 def test_load_crypto_config():
@@ -230,3 +234,15 @@ def test_skew_requiring_ranker_with_empty_samples_fails_at_load(tmp_path):
     (tmp_path / "equities.toml").write_text(text)
     with pytest.raises(ValueError, match="skew_samples"):
         load_venue_config("equities", tmp_path)
+
+
+def test_regime_disabled_and_bare_mode_are_settable_via_toml(tmp_path):
+    raw = (Path("config") / "equities.toml").read_text()
+    patched = raw.replace(
+        "exposure_risk_off = 0.0", "exposure_risk_off = 0.0\ndisabled = true"
+    ).replace('exit_style = "frozen"', 'exit_style = "frozen"\nbare_mode = true')
+    assert patched != raw
+    (tmp_path / "equities.toml").write_text(patched)
+    config = load_venue_config("equities", tmp_path)
+    assert config.regime.disabled is True
+    assert config.portfolio.bare_mode is True

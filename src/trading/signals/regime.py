@@ -29,6 +29,12 @@ def compute_regime(
 ) -> Regime:
     if as_of.tzinfo is None:
         raise ValueError("as_of must be tz-aware UTC")
+    if config.disabled:
+        # Ablation flag (R2 spec): the gate is switched off entirely -- always
+        # full exposure, never risk_off -- rather than approximated via
+        # thresholds (see RegimeConfig.disabled docstring for why that's
+        # impossible to do config-only).
+        return Regime(state="risk_on", exposure_multiplier=1.0)
     close = benchmark_bars.loc[:as_of, "close"]  # structural no-lookahead cut
     if len(close) < config.sma_slow:
         return Regime(state="neutral", exposure_multiplier=config.exposure_neutral)
