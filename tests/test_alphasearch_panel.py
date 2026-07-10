@@ -681,6 +681,28 @@ def test_load_insider_clean_marker_does_not_warn(tmp_path, caplog):
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
+def test_load_insider_warns_when_parquets_exist_without_marker(tmp_path, caplog):
+    frame = _insider_frame([("2020-01-06", "P", 10.0, 5.0, 1)])
+    store = tmp_path / "insider"
+    store.mkdir()
+    frame.to_parquet(store / "AAA.parquet")
+    # No .source marker: partial/torn build
+    with caplog.at_level("WARNING"):
+        load_insider(store, ["AAA"])
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "partial/torn build" in warnings[0].message
+    assert "no .source marker" in warnings[0].message
+
+
+def test_load_insider_absent_dir_does_not_warn(tmp_path, caplog):
+    store = tmp_path / "missing-store"
+    with caplog.at_level("WARNING"):
+        result = load_insider(store, ["AAA"])
+    assert result == {}
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
 def test_build_panel_threads_insider_dir(tmp_path):
     cache = _write_cache(tmp_path, ("AAA",))
     store = tmp_path / "insider"

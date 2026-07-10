@@ -86,15 +86,16 @@ def _perturb_after(panel: PanelData, cutoff: pd.Timestamp) -> PanelData:
     for sym, frame in panel.insider.items():
         f = frame.copy()
         late = f.index > cutoff
-        # Mixed dtypes rule out the bars-style blanket `* k + c`; corrupt
-        # exactly the fields the three registered insider signals read:
-        # value (npr_90's ratio / officer_buy_90's numerator), owner_cik
-        # (cluster_buys_90's distinct-owner count), and code (both P/S
-        # filters). is_officer and the trans_date column are left as-is --
-        # no registered signal keys visibility on either.
+        # Corrupt every reader-visible field on post-cutoff rows: value (npr_90's
+        # ratio / officer_buy_90's numerator), owner_cik (cluster_buys_90's
+        # distinct-owner count), code (both P/S filters), is_officer (flipped),
+        # and trans_date (shifted). Mixed dtypes rule out a bars-style blanket
+        # `* k + c` for all fields.
         f.loc[late, "value"] = f.loc[late, "value"] * 5.0 + 1.0
         f.loc[late, "owner_cik"] = -1
         f.loc[late, "code"] = f.loc[late, "code"].map({"P": "S", "S": "P"})
+        f.loc[late, "is_officer"] = ~f.loc[late, "is_officer"]
+        f.loc[late, "trans_date"] = f.loc[late, "trans_date"] + pd.Timedelta(25, unit="D")
         # ...and shift the FILED dates themselves (the PIT key). Several of
         # these rows have trans_date <= cutoff (the make_panel fixture files
         # 20 days after the transaction, and _add_straddling_insider_row adds

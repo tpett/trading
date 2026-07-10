@@ -189,11 +189,13 @@ def load_insider(root: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame]:
     Returns {} without creating anything when the store dir is absent --
     assembly must never invent an empty store (the fundamentals rule).
 
-    Warns ONCE per call when the store's .source marker carries a
-    "GAPS:<quarters>" suffix (scripts/build_insider_store.py stamps this when
-    a quarterly download/parse failed): the store is still usable, but an
-    incomplete build must announce itself rather than silently under-count
-    insider activity."""
+    Warns ONCE per call when:
+    - The store's .source marker carries a "GAPS:<quarters>" suffix
+      (scripts/build_insider_store.py stamps this when a quarterly download/parse
+      failed): the store is still usable, but an incomplete build must announce
+      itself rather than silently under-count insider activity.
+    - Parquet files exist but the .source marker is absent: indicates a partial/
+      torn build (parquets written, marker never reached)."""
     if not root.exists():
         return {}
     marker = root / INSIDER_SOURCE_MARKER
@@ -205,6 +207,16 @@ def load_insider(root: Path, symbols: Iterable[str]) -> dict[str, pd.DataFrame]:
                 "insider store %s is missing coverage for quarter(s): %s "
                 "(incomplete build -- see scripts/build_insider_store.py)",
                 root, gaps,
+            )
+    else:
+        # Check if there are parquet files but no marker (partial/torn build)
+        has_parquets = any((root / f"{s.replace('/', '-')}.parquet").exists()
+                           for s in symbols)
+        if has_parquets:
+            logger.warning(
+                "insider store %s has parquet files but no .source marker "
+                "(partial/torn build -- marker never reached)",
+                root,
             )
     out: dict[str, pd.DataFrame] = {}
     for symbol in sorted(set(symbols)):
