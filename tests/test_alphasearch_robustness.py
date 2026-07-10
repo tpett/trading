@@ -865,3 +865,77 @@ def test_run_battery_gate_fails_when_spy_side_is_nan(tmp_path):
     assert gate["spy_sharpe"] is None or math.isnan(gate["spy_sharpe"])
     assert outcome.eligible is False
 
+
+def test_run_battery_gate_aligns_spy_window_to_the_actual_lo_start(
+    tmp_path, monkeypatch
+):
+    """Fix (final review): a leading skipped decision date (below min_names)
+    must not leave the SPY comparator spanning the full nominal window while
+    charged_lo starts later -- that would compound different horizons
+    (anti-conservative when the market fell during the skipped lead-in).
+    Registers a throwaway signal (call-counter-free: thin on any date before
+    `cutoff`, so every re-evaluation the battery runs is self-consistent)
+    that forces exactly the WINDOW's first decision date to be skipped, then
+    pins the gate's spy_total_return to the window anchored at charged_lo's
+    own first observation -- a DIFFERENT number from the stale (nominal
+    start) window this fixture's SPY (sharp decline in the skipped lead-in,
+    flat after) is built to expose."""
+    from trading.alphasearch.costs import cost_charged_lo, spy_benchmark
+    from trading.alphasearch.robustness import run_battery
+    from trading.alphasearch.sort import portfolio_sort
+    from trading.alphasearch.spec import SIGNALS, SignalSpec
+    from trading.alphasearch.sweep import UniverseSpec, run_sweep
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel(n_symbols=40)
+    factors = make_factors()
+    start = pd.Timestamp("2020-01-01", tz="UTC")
+    end = pd.Timestamp("2020-06-30", tz="UTC")
+    dates = panel.decision_dates(start, end)
+    cutoff = dates[1]                              # skip ONLY the first date
+
+    def fn(view, as_of):
+        if as_of < cutoff:
+            return pd.Series({"S00": 1.0, "S01": 2.0})   # 2 < MIN_NAMES: skip
+        return pd.Series(
+            {s: float(i) for i, s in enumerate(sorted(view.symbols))},
+            dtype="float64",
+        )
+
+    spec = SignalSpec("leadskip_rank", fn)
+    monkeypatch.setitem(SIGNALS, "leadskip_rank", spec)
+
+    uspec = UniverseSpec("largecap", tmp_path, tmp_path / "s.jsonl", None)
+    run_sweep({"largecap": uspec}, journal, factors, ts="t0",
+              signals={"leadskip_rank": spec}, window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+
+    # SPY falls sharply during the skipped lead-in, then goes flat: the
+    # full-nominal-window total return and the lo-aligned total return are
+    # then provably different numbers.
+    idx = panel.closes[panel.symbols[0]].index
+    n_lead = int((idx < cutoff).sum())
+    rng = np.random.default_rng(0)
+    tail_rets = rng.normal(0.0001, 0.001, size=len(idx) - n_lead)
+    spy_values = np.concatenate([
+        np.linspace(100.0, 70.0, n_lead), 70.0 * np.cumprod(1 + tail_rets),
+    ])
+    spy = pd.Series(spy_values, index=idx)
+
+    outcome = run_battery(uspec, journal, factors, "t1", "leadskip_rank",
+                          discovery_window=WINDOW,
+                          panel_factory=lambda _u, _f: panel,
+                          spy_closes=spy)
+
+    sort = portfolio_sort(panel, spec, dates, end)
+    assert sort.rebalances[0][0] == cutoff          # confirms the lead skip
+    charged, _skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
+    aligned = spy_benchmark(spy, charged.index[0], end)
+    stale = spy_benchmark(spy, start, end)          # the pre-fix (buggy) window
+    assert aligned.total_return != pytest.approx(stale.total_return)
+    assert outcome.long_only_gate["spy_total_return"] == pytest.approx(
+        aligned.total_return
+    )
+    assert outcome.long_only_gate["spy_sharpe"] == pytest.approx(
+        aligned.sharpe_annual
+    )

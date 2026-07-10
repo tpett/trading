@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -868,3 +869,69 @@ def test_long_only_leaderboard_sorts_by_sharpe_with_na_last(tmp_path):
     assert len(ranked) == 2
     assert ranked[0].lo_sharpe >= ranked[1].lo_sharpe
     assert rows[-1].error is not None   # the n/a row sorts last
+
+
+def test_long_only_leaderboard_aligns_spy_window_to_the_actual_lo_start(
+    tmp_path, monkeypatch
+):
+    """Fix (final review): same alignment fix as run_battery's long_only_gate
+    (test_run_battery_gate_aligns_spy_window_to_the_actual_lo_start in
+    test_alphasearch_robustness.py), applied to _rederive_long_only_row so
+    the --long-only leaderboard stays consistent with the gate. A leading
+    skipped decision date (below MIN_NAMES) must not leave the SPY
+    comparator spanning the full nominal window while the re-derived
+    charged_lo starts later -- that would compound different horizons."""
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel(n_symbols=40)
+    factors = make_factors()
+    start = pd.Timestamp("2020-01-01", tz="UTC")
+    end = pd.Timestamp("2020-06-30", tz="UTC")
+    dates = panel.decision_dates(start, end)
+    cutoff = dates[1]                              # skip ONLY the first date
+
+    def fn(view, as_of):
+        if as_of < cutoff:
+            return pd.Series({"S00": 1.0, "S01": 2.0})   # 2 < MIN_NAMES: skip
+        return pd.Series(
+            {s: float(i) for i, s in enumerate(sorted(view.symbols))},
+            dtype="float64",
+        )
+
+    spec = SignalSpec("leadskip_rank", fn)
+    monkeypatch.setitem(SIGNALS, "leadskip_rank", spec)
+
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals={"leadskip_rank": spec}, window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+
+    # SPY falls sharply during the skipped lead-in, then a quiet random walk:
+    # the full-nominal-window total return and the lo-aligned total return
+    # are then provably different numbers.
+    idx = panel.closes[panel.symbols[0]].index
+    n_lead = int((idx < cutoff).sum())
+    rng = np.random.default_rng(0)
+    tail_rets = rng.normal(0.0001, 0.001, size=len(idx) - n_lead)
+    spy_values = np.concatenate([
+        np.linspace(100.0, 70.0, n_lead), 70.0 * np.cumprod(1 + tail_rets),
+    ])
+    spy = pd.Series(spy_values, index=idx)
+
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, spy,
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.error is None
+
+    from trading.alphasearch.costs import cost_charged_lo, spy_benchmark
+    from trading.alphasearch.sort import portfolio_sort
+
+    sort = portfolio_sort(panel, spec, dates, end)
+    assert sort.rebalances[0][0] == cutoff          # confirms the lead skip
+    charged, _skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
+    aligned = spy_benchmark(spy, charged.index[0], end)
+    stale = spy_benchmark(spy, start, end)          # the pre-fix (buggy) window
+    assert aligned.total_return != pytest.approx(stale.total_return)
+    assert row.spy_total_return == pytest.approx(aligned.total_return)
+    assert row.spy_sharpe == pytest.approx(aligned.sharpe_annual)

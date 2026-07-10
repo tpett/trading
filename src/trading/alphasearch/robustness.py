@@ -787,9 +787,23 @@ def run_battery(
     # R1 amendment (spec section 2): the promotion comparator is the
     # spread-charged long-only series vs SPY buy-and-hold, both over the
     # discovery window -- replacing the 30bps L/S cost-table row above.
+    # Fix (final review, 2026-07-10): if the window's LEADING decision
+    # date(s) are skipped (below min_names, or the degenerate-score guard),
+    # charged_lo's first observation lands on the first ACTUAL rebalance,
+    # not the nominal window start -- comparing its total return to SPY's
+    # total return over the FULL nominal window would compound different
+    # horizons (anti-conservative when the market fell during the skipped
+    # lead-in: SPY's full-window total would be dragged down by a decline
+    # the signal never had to sit through). Anchor SPY's benchmark window to
+    # charged_lo's own first observation so both totals compound the
+    # identical horizon. A no-op on the current largecap discovery config
+    # (no leading skips there -- charged_lo.index[0] == the first return day
+    # after `start`'s own rebalance), but reachable under R3's thinner
+    # small/micro-cap cross-sections.
+    lo_window_start = charged_lo.index[0] if len(charged_lo) > 0 else start
     lo_sharpe = annualized_sharpe(charged_lo)
     lo_total = total_return(charged_lo)
-    spy_stats = spy_benchmark(spy, start, end)
+    spy_stats = spy_benchmark(spy, lo_window_start, end)
     long_only_gate_passed = (
         not math.isnan(lo_sharpe) and not math.isnan(spy_stats.sharpe_annual)
         and lo_sharpe >= spy_stats.sharpe_annual

@@ -659,9 +659,15 @@ def _rederive_long_only_row(
             symbol_subset=tuple(subset) if subset is not None else None,
         )
         charged_lo, skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
+        # Fix (final review, 2026-07-10): same alignment as run_battery's
+        # long_only_gate -- a leading skipped decision date shifts
+        # charged_lo's first observation past the nominal window start, so
+        # the SPY comparator must cover that SAME (shorter) horizon rather
+        # than the full nominal window (anti-conservative otherwise).
+        lo_window_start = charged_lo.index[0] if len(charged_lo) > 0 else start
         lo_sharpe = annualized_sharpe(charged_lo)
         lo_total = total_return(charged_lo)
-        spy_stats = spy_benchmark(spy_closes, start, end)
+        spy_stats = spy_benchmark(spy_closes, lo_window_start, end)
     except (SweepError, SortError, ValueError, IndexError, np.linalg.LinAlgError) as exc:
         return _na(f"{type(exc).__name__}: {exc}")
     beats = (
