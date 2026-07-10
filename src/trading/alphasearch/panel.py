@@ -41,6 +41,11 @@ MAX_OPTION_AGE_DAYS = 7  # a cell older than this at as_of is stale -> missing
 OPTION_COLUMNS = [
     "hedge", "excite", "atm_iv", "otm_put_iv", "otm_call_iv",
     "smile", "cp_vol", "wing_vol", "tot_vol", "atm_spread", "opt_dollar_vol",
+    # 2026-07-09 options-v2 batch (oi_put_call/d_oi/iv_term_slope): per-leg
+    # open_interest and the far block's ATM IV. NaN when a leg lacks its OWN
+    # open_interest key (absent != a served 0) or the far block/its ATM leg
+    # is absent -- same honesty rule as leg volume above.
+    "otm_put_oi", "atm_oi", "otm_call_oi", "oi_total", "far_atm_iv",
 ]
 
 
@@ -82,6 +87,19 @@ def cell_metrics(cell: dict) -> dict:
 
     dollars = [x for x in (leg_dollar(r) for r in ("atm", "otm_put", "otm_call"))
                if x is not None]
+
+    def oi(role):
+        # None distinguishes a leg whose OWN open_interest key is absent
+        # from a served 0 (a real observation) -- unlike vol()'s `or 0`,
+        # there is no cell-wide "has_oi" gate to fall back on here, so each
+        # leg's presence must be checked directly.
+        return d.get(role, {}).get("open_interest")
+
+    put_oi, atm_oi_val, call_oi = oi("otm_put"), oi("atm"), oi("otm_call")
+    oi_values = [v for v in (atm_oi_val, put_oi, call_oi) if v is not None]
+    far = cell.get("far") or {}
+    far_legs = {c["role"]: c for c in far.get("contracts", [])}
+    far_atm_iv = far_legs.get("atm", {}).get("iv")
     return {
         "hedge": cell.get("skew_put_atm"),
         "excite": (-rr if rr is not None else np.nan),  # call-vs-put IV richness
@@ -99,6 +117,13 @@ def cell_metrics(cell: dict) -> dict:
         # Johnson-So O/S numerator: only legs carrying BOTH volume and mid
         # count; a cell with neither is missing, never $0.
         "opt_dollar_vol": (sum(dollars) if dollars else np.nan),
+        "otm_put_oi": (float(put_oi) if put_oi is not None else np.nan),
+        "atm_oi": (float(atm_oi_val) if atm_oi_val is not None else np.nan),
+        "otm_call_oi": (float(call_oi) if call_oi is not None else np.nan),
+        # Sum over legs CARRYING the key only; NaN when none do (d_oi's
+        # "no leg carries it" rule) -- never a fabricated 0.
+        "oi_total": (float(sum(oi_values)) if oi_values else np.nan),
+        "far_atm_iv": (float(far_atm_iv) if far_atm_iv is not None else np.nan),
     }
 
 
