@@ -1961,6 +1961,18 @@ Acceptance reading (spec §5). Hard preconditions: `cells_v1 > 0` AND `iv_overla
 
 ---
 
+### OPS CORRECTION (2026-07-09, learned live)
+
+The mid-cap gather requires BOTH `--cache-dir data/equities-midcap-tiingo`
+AND mid-cap raw closes present in `data/options-iv/underlying_raw/` (run
+`scripts/backfill_options_underlying_raw.py --limit-symbols <midcap pool>
+--cache-dir data/equities-midcap-tiingo --indices sp400` first). The original
+run-book mid-cap command omitted both; the resulting 91-cell enumeration
+(vs ~12.7k expected) was caught by the cell-count check, and the pristine
+`samples-midcap.v1.jsonl` backup made the re-run free. Run-book lesson:
+enumerate per-pool DATA prerequisites (adjusted cache, raw closes), not just
+CLI flags.
+
 ## Self-Review (run after writing, fixed inline)
 
 1. **Spec coverage:** §2 per-leg OI/greeks → Tasks 1–2; §2 far block → Task 3; §2 large-cap leg volume → re-gather (R7) + coverage assertion (R9); §3 ops/paths/backup/log → Task 5 + R1–R8 (pools pinned via `--limit-symbols`, same output paths, `.v1` backups, `state/options-iv/gather-v2.log`); §4 delisted test → R5 (with the entitlement-window caveat); §5 verification → Task 5 coverage module + R9 numbers + unit tests across Tasks 1–5; §6 error handling → degrade-to-absent (Task 2), far-drop-only (Task 3), resume under enriched schema (Task 5). Out-of-scope items (signal registration, sweeps) correctly absent.
