@@ -163,6 +163,21 @@ def build_band_membership(
     return MembershipBuild(membership=membership, diagnostics=diagnostics)
 
 
+def load_band_membership(
+    path: Path, bands: frozenset[str]
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Read the (band, symbol, start, end) CSV, keep only rows whose band is in
+    `bands`, and return symbol -> tuple of (start_iso, end_iso) intervals (end
+    EXCLUSIVE, "" = open) -- the interval shape PanelView.symbols filters on,
+    mirroring equities_membership.csv's overlap logic."""
+    df = pd.read_csv(path, dtype=str).fillna("")
+    df = df[df["band"].isin(bands)]
+    out: dict[str, list[tuple[str, str]]] = {}
+    for row in df.itertuples():
+        out.setdefault(row.symbol, []).append((row.start, row.end))
+    return {s: tuple(sorted(iv)) for s, iv in out.items()}
+
+
 def write_membership(
     build: MembershipBuild, membership_path: Path, diagnostics_path: Path
 ) -> None:

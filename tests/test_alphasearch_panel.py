@@ -780,3 +780,16 @@ def test_build_panel_threads_insider_dir(tmp_path):
     assert set(panel.insider) == {"AAA"}
     bare = build_panel(cache, None, None, symbols=("AAA",))
     assert bare.insider == {}
+
+
+def test_build_panel_threads_membership(tmp_path):
+    idx = pd.date_range("2019-01-01", periods=10, freq="B", tz="UTC")
+    frame = pd.DataFrame({c: (1.0 if c != "volume" else 1e5) for c in BAR_COLUMNS},
+                         index=idx)[BAR_COLUMNS]
+    frame.to_parquet(tmp_path / "AAA.parquet")
+    panel = build_panel(
+        tmp_path, None, None,
+        symbols=("AAA",),
+        membership={"AAA": (("2019-01-01", ""),)},
+    )
+    assert panel.membership == {"AAA": (("2019-01-01", ""),)}
