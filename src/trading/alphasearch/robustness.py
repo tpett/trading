@@ -20,7 +20,15 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from trading.alphasearch.evaluate import evaluate_alpha
+from trading.alphasearch.costs import (
+    DEFAULT_SPY_CACHE_DIR,
+    SPY_SYMBOL,
+    apply_rebalance_charges,
+    cost_charged_lo,
+    load_spy_closes,
+    spy_benchmark,
+)
+from trading.alphasearch.evaluate import annualized_sharpe, evaluate_alpha, total_return
 from trading.alphasearch.panel import PanelData
 from trading.alphasearch.sort import (
     MIN_NAMES,
@@ -68,9 +76,10 @@ MONTH_TOP = 3
 MONTH_MAX_SHARE = 0.60
 PROXY_LOADING_MULTIPLE = 2.0
 PROXY_MIN_R2 = 0.5
-COST_BPS = (10, 30, 50)             # one-way, per leg, per rebalance
-ELIGIBLE_COST_BPS = 30
-ELIGIBLE_MIN_COST_T = 2.0
+COST_BPS = (10, 30, 50)             # one-way, per leg, per rebalance -- DIAGNOSTIC
+# ONLY (spec 2026-07-10 R1 amendment): the promotion rule no longer reads a
+# row from this table. Retained because the L/S cost-adjusted alpha curve is
+# still a useful fragility diagnostic in the report card.
 BOOK_SIZES = (10_000.0, 100_000.0, 1_000_000.0)  # $ per side
 
 
@@ -424,22 +433,11 @@ def factor_proxy_flag(ls_stats: dict) -> dict:
 
 # ---------------------------------------------------------------------------#
 # Cost & capacity analysis (spec section 4): arithmetic, NO new trials.
+# apply_rebalance_charges now lives in costs.py (a leaf module both this file
+# and sweep.py's --long-only leaderboard can import without a cycle) and is
+# re-exported here under its original name -- `from
+# trading.alphasearch.robustness import apply_rebalance_charges` still works.
 # ---------------------------------------------------------------------------#
-def apply_rebalance_charges(
-    ls: pd.Series, charges: list[tuple[pd.Timestamp, float]]
-) -> pd.Series:
-    """Deduct each charge from the first daily return strictly after its
-    rebalance date (the first day the traded book exists). A charge dated at
-    or after the last return day has no day to land on and is dropped (a
-    final-day rebalance is never held). Returns a copy."""
-    charged = ls.copy()
-    for date, charge in charges:
-        pos = int(charged.index.searchsorted(date, side="right"))
-        if pos < len(charged):
-            charged.iloc[pos] -= charge
-    return charged
-
-
 def _regress_charged(charged: pd.Series, factors: pd.DataFrame, row: dict) -> dict:
     try:
         alpha = evaluate_alpha(charged, factors, self_financing=True)
@@ -547,9 +545,10 @@ class BatteryOutcome:
     window: str
     checks: tuple[CheckResult, ...]   # checks 1-6, spec order
     factor_proxy: dict                # check 7: warning only, never blocks
-    cost_table: list[dict]
+    cost_table: list[dict]            # L/S cost-adjusted alpha: DIAGNOSTIC only
     capacity_curve: list[dict]
-    eligible: bool                    # the frozen promotion rule
+    long_only_gate: dict              # R1 amendment: the promotion comparator
+    eligible: bool                    # the amended promotion rule (spec section 2)
     event: dict                       # the journaled kind="battery" verdict
 
 
@@ -567,6 +566,7 @@ def run_battery(
     panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
         build_universe_panel
     ),
+    spy_closes: pd.Series | None = None,
 ) -> BatteryOutcome:
     """Run the frozen battery on ONE current BH survivor (spec section 3).
 
@@ -580,9 +580,19 @@ def run_battery(
     arithmetic on a locally recomputed full-window sort (identical config to
     the journaled discovery trial -- deliberately NOT journaled again). The
     verdict is one kind="battery" event per (signal, universe); re-runs
-    replace by config hash. The promotion rule (frozen): eligible iff checks
-    1-6 all pass AND the 30 bps cost row retains t >= ELIGIBLE_MIN_COST_T.
-    Never touches holdout state."""
+    replace by config hash.
+
+    The promotion rule (2026-07-10 R1 amendment, spec section 2 -- amends the
+    prior "checks 1-6 pass AND 30bps L/S cost t >= 2.0" rule): eligible iff
+    checks 1-6 all pass AND the cost-charged long-only series' Sharpe over
+    the discovery window is >= SPY buy-and-hold's Sharpe over the identical
+    window AND its total return exceeds SPY's. Checks 1-6 and their frozen
+    thresholds are UNCHANGED by this amendment -- only the final promotion
+    comparator moves off the L/S cost table onto the §3 spread-charged
+    long-only series vs SPY. `spy_closes` lets callers (tests, or a future
+    non-largecap benchmark) inject the series directly; the default loads
+    data/equities-tiingo/SPY.parquet and refuses loudly (no silent
+    substitute) if that cache is absent. Never touches holdout state."""
     params = _hashed_params(quantiles, tercile_below, min_names)
     discovery = require_survivor(journal, signal_name, uspec.name,
                                  discovery_window, params)
@@ -595,6 +605,19 @@ def run_battery(
         _check_factor_coverage(factors, end)
     except ValueError as exc:
         raise SweepError(str(exc)) from exc
+    # R1 amendment: SPY is the frozen promotion comparator (spec section 2).
+    # Refuse pre-touch, same shape as the stale-factors check above, rather
+    # than silently substituting another benchmark or crashing mid-battery.
+    spy = spy_closes if spy_closes is not None else load_spy_closes(DEFAULT_SPY_CACHE_DIR)
+    if spy is None:
+        raise SweepError(
+            f"no {SPY_SYMBOL} cache at "
+            f"{DEFAULT_SPY_CACHE_DIR / f'{SPY_SYMBOL}.parquet'}; the long-only "
+            "gate benchmarks every candidate against SPY buy-and-hold and "
+            "refuses to substitute another proxy. Fetch SPY into that cache "
+            "(same Tiingo bar-cache pipeline as the other largecap symbols) "
+            "before running the battery"
+        )
     panel = panel_factory(uspec, factors)
     spec = SIGNALS[signal_name]
     _check_universe_supports(panel, spec, uspec.name)
@@ -649,15 +672,28 @@ def run_battery(
     cost_rows = cost_adjusted_table(sort.ls, sort.rebalances,
                                     sort.turnover_monthly, factors)
     capacity_rows = capacity_curve(panel, sort.rebalances, sort.ls, factors)
-    cost_t = next(
-        (r["alpha_t"] for r in cost_rows if r["cost_bps"] == ELIGIBLE_COST_BPS),
-        None,
+    # R1 amendment (spec section 2): the promotion comparator is the
+    # spread-charged long-only series vs SPY buy-and-hold, both over the
+    # discovery window -- replacing the 30bps L/S cost-table row above.
+    charged_lo, skipped_no_spread = cost_charged_lo(panel, sort.lo, sort.rebalances)
+    lo_sharpe = annualized_sharpe(charged_lo)
+    lo_total = total_return(charged_lo)
+    spy_stats = spy_benchmark(spy, start, end)
+    long_only_gate_passed = (
+        not math.isnan(lo_sharpe) and not math.isnan(spy_stats.sharpe_annual)
+        and lo_sharpe >= spy_stats.sharpe_annual
+        and not math.isnan(lo_total) and not math.isnan(spy_stats.total_return)
+        and lo_total > spy_stats.total_return
     )
-    eligible = (
-        all(c.passed for c in checks)
-        and cost_t is not None
-        and float(cost_t) >= ELIGIBLE_MIN_COST_T
-    )
+    long_only_gate = {
+        "lo_sharpe": lo_sharpe,
+        "lo_total_return": lo_total,
+        "spy_sharpe": spy_stats.sharpe_annual,
+        "spy_total_return": spy_stats.total_return,
+        "skipped_no_spread": skipped_no_spread,
+        "passed": long_only_gate_passed,
+    }
+    eligible = all(c.passed for c in checks) and long_only_gate_passed
     config = trial_config(signal_name, uspec.name, discovery_window,
                           params=params)
     verdict = {
@@ -668,6 +704,7 @@ def run_battery(
         "factor_proxy": proxy,
         "cost_table": cost_rows,
         "capacity_curve": capacity_rows,
+        "long_only_gate": long_only_gate,
         "eligible": eligible,
     }
     event = log_trial(journal, kind="battery", config=config, ts=ts,
@@ -675,5 +712,6 @@ def run_battery(
     return BatteryOutcome(
         signal=signal_name, universe=uspec.name, window=discovery_window,
         checks=tuple(checks), factor_proxy=proxy, cost_table=cost_rows,
-        capacity_curve=capacity_rows, eligible=eligible, event=event,
+        capacity_curve=capacity_rows, long_only_gate=long_only_gate,
+        eligible=eligible, event=event,
     )

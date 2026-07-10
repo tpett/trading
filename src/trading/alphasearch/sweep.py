@@ -747,7 +747,12 @@ def run_holdout(
     # design.md section 3: no holdout may be spent on a survivor that has not
     # passed its robustness battery. No holdout had ever been spent when this
     # gate was added, so nothing is affected retroactively. Hash-keyed to the
-    # EXACT discovery trial, like the BH gate above.
+    # EXACT discovery trial, like the BH gate above. What "battery-passed"
+    # MEANS was itself amended prospectively (R1, docs/superpowers/specs/
+    # 2026-07-10-longonly-gate-amendment.md section 2): the verdict's
+    # `eligible` bit now requires cost-charged long-only Sharpe >= SPY's AND
+    # total return > SPY's over discovery, replacing the 30bps L/S cost gate
+    # -- this check just reads that bit, so its own logic is unchanged.
     verdict = battery_verdict(journal, discovery["config_hash"])
     if verdict is None or verdict.get("eligible") is not True:
         state = ("has not been run" if verdict is None

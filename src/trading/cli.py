@@ -959,11 +959,15 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
         factors = _load_alphasearch_factors(args)
         if factors is None:
             return 1
+        spy_closes = _load_spy_closes()
+        if spy_closes is None:
+            return 1
         from trading.alphasearch import robustness
 
         try:
             outcome = robustness.run_battery(
-                uspec, journal, factors, _utcnow().isoformat(), signal_name
+                uspec, journal, factors, _utcnow().isoformat(), signal_name,
+                spy_closes=spy_closes,
             )
         except (engine.SweepError, PanelError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
@@ -1084,6 +1088,27 @@ def _load_alphasearch_factors(args: argparse.Namespace):
             file=sys.stderr,
         )
         return None
+
+
+def _load_spy_closes():
+    """SPY buy-and-hold closes for the R1 long-only gate, or None (error
+    already printed). Refuses loudly rather than substituting another
+    benchmark when the cache has no SPY parquet (spec section 2)."""
+    from trading.alphasearch.costs import DEFAULT_SPY_CACHE_DIR, SPY_SYMBOL, load_spy_closes
+
+    spy = load_spy_closes(DEFAULT_SPY_CACHE_DIR)
+    if spy is None:
+        print(
+            f"ERROR: no {SPY_SYMBOL} cache at "
+            f"{DEFAULT_SPY_CACHE_DIR / f'{SPY_SYMBOL}.parquet'}; the long-only "
+            "gate benchmarks every candidate against SPY buy-and-hold and "
+            "refuses to substitute another proxy. Fetch SPY into that cache "
+            "(same Tiingo bar-cache pipeline as the other largecap symbols) "
+            "before running this command",
+            file=sys.stderr,
+        )
+        return None
+    return spy
 
 
 def _print_alphasearch_leaderboard(rows, count: int, *, as_json: bool) -> None:
@@ -1218,7 +1243,15 @@ def _render_battery(outcome) -> None:
             f"pattern. Does not block, but read the alpha as a factor bet "
             f"until proven otherwise.[/bold red]"
         )
+    gate = outcome.long_only_gate
+    console.print(
+        f"long-only vs SPY (discovery window, cost-charged): "
+        f"Sharpe {num(gate.get('lo_sharpe'))} vs {num(gate.get('spy_sharpe'))}, "
+        f"total return {num(gate.get('lo_total_return'), '{:+.1%}')} vs "
+        f"{num(gate.get('spy_total_return'), '{:+.1%}')}"
+    )
     console.print(
         f"holdout-eligible: {'YES' if outcome.eligible else 'NO'} "
-        f"(checks 1-6 all pass AND 30bp cost t >= 2.0)"
+        f"(checks 1-6 all pass AND cost-charged long-only Sharpe >= SPY "
+        f"AND total return > SPY, over discovery)"
     )

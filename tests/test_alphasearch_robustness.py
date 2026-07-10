@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from alphasearch_helpers import make_factors, make_panel
+from alphasearch_helpers import make_factors, make_panel, make_spy_closes
 from trading.alphasearch.panel import PanelData
 from trading.alphasearch.robustness import (
     BatteryContext,
@@ -670,7 +670,8 @@ def test_run_battery_refuses_nonsurvivor_before_journaling(tmp_path):
     with pytest.raises(SweepError, match="not a current BH survivor"):
         run_battery(uspec, journal, make_factors(), "t2", "rvol21",
                     discovery_window=WINDOW,
-                    panel_factory=lambda _u, _f: make_panel())
+                    panel_factory=lambda _u, _f: make_panel(),
+                    spy_closes=make_spy_closes())
     assert len(list(journal.events())) == before      # journaled NOTHING
 
 
@@ -681,7 +682,8 @@ def test_run_battery_journals_tagged_trials_and_a_verdict(tmp_path):
     journal, panel, factors, uspec = _swept_survivor(tmp_path)
     outcome = run_battery(uspec, journal, factors, "t1", "mom21",
                           discovery_window=WINDOW,
-                          panel_factory=lambda _u, _f: panel)
+                          panel_factory=lambda _u, _f: panel,
+                          spy_closes=make_spy_closes())
     # 2 halves + 5 draws + 4 jitter + 1 offset = 12 tagged re-evaluations,
     # all BH-counted discovery trials on top of the 1 swept trial.
     trials = discovery_trials(journal)
@@ -714,7 +716,8 @@ def test_run_battery_rerun_replaces_the_verdict_and_double_counts_nothing(tmp_pa
     from trading.alphasearch.sweep import battery_verdict, discovery_trials
 
     journal, panel, factors, uspec = _swept_survivor(tmp_path)
-    kwargs = dict(discovery_window=WINDOW, panel_factory=lambda _u, _f: panel)
+    kwargs = dict(discovery_window=WINDOW, panel_factory=lambda _u, _f: panel,
+                  spy_closes=make_spy_closes())
     first = run_battery(uspec, journal, factors, "t1", "mom21", **kwargs)
     events_after_first = len(list(journal.events()))
     second = run_battery(uspec, journal, factors, "t2", "mom21", **kwargs)
@@ -738,7 +741,8 @@ def test_run_battery_narrow_universe_fails_check2_via_error_trials(tmp_path):
     journal, panel, factors, uspec = _swept_survivor(tmp_path, n_symbols=16)
     outcome = run_battery(uspec, journal, factors, "t1", "mom21",
                           discovery_window=WINDOW,
-                          panel_factory=lambda _u, _f: panel)
+                          panel_factory=lambda _u, _f: panel,
+                          spy_closes=make_spy_closes())
     subsets = next(c for c in outcome.checks if c.name == "universe_subsets")
     assert not subsets.passed and subsets.detail["n_pass"] == 0
     assert not outcome.eligible
