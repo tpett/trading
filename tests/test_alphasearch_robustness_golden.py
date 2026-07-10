@@ -6,7 +6,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from alphasearch_helpers import make_factors, make_panel
+from alphasearch_helpers import make_factors, make_panel, make_spy_closes
 from trading.alphasearch.robustness import run_battery
 from trading.alphasearch.spec import SIGNALS
 from trading.alphasearch.sweep import (
@@ -49,7 +49,7 @@ def test_golden_battery_end_to_end(tmp_path):
     assert len(discovery_trials(journal)) == 1
 
     outcome = run_battery(uspec, journal, factors, "t1", "mom21",
-                          discovery_window=WINDOW)
+                          discovery_window=WINDOW, spy_closes=make_spy_closes())
 
     # 12 battery-tagged, BH-counted discovery trials on top of the sweep's 1.
     trials = discovery_trials(journal)
@@ -75,7 +75,7 @@ def test_golden_battery_end_to_end(tmp_path):
 
     # Bit-identical, count-stable re-run: dedupe by config hash everywhere.
     again = run_battery(uspec, journal, factors, "t2", "mom21",
-                        discovery_window=WINDOW)
+                        discovery_window=WINDOW, spy_closes=make_spy_closes())
     assert len(discovery_trials(journal)) == 13
     assert again.eligible == outcome.eligible
     assert [c.passed for c in again.checks] == [c.passed for c in outcome.checks]
@@ -93,19 +93,26 @@ def test_golden_battery_verdict_gates_a_real_holdout(tmp_path):
     this run_battery outcome or the run_holdout gate's reaction to it would
     change, and one of the assertions below would break.
 
-    On this deterministic 40-name fixture the battery is NOT eligible (check 6
-    month-concentration fails: the L/S series' top-3 months carry 61.6% of the
-    cumulative log return on this window, just over the 60% frozen ceiling) --
-    so the holdout must refuse, pre-touch, naming the robustness command."""
+    On this deterministic 40-name fixture the battery is NOT eligible under
+    the R1-re-anchored checks (the §2 long-only gate itself PASSES -- the
+    planted drift spread crushes the synthetic SPY -- but check 6 fails: the
+    active series' top-3 months carry ~91% of the cumulative log return over
+    this 6-month window, far over the 60% frozen ceiling; check 1's first
+    half also falls below the active-t floor against the noisy synthetic
+    benchmark) -- so the holdout must refuse, pre-touch, naming the
+    robustness command."""
     uspec = _write_universe(tmp_path)
     journal = trials_journal(tmp_path / "journal")
     factors = make_factors()
     run_sweep({uspec.name: uspec}, journal, factors, ts="t0",
               signals={"mom21": SIGNALS["mom21"]}, window=WINDOW)
     outcome = run_battery(uspec, journal, factors, "t1", "mom21",
-                          discovery_window=WINDOW)
+                          discovery_window=WINDOW, spy_closes=make_spy_closes())
 
-    # Pin the fixture's real outcome: not eligible, specifically via check 6.
+    # Pin the fixture's real outcome: the §2 comparator passes, yet the
+    # re-anchored checks (6, and 1's noisy first half) still block -- the
+    # battery is more than the comparator, by design.
+    assert outcome.long_only_gate["passed"] is True
     assert outcome.eligible is False
     month = next(c for c in outcome.checks if c.name == "month_concentration")
     assert not month.passed
@@ -162,7 +169,7 @@ def test_run_battery_refuses_on_cache_drift_before_any_journaling(tmp_path):
 
     with pytest.raises(SweepError, match="caches drifted"):
         run_battery(uspec, journal, factors, "t2", "mom21",
-                    discovery_window=WINDOW)
+                    discovery_window=WINDOW, spy_closes=make_spy_closes())
     assert len(list(journal.events())) == events_before  # journaled NOTHING
 
 
@@ -184,5 +191,28 @@ def test_run_battery_refuses_stale_factors_before_any_journaling(tmp_path):
     stale_factors = make_factors(periods=60)  # ends 2020-02-21, WINDOW ends 06-30
     with pytest.raises(SweepError, match="factor cache"):
         run_battery(uspec, journal, stale_factors, "t2", "mom21",
-                    discovery_window=WINDOW)
+                    discovery_window=WINDOW, spy_closes=make_spy_closes())
+    assert len(list(journal.events())) == events_before  # journaled NOTHING
+
+
+def test_run_battery_refuses_when_spy_cache_is_absent_before_any_journaling(
+    tmp_path, monkeypatch
+):
+    """R1 amendment (spec section 2): SPY is the frozen promotion comparator.
+    An absent cache must refuse loudly, pre-touch -- not silently substitute
+    another benchmark and not journal 12 predictable re-evaluations for one
+    fixable data problem. Monkeypatches the default loader (rather than
+    relying on a real missing cache dir) so the test stays independent of
+    whatever data happens to be on disk."""
+    uspec = _write_universe(tmp_path)
+    journal = trials_journal(tmp_path / "journal")
+    factors = make_factors()
+    run_sweep({uspec.name: uspec}, journal, factors, ts="t0",
+              signals={"mom21": SIGNALS["mom21"]}, window=WINDOW)
+    events_before = len(list(journal.events()))
+
+    monkeypatch.setattr("trading.alphasearch.robustness.load_spy_closes",
+                        lambda *_a, **_k: None)
+    with pytest.raises(SweepError, match="no SPY cache"):
+        run_battery(uspec, journal, factors, "t2", "mom21", discovery_window=WINDOW)
     assert len(list(journal.events())) == events_before  # journaled NOTHING

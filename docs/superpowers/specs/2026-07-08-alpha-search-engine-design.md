@@ -221,3 +221,20 @@ robustness gates and failure diagnostics (Piece 3); portfolio blending
 (Piece 4); parallel sweep execution; signal combinations / parameter grids
 (the sweep runner's trial schema already accommodates them via `params`);
 any new data sources.
+
+## Amendments
+
+- **2026-07-10 (R1, `2026-07-10-longonly-gate-amendment.md`):** amends §5
+  rule 1 prospectively -- no already-journaled trial is re-scored. The
+  four-factor L/S alpha t-stat is retained as a mandatory DIAGNOSTIC (printed
+  with every candidate) but is no longer the promotion statistic. The
+  promotion statistic is now: the signal's long-only top-quantile portfolio,
+  charged Corwin-Schultz (2012) spread-based costs (`trading.alphasearch.
+  costs`), evaluated over the discovery window -- promotion-eligible when its
+  annualized Sharpe >= SPY buy-and-hold's AND its total return exceeds SPY's,
+  both over the identical window. BH-FDR (§5 rule 2) is unaffected: it still
+  runs on the L/S alpha p-values exactly as before and remains a reported
+  property (no longer a filter). The leaderboard gained a `--long-only` view
+  that re-reads every journaled trial under the new lens (a display, not a
+  re-journaling). See the amendment doc for the full rationale and the
+  Piece 3 robustness battery's corresponding promotion-rule swap.

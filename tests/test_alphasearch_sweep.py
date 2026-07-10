@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from alphasearch_helpers import make_factors, make_panel
+from alphasearch_helpers import make_factors, make_panel, make_spy_closes
 from trading.alphasearch.panel import PanelError
 from trading.alphasearch.spec import SIGNALS, SignalSpec
 from trading.alphasearch.sweep import (
@@ -15,6 +16,7 @@ from trading.alphasearch.sweep import (
     SweepError,
     UniverseSpec,
     build_leaderboard,
+    build_long_only_leaderboard,
     default_universes,
     discovery_trials,
     holdout_passes,
@@ -753,3 +755,201 @@ def test_build_universe_panel_derives_sectors_from_the_sic_map(tmp_path):
     panel = build_universe_panel(uspec, make_factors())
     # Sectors only (the 10-way partition); industries never masquerade as one.
     assert panel.sectors == {"AAA": "pharma-chemicals", "BBB": "finance"}
+
+
+# --------------------------------------------------------------------------- #
+# --long-only leaderboard (R1 gate amendment spec section 4 deliverable 2)
+# --------------------------------------------------------------------------- #
+def test_long_only_leaderboard_rederives_a_real_trial(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, make_spy_closes(),
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.signal == "mom21" and row.universe == "largecap"
+    assert row.window == WINDOW
+    assert row.error is None
+    assert row.lo_sharpe is not None
+    assert row.spy_sharpe is not None
+    assert isinstance(row.beats_spy, bool)
+    assert row.skipped_no_spread == 0   # make_panel's bars always carry high/low
+
+
+def test_long_only_leaderboard_beats_spy_direction_is_pinned(tmp_path):
+    # R1 spec section 2 comparator direction: the SAME re-derived trial must
+    # flag beats_spy True against a weak benchmark and False against one no
+    # fixture leg outruns -- pinning that the comparison runs the right way.
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    kwargs = dict(panel_factory=lambda _u, _f: panel)
+    # Weak = declining drift at normal vol (zero-vol would mean a
+    # near-infinite benchmark Sharpe: constant returns, sd -> 0).
+    weak = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors,
+        make_spy_closes(drift=-0.001), **kwargs)
+    strong = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors,
+        make_spy_closes(drift=0.01, vol=0.0), **kwargs)
+    assert weak[0].beats_spy is True
+    assert weak[0].lo_total_return > weak[0].spy_total_return
+    assert strong[0].beats_spy is False
+    assert strong[0].lo_total_return < strong[0].spy_total_return
+    # NaN side (benchmark never overlaps the window): honest False, not a
+    # free pass -- and the row still ranks (error is None; data DID re-derive).
+    disjoint = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors,
+        make_spy_closes(start="2015-01-02", periods=100, vol=0.0), **kwargs)
+    assert disjoint[0].beats_spy is False
+    assert disjoint[0].spy_sharpe is None and disjoint[0].error is None
+
+
+def test_long_only_leaderboard_reports_na_for_unresolvable_universe(tmp_path):
+    # A trial journaled under a universe name no longer in the resolved set
+    # (e.g. a segment whose SIC map went missing) shows honestly as n/a,
+    # never silently dropped.
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap:gone", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=8.0, alpha_t=3.0, p=0.01))
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), make_factors(), make_spy_closes(),
+    )
+    assert len(rows) == 1
+    assert rows[0].error is not None and "unknown universe" in rows[0].error
+    assert rows[0].lo_sharpe is None and rows[0].beats_spy is None
+
+
+def test_long_only_leaderboard_reports_na_for_unknown_signal(tmp_path):
+    # A signal since removed from the registry: honest n/a, not a crash.
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    log_trial(journal, kind="discovery",
+              config=trial_config("no_longer_exists", "largecap", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=8.0, alpha_t=3.0, p=0.01))
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), make_factors(), make_spy_closes(),
+        panel_factory=lambda _u, _f: make_panel(),
+    )
+    assert len(rows) == 1
+    assert rows[0].error is not None and "unknown signal" in rows[0].error
+
+
+def test_long_only_leaderboard_sorts_by_sharpe_with_na_last(tmp_path):
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21", "rev5"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    log_trial(journal, kind="discovery",
+              config=trial_config("gone", "largecap", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=1.0, alpha_t=1.0, p=0.5))
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, make_spy_closes(),
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 3
+    ranked = [r for r in rows if r.error is None]
+    assert len(ranked) == 2
+    assert ranked[0].lo_sharpe >= ranked[1].lo_sharpe
+    assert rows[-1].error is not None   # the n/a row sorts last
+
+
+def test_long_only_leaderboard_aligns_spy_window_to_the_actual_lo_start(
+    tmp_path, monkeypatch
+):
+    """Fix (final review): same alignment fix as run_battery's long_only_gate
+    (test_run_battery_gate_aligns_spy_window_to_the_actual_lo_start in
+    test_alphasearch_robustness.py), applied to _rederive_long_only_row so
+    the --long-only leaderboard stays consistent with the gate. A leading
+    skipped decision date (below MIN_NAMES) must not leave the SPY
+    comparator spanning the full nominal window while the re-derived
+    charged_lo starts later -- that would compound different horizons."""
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel(n_symbols=40)
+    factors = make_factors()
+    start = pd.Timestamp("2020-01-01", tz="UTC")
+    end = pd.Timestamp("2020-06-30", tz="UTC")
+    dates = panel.decision_dates(start, end)
+    cutoff = dates[1]                              # skip ONLY the first date
+
+    def fn(view, as_of):
+        if as_of < cutoff:
+            return pd.Series({"S00": 1.0, "S01": 2.0})   # 2 < MIN_NAMES: skip
+        return pd.Series(
+            {s: float(i) for i, s in enumerate(sorted(view.symbols))},
+            dtype="float64",
+        )
+
+    spec = SignalSpec("leadskip_rank", fn)
+    monkeypatch.setitem(SIGNALS, "leadskip_rank", spec)
+
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals={"leadskip_rank": spec}, window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+
+    # SPY falls sharply during the skipped lead-in, then a quiet random walk:
+    # the full-nominal-window total return and the lo-aligned total return
+    # are then provably different numbers.
+    idx = panel.closes[panel.symbols[0]].index
+    n_lead = int((idx < cutoff).sum())
+    rng = np.random.default_rng(0)
+    tail_rets = rng.normal(0.0001, 0.001, size=len(idx) - n_lead)
+    spy_values = np.concatenate([
+        np.linspace(100.0, 70.0, n_lead), 70.0 * np.cumprod(1 + tail_rets),
+    ])
+    spy = pd.Series(spy_values, index=idx)
+
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, spy,
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.error is None
+
+    from trading.alphasearch.costs import cost_charged_lo, spy_benchmark
+    from trading.alphasearch.sort import portfolio_sort
+
+    sort = portfolio_sort(panel, spec, dates, end)
+    assert sort.rebalances[0][0] == cutoff          # confirms the lead skip
+    charged, _skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
+    # The correct anchor is the first ACTUAL DECISION date, not charged's
+    # first REALIZED RETURN day: portfolio_sort builds hold segments strictly
+    # after the decision date (sort.py), so charged.index[0] is already one
+    # trading day later and compounds a shorter horizon than SPY needs to
+    # match.
+    aligned = spy_benchmark(spy, sort.rebalances[0][0], end)
+    stale = spy_benchmark(spy, start, end)          # the pre-FIX2 (buggy) window
+    off_by_one = spy_benchmark(spy, charged.index[0], end)  # the FIX2 (still off-by-one) window
+    assert aligned.total_return != pytest.approx(stale.total_return)
+    assert aligned.total_return != pytest.approx(off_by_one.total_return)
+    assert row.spy_total_return == pytest.approx(aligned.total_return)
+    assert row.spy_sharpe == pytest.approx(aligned.sharpe_annual)
+    # Independent invariant catching either a one-day-early OR one-day-late
+    # anchor: the SPY window must start exactly at the first decision date,
+    # and its daily-return observation count must equal the number of
+    # trading sessions from that decision date through `end` -- exactly one
+    # MORE obs than the charged.index[0] (FIX2) anchor yields, since that
+    # anchor starts one session later. Both the pre-FIX2 `start` anchor and
+    # the FIX2 `charged.index[0]` anchor fail this.
+    spy_window = spy.loc[(spy.index >= sort.rebalances[0][0]) & (spy.index <= end)]
+    assert spy_window.index[0] == sort.rebalances[0][0]
+    assert aligned.n_obs == len(spy_window) - 1
+    assert aligned.n_obs == off_by_one.n_obs + 1

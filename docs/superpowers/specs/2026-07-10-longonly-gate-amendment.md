@@ -32,7 +32,13 @@ costs, outperforms SPY. That is what the gate must measure.
 - **The robustness battery still gates the holdout**, with its checks
   re-anchored to the long-only cost-charged series (same frozen thresholds;
   the 30bps cost row is superseded by the §3 spread model at the account's
-  book size).
+  book size). *[Dated note, 2026-07-10 — ratified statistic: the re-anchor
+  target is the COST-CHARGED LO-MINUS-SPY ACTIVE RETURN series, not the raw
+  `lo` series. Checks 1-5 score the signed retention of its annualized
+  value; check 1's |t| ≥ 1.0 is the active series' mean/se t; check 6's
+  month concentration runs on its monthly log returns. Raw-LO retention
+  would mostly test whether the market regime repeated (beta), not the
+  signal's edge over the benchmark. See Ratifications below.]*
 - The once-only holdout, trial journal, pre-registration discipline, and
   PIT machinery are all unchanged.
 
@@ -70,3 +76,30 @@ costs, outperforms SPY. That is what the gate must measure.
 
 Re-running any sweep (existing journal is re-READ, not re-run); R3
 down-cap universes; R4 deployment; wrapper changes (R2 owns that).
+
+## Ratifications (2026-07-10, orchestrator — recorded per the amend-only-in-writing rule)
+
+1. **Battery re-anchor statistic (§2, third bullet):** the re-anchored
+   checks 1-6 score the **cost-charged LO-minus-SPY active return series**
+   (daily charged `lo` return minus SPY's daily return, inner-joined
+   calendars), NOT the raw `lo` series, at the same frozen thresholds.
+   Rationale: raw-LO retention across sub-periods, subsets, and jitter
+   would predominantly test whether the market regime repeated — a beta
+   property SPY exhibits too — rather than whether the signal's edge over
+   the benchmark persisted, which is precisely what the §2 promotion
+   statistic certifies. Checks 1-5 use the signed retention of the
+   annualized active return; check 1's |t| ≥ 1.0 is the active series'
+   mean/se t; check 6's ≤ 60% month concentration runs on the active
+   series' monthly log returns.
+2. **Corwin-Schultz component-averaging (§3, first bullet):** the
+   implementation averages the β/γ two-day components over the trailing 21
+   sessions and applies the (alpha → spread) transform once, DEVIATING from
+   this section's literal per-day floor-then-average text (and from CS
+   2012's own per-pair baseline). Ratified on the Monte Carlo evidence: on
+   a simulated KNOWN-zero-spread price path, per-pair floor-then-average
+   reads ~75bps of phantom spread out of pure noise while
+   component-averaging reads ~12bps (a residual, conservative bias mostly
+   absorbed by the 2bps floor) — and only the component-averaged form
+   satisfies this section's own acceptance criterion (AAPL in single-digit
+   bps). The omitted overnight-gap adjustment is mildly anti-conservative
+   for gappy names and immaterial under the floor.

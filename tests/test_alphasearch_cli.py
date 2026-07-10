@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import numpy as np
 import pandas as pd
 
 from trading import cli
@@ -14,6 +15,16 @@ from trading.alphasearch.sweep import (
     trial_config,
     trials_journal,
 )
+
+
+def _stub_spy(monkeypatch) -> None:
+    """Keep robustness/leaderboard CLI tests off the real (gitignored)
+    data/equities-tiingo/SPY cache -- a synthetic series covering any
+    fixture window used here."""
+    idx = pd.date_range("2015-01-02", periods=3000, freq="B", tz="UTC")
+    spy = pd.Series(100.0 * (1.0003 ** np.arange(len(idx))), index=idx)
+    monkeypatch.setattr("trading.alphasearch.costs.load_spy_closes",
+                        lambda *a, **k: spy)
 
 
 def _seed_journal(journal_dir, *, with_holdout: bool = False) -> None:
@@ -69,6 +80,69 @@ def test_leaderboard_empty_journal_is_fine(tmp_path, capsys):
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["trials"] == 0 and payload["rows"] == []
+
+
+# --------------------------------------------------------------------------- #
+# --long-only leaderboard (R1 gate amendment)
+# --------------------------------------------------------------------------- #
+def _fake_long_only_rows():
+    from trading.alphasearch.sweep import LongOnlyRow
+
+    return [
+        LongOnlyRow(signal="mom21", universe="largecap", window=DISCOVERY_WINDOW,
+                    config_hash="abc123", lo_sharpe=0.9, lo_total_return=0.35,
+                    spy_sharpe=0.6, spy_total_return=0.25, beats_spy=True,
+                    skipped_no_spread=0, error=None),
+        LongOnlyRow(signal="rvol21", universe="largecap", window=DISCOVERY_WINDOW,
+                    config_hash="def456", lo_sharpe=None, lo_total_return=None,
+                    spy_sharpe=None, spy_total_return=None, beats_spy=None,
+                    skipped_no_spread=None, error="unknown universe 'largecap:gone'"),
+    ]
+
+
+def test_long_only_leaderboard_requires_spy_cache(tmp_path, capsys, monkeypatch):
+    # No SPY stub: the (possibly-present-on-disk) real cache must NOT be
+    # silently used -- force the absent-cache path explicitly.
+    monkeypatch.setattr("trading.alphasearch.costs.load_spy_closes",
+                        lambda *a, **k: None)
+    rc = cli.main(["alphasearch", "leaderboard", "--long-only",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no SPY cache" in err
+    assert "data/equities-tiingo" in err
+
+
+def test_long_only_leaderboard_renders_table(tmp_path, capsys, monkeypatch):
+    _stub_spy(monkeypatch)
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.sweep.build_long_only_leaderboard",
+                        lambda *a, **k: _fake_long_only_rows())
+    rc = cli.main(["alphasearch", "leaderboard", "--long-only",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "mom21" in out and "YES" in out
+    assert "unknown universe" in out
+    assert "1/2 trials" in out
+    assert "data/equities-tiingo/SPY.parquet" in out
+
+
+def test_long_only_leaderboard_json(tmp_path, capsys, monkeypatch):
+    _stub_spy(monkeypatch)
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.sweep.build_long_only_leaderboard",
+                        lambda *a, **k: _fake_long_only_rows())
+    rc = cli.main(["alphasearch", "leaderboard", "--long-only",
+                   "--journal-dir", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["rows"]) == 2
+    assert payload["rows"][0]["signal"] == "mom21"
+    assert payload["rows"][0]["beats_spy"] is True
+    assert payload["rows"][1]["error"] is not None
 
 
 def test_sweep_unknown_signal_rejected_before_any_io(tmp_path, capsys):
@@ -282,6 +356,7 @@ def test_robustness_refusal_prints_error(tmp_path, capsys, monkeypatch):
     # beyond factors, which the stub keeps offline.
     monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
                         lambda *a, **k: pd.DataFrame())
+    _stub_spy(monkeypatch)
     rc = cli.main(["alphasearch", "robustness", "mom21:largecap",
                    "--journal-dir", str(tmp_path)])
     assert rc == 1
@@ -293,19 +368,19 @@ def _fake_battery_outcome(*, eligible=False, flagged=True):
 
     checks = (
         CheckResult(1, "sub_period_halves", True, {"halves": [
-            {"window": "2019-01-01..2021-06-30", "alpha_annual_pct": 30.0,
-             "alpha_t": 4.0, "error": None, "passed": True},
-            {"window": "2021-07-01..2023-12-31", "alpha_annual_pct": 25.0,
-             "alpha_t": 3.0, "error": None, "passed": True}]}),
+            {"window": "2019-01-01..2021-06-30", "active_annual_pct": 30.0,
+             "active_t": 4.0, "error": None, "passed": True},
+            {"window": "2021-07-01..2023-12-31", "active_annual_pct": 25.0,
+             "active_t": 3.0, "error": None, "passed": True}]}),
         CheckResult(2, "universe_subsets", True,
                     {"draws": [], "n_pass": 5}),
         CheckResult(3, "parameter_jitter", True, {"trials": []}),
         CheckResult(4, "decision_offset", True,
-                    {"offset_sessions": 1, "alpha_annual_pct": 28.0,
-                     "alpha_t": 3.5, "retention": 0.9, "error": None}),
+                    {"offset_sessions": 1, "active_annual_pct": 28.0,
+                     "active_t": 3.5, "retention": 0.9, "error": None}),
         CheckResult(5, "name_concentration", False,
                     {"excluded": ["AAA", "BBB", "CCC"],
-                     "alpha_annual_pct": 5.0, "retention": 0.16, "error": None}),
+                     "active_annual_pct": 5.0, "retention": 0.16, "error": None}),
         CheckResult(6, "month_concentration", True, {"top3_share": 0.41}),
     )
     return BatteryOutcome(
@@ -323,6 +398,10 @@ def _fake_battery_outcome(*, eligible=False, flagged=True):
              "total_impact_charge": 0.1, "skipped_no_lambda": 0},
             {"book_usd": 1e6, "alpha_annual_pct": 20.0, "alpha_t": 2.1,
              "total_impact_charge": 1.0, "skipped_no_lambda": 0}],
+        long_only_gate={"lo_sharpe": 0.9, "lo_total_return": 0.35,
+                        "spy_sharpe": 0.6, "spy_total_return": 0.25,
+                        "active_annual_pct": 12.0,
+                        "skipped_no_spread": 0, "passed": eligible},
         eligible=eligible,
         event={"event": "trial", "kind": "battery", "signal": "amihud",
                "universe": "midcap", "window": "2019-01-01..2023-12-31",
@@ -336,6 +415,7 @@ def test_robustness_report_card_renders_with_red_proxy_warning(
 ):
     monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
                         lambda *a, **k: pd.DataFrame())
+    _stub_spy(monkeypatch)
     monkeypatch.setattr("trading.alphasearch.robustness.run_battery",
                         lambda *a, **k: _fake_battery_outcome())
     rc = cli.main(["alphasearch", "robustness", "amihud:midcap",
@@ -362,7 +442,7 @@ def test_robustness_report_card_surfaces_errored_subset_draws(
     errored_subsets = CheckResult(
         2, "universe_subsets", False,
         {"n_pass": 0, "draws": [
-            {"seed": 42 + i, "n_symbols": 5, "alpha_annual_pct": None,
+            {"seed": 42 + i, "n_symbols": 5, "active_annual_pct": None,
              "error": "SortError: cross-section below minimum", "passed": False}
             for i in range(5)
         ]},
@@ -374,6 +454,7 @@ def test_robustness_report_card_surfaces_errored_subset_draws(
     outcome = replace(outcome, checks=checks)
     monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
                         lambda *a, **k: pd.DataFrame())
+    _stub_spy(monkeypatch)
     monkeypatch.setattr("trading.alphasearch.robustness.run_battery",
                         lambda *a, **k: outcome)
     rc = cli.main(["alphasearch", "robustness", "amihud:midcap",
@@ -387,6 +468,7 @@ def test_robustness_report_card_surfaces_errored_subset_draws(
 def test_robustness_json_dumps_the_verdict_event(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
                         lambda *a, **k: pd.DataFrame())
+    _stub_spy(monkeypatch)
     monkeypatch.setattr("trading.alphasearch.robustness.run_battery",
                         lambda *a, **k: _fake_battery_outcome(eligible=True))
     rc = cli.main(["alphasearch", "robustness", "amihud:midcap",

@@ -114,3 +114,32 @@ midcap:trade). Record per-check numbers, cost table, capacity curve, and
 verdicts in experiments.md §11; update the park decision with evidence. The
 pilot spends no holdout touches regardless of verdicts (the park stands
 until the developer says otherwise).
+
+## Amendments
+
+- **2026-07-10 (R1, `2026-07-10-longonly-gate-amendment.md`; re-anchored
+  statistic ratified per that spec's Ratifications):** amends §3
+  prospectively in two ways. (a) **Re-anchor:** checks 1-6 keep their frozen
+  THRESHOLDS but their statistics move off the L/S four-factor alpha onto
+  the **cost-charged LO-minus-SPY active return series** — checks 1-5 score
+  the signed retention of its annualized value (check 1's |t| ≥ 1.0 becomes
+  the active series' mean/se t), check 6's ≤ 60% month concentration runs
+  on its monthly log returns. Raw-LO retention was rejected: it would
+  mostly test whether the market regime repeated (beta), not the signal's
+  edge over the benchmark. Check 7 (factor-proxy flag) still reads the
+  journaled L/S regression — it is the 4F diagnostic, retained as such.
+  (b) **Eligibility gate:** "the 30 bps row of the cost table retains
+  t ≥ 2.0" is superseded by "the Corwin-Schultz (2012) spread-charged
+  long-only series' annualized Sharpe over the discovery window is ≥ SPY
+  buy-and-hold's Sharpe over the identical window AND its total return
+  exceeds SPY's" — a survivor is holdout-eligible iff checks 1-6 all pass
+  AND this comparison passes. §4's cost-adjusted alpha table and capacity
+  curve are retained exactly as specified, now DIAGNOSTIC only (no longer
+  read by the eligibility gate). §5's holdout pre-check extension is
+  unaffected in mechanism — it still reads the verdict's `eligible` bit —
+  only what that bit MEANS changed. New machinery lives in
+  `trading.alphasearch.costs` (a leaf module: the spread estimator,
+  per-name rebalance charging, and the SPY benchmark loader), imported by
+  both `robustness.py` (the battery gate) and `sweep.py` (the leaderboard's
+  `--long-only` view, which re-reads every journaled trial under the new
+  lens without re-journaling anything).

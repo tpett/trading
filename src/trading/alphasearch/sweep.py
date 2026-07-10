@@ -29,7 +29,7 @@ import pandas as pd
 
 from trading.alphasearch import stats
 from trading.alphasearch.evaluate import AlphaResult, evaluate_alpha
-from trading.alphasearch.panel import PanelData, build_panel
+from trading.alphasearch.panel import PanelData, PanelError, build_panel
 from trading.alphasearch.sort import (
     MIN_NAMES,
     QUANTILES,
@@ -412,6 +412,44 @@ def _leg_stats(alpha: AlphaResult, returns: pd.Series) -> dict:
     }
 
 
+def evaluate_trial_with_sort(
+    panel: PanelData,
+    spec: SignalSpec,
+    window: str,
+    factors: pd.DataFrame,
+    *,
+    quantiles: int = QUANTILES,
+    tercile_below: int = TERCILE_BELOW,
+    min_names: int = MIN_NAMES,
+    symbol_subset: tuple[str, ...] | None = None,
+    calendar_offset: int = 0,
+):
+    """evaluate_trial plus the underlying SortResult. The R1-amended battery
+    needs each perturbed evaluation's raw lo series and memberships (to build
+    the cost-charged LO-minus-SPY active series the re-anchored checks score);
+    the journaled payload keeps only summary stats, so without this the
+    battery would have to run every sort twice."""
+    start, end = _window_bounds(window)
+    _check_factor_coverage(factors, end)
+    dates = panel.decision_dates(start, end, offset=calendar_offset)
+    sort = portfolio_sort(
+        panel, spec, dates, end,
+        quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+        symbol_subset=symbol_subset,
+    )
+    ls_alpha = evaluate_alpha(sort.ls, factors, self_financing=True)
+    lo_alpha = evaluate_alpha(sort.lo, factors, self_financing=False)
+    result = {
+        "n_dates": sort.n_dates,
+        "n_names_median": sort.n_names_median,
+        "ls": _leg_stats(ls_alpha, sort.ls),
+        "lo": _leg_stats(lo_alpha, sort.lo),
+        "turnover_monthly": sort.turnover_monthly,
+        "skipped_dates": list(sort.skipped_dates),
+    }
+    return result, sort
+
+
 def evaluate_trial(
     panel: PanelData,
     spec: SignalSpec,
@@ -429,24 +467,12 @@ def evaluate_trial(
     calendar_offset are Piece 3 battery perturbations: callers that set them
     MUST hash them into the trial config via _hashed_params (they change the
     outcome)."""
-    start, end = _window_bounds(window)
-    _check_factor_coverage(factors, end)
-    dates = panel.decision_dates(start, end, offset=calendar_offset)
-    sort = portfolio_sort(
-        panel, spec, dates, end,
+    result, _sort = evaluate_trial_with_sort(
+        panel, spec, window, factors,
         quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
-        symbol_subset=symbol_subset,
+        symbol_subset=symbol_subset, calendar_offset=calendar_offset,
     )
-    ls_alpha = evaluate_alpha(sort.ls, factors, self_financing=True)
-    lo_alpha = evaluate_alpha(sort.lo, factors, self_financing=False)
-    return {
-        "n_dates": sort.n_dates,
-        "n_names_median": sort.n_names_median,
-        "ls": _leg_stats(ls_alpha, sort.ls),
-        "lo": _leg_stats(lo_alpha, sort.lo),
-        "turnover_monthly": sort.turnover_monthly,
-        "skipped_dates": list(sort.skipped_dates),
-    }
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -565,6 +591,136 @@ def battery_verdict(journal: Journal, config_hash: str) -> dict | None:
         if event.get("kind") == "battery" and event.get("config_hash") == config_hash:
             return event
     return None
+
+
+# --------------------------------------------------------------------------- #
+# --long-only leaderboard (R1 gate amendment spec section 4 deliverable 2):
+# re-derives EVERY journaled discovery trial's cost-charged long-only series
+# from CURRENT data and ranks it against SPY buy-and-hold over the trial's
+# own window. A DISPLAY, never a re-journaling -- no trial is re-scored, no
+# event is written, no touch is spent. Only the raw daily lo series can't be
+# recovered from the journal (the journal keeps summary stats, not the
+# series), so this necessarily re-runs the sort; trials whose signal/universe
+# no longer resolves, or whose data can't reproduce it, show honestly as n/a.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class LongOnlyRow:
+    signal: str
+    universe: str
+    window: str
+    config_hash: str
+    lo_sharpe: float | None
+    lo_total_return: float | None
+    spy_sharpe: float | None
+    spy_total_return: float | None
+    beats_spy: bool | None      # None when re-derivation failed (n/a)
+    skipped_no_spread: int | None
+    error: str | None           # set -> every numeric field above is None
+
+
+def _rederive_long_only_row(
+    trial: dict,
+    universes: dict[str, UniverseSpec],
+    panels: dict[str, PanelData],
+    spy_closes: pd.Series,
+) -> LongOnlyRow:
+    from trading.alphasearch.costs import cost_charged_lo, spy_benchmark
+    from trading.alphasearch.evaluate import annualized_sharpe, total_return
+
+    signal_name, universe_name, window = trial["signal"], trial["universe"], trial["window"]
+    config_hash = trial["config_hash"]
+
+    def _na(error: str) -> LongOnlyRow:
+        return LongOnlyRow(
+            signal=signal_name, universe=universe_name, window=window,
+            config_hash=config_hash, lo_sharpe=None, lo_total_return=None,
+            spy_sharpe=None, spy_total_return=None, beats_spy=None,
+            skipped_no_spread=None, error=error,
+        )
+
+    if signal_name not in SIGNALS:
+        return _na(f"unknown signal {signal_name!r} (registry has changed)")
+    if universe_name not in universes:
+        return _na(f"unknown universe {universe_name!r} (not resolved for this view)")
+    panel = panels.get(universe_name)
+    if panel is None:
+        return _na(f"panel for universe {universe_name!r} could not be assembled")
+    spec = SIGNALS[signal_name]
+    params = trial.get("params") or {}
+    subset = params.get("symbol_subset")
+    try:
+        start, end = _window_bounds(window)
+        dates = panel.decision_dates(start, end, offset=int(params.get("calendar_offset", 0)))
+        sort = portfolio_sort(
+            panel, spec, dates, end,
+            quantiles=int(params.get("quantiles", QUANTILES)),
+            tercile_below=int(params.get("tercile_below", TERCILE_BELOW)),
+            min_names=int(params.get("min_names", MIN_NAMES)),
+            symbol_subset=tuple(subset) if subset is not None else None,
+        )
+        charged_lo, skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
+        # Fix (final review, 2026-07-10): same alignment as run_battery's
+        # long_only_gate -- anchor SPY's benchmark window to the first ACTUAL
+        # DECISION date (sort.rebalances[0][0]), not charged_lo.index[0]:
+        # portfolio_sort builds hold segments strictly after the decision
+        # date, so charged_lo.index[0] is the first REALIZED RETURN day and
+        # already compounds the move from the decision date to that day --
+        # one trading day later than SPY needs to match the identical
+        # economic horizon. sort.rebalances is non-empty whenever portfolio_
+        # sort succeeds (SortError on empty tops is caught below).
+        lo_window_start = sort.rebalances[0][0]
+        lo_sharpe = annualized_sharpe(charged_lo)
+        lo_total = total_return(charged_lo)
+        spy_stats = spy_benchmark(spy_closes, lo_window_start, end)
+    except (SweepError, SortError, ValueError, IndexError, np.linalg.LinAlgError) as exc:
+        return _na(f"{type(exc).__name__}: {exc}")
+    beats = (
+        not math.isnan(lo_sharpe) and not math.isnan(spy_stats.sharpe_annual)
+        and lo_sharpe >= spy_stats.sharpe_annual
+        and not math.isnan(lo_total) and not math.isnan(spy_stats.total_return)
+        and lo_total > spy_stats.total_return
+    )
+    return LongOnlyRow(
+        signal=signal_name, universe=universe_name, window=window,
+        config_hash=config_hash,
+        lo_sharpe=None if math.isnan(lo_sharpe) else lo_sharpe,
+        lo_total_return=None if math.isnan(lo_total) else lo_total,
+        spy_sharpe=(
+            None if math.isnan(spy_stats.sharpe_annual) else spy_stats.sharpe_annual
+        ),
+        spy_total_return=(
+            None if math.isnan(spy_stats.total_return) else spy_stats.total_return
+        ),
+        beats_spy=beats, skipped_no_spread=skipped, error=None,
+    )
+
+
+def build_long_only_leaderboard(
+    journal: Journal,
+    universes: dict[str, UniverseSpec],
+    factors: pd.DataFrame,
+    spy_closes: pd.Series,
+    *,
+    panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
+        build_universe_panel
+    ),
+) -> list[LongOnlyRow]:
+    """Every journaled discovery trial, re-derived and ranked by cost-charged
+    long-only Sharpe vs SPY buy-and-hold (spec section 4 deliverable 2).
+    Rows sorted by lo_sharpe descending, n/a (unrankable) rows last."""
+    trials = discovery_trials(journal)
+    panels: dict[str, PanelData] = {}
+    for name, uspec in universes.items():
+        try:
+            panels[name] = panel_factory(uspec, factors)
+        except PanelError:
+            continue   # every trial in this universe honestly shows n/a below
+    rows = [
+        _rederive_long_only_row(trial, universes, panels, spy_closes)
+        for trial in trials
+    ]
+    rows.sort(key=lambda r: (r.lo_sharpe is None, -(r.lo_sharpe or 0.0)))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -747,7 +903,12 @@ def run_holdout(
     # design.md section 3: no holdout may be spent on a survivor that has not
     # passed its robustness battery. No holdout had ever been spent when this
     # gate was added, so nothing is affected retroactively. Hash-keyed to the
-    # EXACT discovery trial, like the BH gate above.
+    # EXACT discovery trial, like the BH gate above. What "battery-passed"
+    # MEANS was itself amended prospectively (R1, docs/superpowers/specs/
+    # 2026-07-10-longonly-gate-amendment.md section 2): the verdict's
+    # `eligible` bit now requires cost-charged long-only Sharpe >= SPY's AND
+    # total return > SPY's over discovery, replacing the 30bps L/S cost gate
+    # -- this check just reads that bit, so its own logic is unchanged.
     verdict = battery_verdict(journal, discovery["config_hash"])
     if verdict is None or verdict.get("eligible") is not True:
         state = ("has not been run" if verdict is None

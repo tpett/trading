@@ -245,6 +245,16 @@ def annualized_sharpe(returns: pd.Series) -> float:
     return float(r.mean()) / sd * math.sqrt(TRADING_DAYS)
 
 
+def total_return(returns: pd.Series) -> float:
+    """Cumulative compounded return of a daily return series (R1 gate
+    amendment: the promotion rule's second comparator alongside Sharpe).
+    NaN for an empty series."""
+    r = returns.dropna()
+    if len(r) == 0:
+        return float("nan")
+    return float((1.0 + r).prod() - 1.0)
+
+
 @dataclass(frozen=True)
 class AlphaResult:
     """CAPM + four-factor decomposition of one return series."""

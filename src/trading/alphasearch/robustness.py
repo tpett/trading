@@ -1,12 +1,15 @@
 """Piece 3 robustness battery (design spec 2026-07-09): pre-registered,
 frozen interrogation of a BH survivor BEFORE it may spend a holdout touch.
 
-Pure composition of existing machinery: evaluate_trial for the re-evaluation
-checks (1-4, journaled as `battery`-tagged, BH-counted discovery trials),
-portfolio_sort outputs for the arithmetic checks (5-6) and the cost/capacity
-series, evaluate_alpha for every re-regression, and spec.amihud_lambda for
-the capacity curve's impact prices. Thresholds here are FROZEN (spec section
-3); amend only in writing, prospectively.
+Pure composition of existing machinery: evaluate_trial_with_sort for the
+re-evaluation checks (1-4, journaled as `battery`-tagged, BH-counted
+discovery trials), portfolio_sort outputs for the arithmetic checks (5-6)
+and the cost/capacity series, evaluate_alpha for every re-regression, and
+spec.amihud_lambda for the capacity curve's impact prices. Thresholds here
+are FROZEN (spec section 3); amend only in writing, prospectively. Since
+the R1 amendment (2026-07-10, orchestrator-ratified) checks 1-6 score the
+COST-CHARGED LO-MINUS-SPY ACTIVE RETURN series -- same frozen thresholds,
+re-anchored statistic; see run_battery's docstring.
 
 This module never reads the clock: `ts` always arrives from the CLI.
 """
@@ -20,7 +23,20 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from trading.alphasearch.evaluate import evaluate_alpha
+from trading.alphasearch.costs import (
+    DEFAULT_SPY_CACHE_DIR,
+    SPY_SYMBOL,
+    apply_rebalance_charges,
+    cost_charged_lo,
+    load_spy_closes,
+    spy_benchmark,
+)
+from trading.alphasearch.evaluate import (
+    TRADING_DAYS,
+    annualized_sharpe,
+    evaluate_alpha,
+    total_return,
+)
 from trading.alphasearch.panel import PanelData
 from trading.alphasearch.sort import (
     MIN_NAMES,
@@ -44,7 +60,7 @@ from trading.alphasearch.sweep import (
     _window_bounds,
     build_universe_panel,
     discovery_trials,
-    evaluate_trial,
+    evaluate_trial_with_sort,
     find_discovery_trial,
     log_trial,
     trial_config,
@@ -68,9 +84,10 @@ MONTH_TOP = 3
 MONTH_MAX_SHARE = 0.60
 PROXY_LOADING_MULTIPLE = 2.0
 PROXY_MIN_R2 = 0.5
-COST_BPS = (10, 30, 50)             # one-way, per leg, per rebalance
-ELIGIBLE_COST_BPS = 30
-ELIGIBLE_MIN_COST_T = 2.0
+COST_BPS = (10, 30, 50)             # one-way, per leg, per rebalance -- DIAGNOSTIC
+# ONLY (spec 2026-07-10 R1 amendment): the promotion rule no longer reads a
+# row from this table. Retained because the L/S cost-adjusted alpha curve is
+# still a useful fragility diagnostic in the report card.
 BOOK_SIZES = (10_000.0, 100_000.0, 1_000_000.0)  # $ per side
 
 
@@ -84,9 +101,11 @@ class CheckResult:
 
 @dataclass(frozen=True)
 class BatteryContext:
-    """Everything the check runners share. full_alpha is the DISCOVERY
-    trial's journaled L/S four-factor alpha (%/yr) -- the baseline every
-    sign/retention rule compares against."""
+    """Everything the check runners share. full_active is the full-window
+    annualized cost-charged LO-minus-SPY active return (%/yr) -- the baseline
+    every sign/retention rule compares against (R1 amendment, 2026-07-10:
+    checks re-anchored from the journaled L/S alpha to the active series;
+    same frozen thresholds)."""
 
     journal: Journal
     panel: PanelData
@@ -95,7 +114,8 @@ class BatteryContext:
     ts: str
     universe: str
     window: str          # the discovery window being interrogated
-    full_alpha: float
+    full_active: float   # annualized active return (%/yr), the baseline
+    spy_closes: pd.Series
     quantiles: int
     tercile_below: int
     min_names: int
@@ -140,6 +160,44 @@ def signed_retention(original: float | None, perturbed: float | None) -> float:
     return perturbed / original
 
 
+# ---------------------------------------------------------------------------#
+# The active series (R1 amendment, 2026-07-10, orchestrator-ratified): checks
+# 1-6 are re-anchored to the COST-CHARGED LO-MINUS-SPY ACTIVE RETURN series,
+# not the raw lo series -- raw-LO retention would mostly test whether the
+# market regime repeated (beta), not whether the signal's edge over the
+# benchmark did. Same frozen thresholds throughout.
+# ---------------------------------------------------------------------------#
+def active_series(charged_lo: pd.Series, spy_closes: pd.Series) -> pd.Series:
+    """Daily cost-charged long-only return minus SPY's daily return, on the
+    inner join of their calendars (a day either side lacks contributes
+    nothing -- never a fabricated 0)."""
+    spy_rets = spy_closes.pct_change().dropna()
+    lo, spy = charged_lo.align(spy_rets, join="inner")
+    return (lo - spy).dropna()
+
+
+def annualized_active_pct(active: pd.Series) -> float:
+    """Annualized active return in %/yr (mean daily active x 252 x 100) --
+    the checks' retention/sign statistic. NaN for an empty series."""
+    a = active.dropna()
+    if len(a) == 0:
+        return math.nan
+    return float(a.mean()) * TRADING_DAYS * 100.0
+
+
+def active_t(active: pd.Series) -> float:
+    """t-statistic of the active series' mean (mean / (sd/sqrt(n))) -- check
+    1's |t| >= 1.0 statistic, computed on the series' own mean/se. NaN below
+    2 observations or at zero variance."""
+    a = active.dropna()
+    if len(a) < 2:
+        return math.nan
+    sd = float(a.std(ddof=1))
+    if sd == 0:
+        return math.nan
+    return float(a.mean()) / (sd / math.sqrt(len(a)))
+
+
 def _reevaluate(
     ctx: BatteryContext,
     *,
@@ -148,11 +206,12 @@ def _reevaluate(
     min_names: int | None = None,
     symbol_subset: tuple[str, ...] | None = None,
     calendar_offset: int = 0,
-) -> dict:
+) -> tuple[dict, SortResult | None]:
     """One battery re-evaluation: journaled as a tagged, BH-counted discovery
     trial (config-hash dedupe applies as everywhere) BEFORE its check is
     judged. Errors journal an error trial exactly like run_sweep -- and the
-    caller fails the check."""
+    caller fails the check. Returns (event, sort): the sort (None on error)
+    carries the raw lo series/memberships the re-anchored checks score."""
     q = ctx.quantiles if quantiles is None else quantiles
     mn = ctx.min_names if min_names is None else min_names
     w = ctx.window if window is None else window
@@ -160,8 +219,9 @@ def _reevaluate(
                             symbol_subset=symbol_subset,
                             calendar_offset=calendar_offset)
     config = trial_config(ctx.spec.name, ctx.universe, w, params=params)
+    sort: SortResult | None = None
     try:
-        result: dict | None = evaluate_trial(
+        result, sort = evaluate_trial_with_sort(
             ctx.panel, ctx.spec, w, ctx.factors,
             quantiles=q, tercile_below=ctx.tercile_below, min_names=mn,
             symbol_subset=symbol_subset, calendar_offset=calendar_offset,
@@ -171,80 +231,93 @@ def _reevaluate(
     except (SortError, ValueError, np.linalg.LinAlgError) as exc:
         result = None
         error = f"{type(exc).__name__}: {exc}"
-    return log_trial(ctx.journal, kind="discovery", config=config, ts=ctx.ts,
-                     result=result, error=error, battery=ctx.tag)
+    event = log_trial(ctx.journal, kind="discovery", config=config, ts=ctx.ts,
+                      result=result, error=error, battery=ctx.tag)
+    return event, sort
 
 
-def _alpha_and_t(event: dict) -> tuple[float | None, float | None]:
-    ls = event.get("ls") or {}
-    return ls.get("alpha_annual_pct"), ls.get("alpha_t")
+def _active_stats(ctx: BatteryContext, sort: SortResult) -> tuple[float, float]:
+    """(annualized active %/yr, active-mean t) of one evaluation's cost-
+    charged LO-minus-SPY series -- the re-anchored checks' statistics."""
+    charged, _skipped = cost_charged_lo(ctx.panel, sort.lo, sort.rebalances)
+    active = active_series(charged, ctx.spy_closes)
+    return annualized_active_pct(active), active_t(active)
+
+
+def _nan_none(value: float) -> float | None:
+    return None if math.isnan(value) else value
 
 
 def check_subperiods(ctx: BatteryContext) -> CheckResult:
-    """Check 1 (frozen): both halves -- alpha sign matches the full-window
-    sign AND |t| >= 1.0."""
+    """Check 1 (frozen threshold; R1 re-anchor): both halves -- the active
+    return's sign matches the full-window active sign AND the active series'
+    |t| >= 1.0 (mean/se)."""
     halves = []
     passed = True
     for w in subperiod_windows(ctx.window):
-        event = _reevaluate(ctx, window=w)
-        alpha, t = _alpha_and_t(event)
-        r = signed_retention(ctx.full_alpha, alpha)
+        event, sort = _reevaluate(ctx, window=w)
+        act, t = (math.nan, math.nan) if sort is None else _active_stats(ctx, sort)
+        r = signed_retention(ctx.full_active, act)
         ok = (
             not math.isnan(r) and r > 0
-            and t is not None and abs(float(t)) >= SUBPERIOD_MIN_ABS_T
+            and not math.isnan(t) and abs(t) >= SUBPERIOD_MIN_ABS_T
         )
         passed = passed and ok
-        halves.append({"window": w, "alpha_annual_pct": alpha, "alpha_t": t,
+        halves.append({"window": w, "active_annual_pct": _nan_none(act),
+                       "active_t": _nan_none(t),
                        "error": event.get("error"), "passed": ok})
     return CheckResult(1, "sub_period_halves", passed, {"halves": halves})
 
 
 def check_subsets(ctx: BatteryContext) -> CheckResult:
-    """Check 2 (frozen): 5 seeded half-universe draws; >= 4 of 5 sign-match.
-    A draw whose evaluation errors (e.g. half-universe below min_names, or
-    missing panel data) FAILS -- the others proceed (spec section 6)."""
+    """Check 2 (frozen threshold; R1 re-anchor): 5 seeded half-universe
+    draws; >= 4 of 5 active-return sign-match. A draw whose evaluation errors
+    (e.g. half-universe below min_names, or missing panel data) FAILS -- the
+    others proceed (spec section 6)."""
     draws = []
     n_pass = 0
     for i in range(SUBSET_DRAWS):
         subset = subset_draw(ctx.panel.symbols, i)
-        event = _reevaluate(ctx, symbol_subset=subset)
-        alpha, _t = _alpha_and_t(event)
-        r = signed_retention(ctx.full_alpha, alpha)
+        event, sort = _reevaluate(ctx, symbol_subset=subset)
+        act = math.nan if sort is None else _active_stats(ctx, sort)[0]
+        r = signed_retention(ctx.full_active, act)
         ok = not math.isnan(r) and r > 0
         n_pass += 1 if ok else 0
         draws.append({"seed": SUBSET_SEED_BASE + i, "n_symbols": len(subset),
-                      "alpha_annual_pct": alpha, "error": event.get("error"),
-                      "passed": ok})
+                      "active_annual_pct": _nan_none(act),
+                      "error": event.get("error"), "passed": ok})
     return CheckResult(2, "universe_subsets", n_pass >= SUBSET_PASS_MIN,
                        {"draws": draws, "n_pass": n_pass})
 
 
 def check_jitter(ctx: BatteryContext) -> CheckResult:
-    """Check 3 (frozen): quantiles x min_names jitter grid, all 4 sign-match."""
+    """Check 3 (frozen threshold; R1 re-anchor): quantiles x min_names jitter
+    grid, all 4 active-return sign-match."""
     trials = []
     passed = True
     for q, mn in JITTER_GRID:
-        event = _reevaluate(ctx, quantiles=q, min_names=mn)
-        alpha, _t = _alpha_and_t(event)
-        r = signed_retention(ctx.full_alpha, alpha)
+        event, sort = _reevaluate(ctx, quantiles=q, min_names=mn)
+        act = math.nan if sort is None else _active_stats(ctx, sort)[0]
+        r = signed_retention(ctx.full_active, act)
         ok = not math.isnan(r) and r > 0
         passed = passed and ok
         trials.append({"quantiles": q, "min_names": mn,
-                       "alpha_annual_pct": alpha,
+                       "active_annual_pct": _nan_none(act),
                        "error": event.get("error"), "passed": ok})
     return CheckResult(3, "parameter_jitter", passed, {"trials": trials})
 
 
 def check_offset(ctx: BatteryContext) -> CheckResult:
-    """Check 4 (frozen): rebalance on the 2nd trading session; sign matches
-    AND |alpha| >= 0.5 x full-window |alpha| (the signed-ratio collapse)."""
-    event = _reevaluate(ctx, calendar_offset=OFFSET_SESSIONS)
-    alpha, t = _alpha_and_t(event)
-    r = signed_retention(ctx.full_alpha, alpha)
+    """Check 4 (frozen threshold; R1 re-anchor): rebalance on the 2nd trading
+    session; active sign matches AND |active| >= 0.5 x full-window |active|
+    (the signed-ratio collapse)."""
+    event, sort = _reevaluate(ctx, calendar_offset=OFFSET_SESSIONS)
+    act, t = (math.nan, math.nan) if sort is None else _active_stats(ctx, sort)
+    r = signed_retention(ctx.full_active, act)
     ok = not math.isnan(r) and r >= OFFSET_MIN_RETENTION
     return CheckResult(4, "decision_offset", ok, {
-        "offset_sessions": OFFSET_SESSIONS, "alpha_annual_pct": alpha,
-        "alpha_t": t, "retention": None if math.isnan(r) else r,
+        "offset_sessions": OFFSET_SESSIONS, "active_annual_pct": _nan_none(act),
+        "active_t": _nan_none(t), "retention": None if math.isnan(r) else r,
         "error": event.get("error"),
     })
 
@@ -333,6 +406,32 @@ def ls_series(
     return pd.concat(parts).dropna()
 
 
+def lo_series(
+    closes: dict[str, pd.Series],
+    rebalances: tuple[Membership, ...],
+    end: pd.Timestamp,
+    *,
+    excluded: frozenset[str] = frozenset(),
+) -> pd.Series:
+    """Replay the daily long-only (top-leg) series from recorded memberships
+    -- ls_series' top-leg-only analogue, for the R1 re-anchored check 5.
+    Bit-identical to portfolio_sort's lo with no exclusion (same segment
+    boundaries and skipna mean). A segment whose top leg is emptied by the
+    exclusion is dropped; if every segment empties, SortError (the caller
+    fails the check)."""
+    returns = pd.DataFrame({s: c.pct_change() for s, c in closes.items()})
+    parts: list[pd.Series] = []
+    for date, top, _bottom, hold_end in _segments(rebalances, end):
+        top_kept = [s for s in top if s not in excluded]
+        if len(top_kept) == 0:
+            continue
+        segment = returns.loc[(returns.index > date) & (returns.index <= hold_end)]
+        parts.append(segment[top_kept].mean(axis=1))
+    if len(parts) == 0:
+        raise SortError("every rebalance segment emptied by the exclusion")
+    return pd.concat(parts).dropna()
+
+
 def top_leg_contributions(
     closes: dict[str, pd.Series],
     rebalances: tuple[Membership, ...],
@@ -358,46 +457,57 @@ def top_leg_contributions(
 
 
 def check_name_concentration(ctx: BatteryContext, sort: SortResult) -> CheckResult:
-    """Check 5 (frozen): recompute the L/S excluding the top-3 contributors
-    to the top leg; remaining four-factor alpha must retain >= 0.5 of the
-    journaled original (signed ratio -- symmetric for negative alphas)."""
+    """Check 5 (frozen threshold; R1 re-anchor): replay the long-only series
+    excluding the top-3 contributors to the top leg, re-charge spread costs
+    on the reduced memberships, and the remaining LO-minus-SPY active return
+    must retain >= 0.5 of the full-window active baseline (signed ratio --
+    symmetric for negative-active candidates)."""
     end = _window_bounds(ctx.window)[1]
     contributions = top_leg_contributions(ctx.panel.closes, sort.rebalances, end)
     excluded = list(contributions.index[:NAME_EXCLUDE_TOP])
-    alpha: float | None = None
+    act: float | None = None
     error: str | None = None
     try:
-        reduced = ls_series(ctx.panel.closes, sort.rebalances, end,
-                            excluded=frozenset(excluded))
-        alpha = evaluate_alpha(reduced, ctx.factors, self_financing=True
-                               ).alpha_annual_pct
+        reduced_lo = lo_series(ctx.panel.closes, sort.rebalances, end,
+                               excluded=frozenset(excluded))
+        # Costs re-charged on the REDUCED memberships (the book actually
+        # held); rebalances whose top leg empties carry no book to charge.
+        reduced_rebalances = tuple(
+            (date, kept, bottom)
+            for date, top, bottom in sort.rebalances
+            if (kept := tuple(s for s in top if s not in excluded))
+        )
+        charged, _skipped = cost_charged_lo(ctx.panel, reduced_lo,
+                                            reduced_rebalances)
+        act = annualized_active_pct(active_series(charged, ctx.spy_closes))
     except (SortError, ValueError, np.linalg.LinAlgError) as exc:
         error = f"{type(exc).__name__}: {exc}"
-    r = signed_retention(ctx.full_alpha, alpha)
+    r = signed_retention(ctx.full_active, act)
     ok = not math.isnan(r) and r >= NAME_MIN_RETENTION
     return CheckResult(5, "name_concentration", ok, {
-        "excluded": excluded, "alpha_annual_pct": alpha,
+        "excluded": excluded,
+        "active_annual_pct": None if act is None else _nan_none(act),
         "retention": None if math.isnan(r) else r, "error": error,
     })
 
 
-def month_share(ls: pd.Series, top_n: int = MONTH_TOP) -> float:
-    """Top-`top_n` calendar months' share of the cumulative L/S log return.
-    NaN when the cumulative log return is not positive (concentration of a
-    non-gain is undefined; callers fail the check -- an amendment would be
-    needed before running the battery on a negative-alpha survivor)."""
-    log_returns = np.log1p(ls)
-    monthly = log_returns.groupby(ls.index.strftime("%Y-%m")).sum()
+def month_share(returns: pd.Series, top_n: int = MONTH_TOP) -> float:
+    """Top-`top_n` calendar months' share of the series' cumulative log
+    return. NaN when the cumulative log return is not positive (concentration
+    of a non-gain is undefined; callers fail the check -- an amendment would
+    be needed before running the battery on a negative-active survivor)."""
+    log_returns = np.log1p(returns)
+    monthly = log_returns.groupby(returns.index.strftime("%Y-%m")).sum()
     total = float(monthly.sum())
     if not total > 0:
         return math.nan
     return float(monthly.nlargest(top_n).sum()) / total
 
 
-def check_month_concentration(ls: pd.Series) -> CheckResult:
-    """Check 6 (frozen): top-3 months' share of cumulative L/S log return
-    <= 60%."""
-    share = month_share(ls)
+def check_month_concentration(active: pd.Series) -> CheckResult:
+    """Check 6 (frozen threshold; R1 re-anchor): top-3 months' share of the
+    cost-charged LO-minus-SPY active series' cumulative log return <= 60%."""
+    share = month_share(active)
     ok = not math.isnan(share) and share <= MONTH_MAX_SHARE
     return CheckResult(6, "month_concentration", ok, {
         "top3_share": None if math.isnan(share) else share,
@@ -424,22 +534,11 @@ def factor_proxy_flag(ls_stats: dict) -> dict:
 
 # ---------------------------------------------------------------------------#
 # Cost & capacity analysis (spec section 4): arithmetic, NO new trials.
+# apply_rebalance_charges now lives in costs.py (a leaf module both this file
+# and sweep.py's --long-only leaderboard can import without a cycle) and is
+# re-exported here under its original name -- `from
+# trading.alphasearch.robustness import apply_rebalance_charges` still works.
 # ---------------------------------------------------------------------------#
-def apply_rebalance_charges(
-    ls: pd.Series, charges: list[tuple[pd.Timestamp, float]]
-) -> pd.Series:
-    """Deduct each charge from the first daily return strictly after its
-    rebalance date (the first day the traded book exists). A charge dated at
-    or after the last return day has no day to land on and is dropped (a
-    final-day rebalance is never held). Returns a copy."""
-    charged = ls.copy()
-    for date, charge in charges:
-        pos = int(charged.index.searchsorted(date, side="right"))
-        if pos < len(charged):
-            charged.iloc[pos] -= charge
-    return charged
-
-
 def _regress_charged(charged: pd.Series, factors: pd.DataFrame, row: dict) -> dict:
     try:
         alpha = evaluate_alpha(charged, factors, self_financing=True)
@@ -547,9 +646,10 @@ class BatteryOutcome:
     window: str
     checks: tuple[CheckResult, ...]   # checks 1-6, spec order
     factor_proxy: dict                # check 7: warning only, never blocks
-    cost_table: list[dict]
+    cost_table: list[dict]            # L/S cost-adjusted alpha: DIAGNOSTIC only
     capacity_curve: list[dict]
-    eligible: bool                    # the frozen promotion rule
+    long_only_gate: dict              # R1 amendment: the promotion comparator
+    eligible: bool                    # the amended promotion rule (spec section 2)
     event: dict                       # the journaled kind="battery" verdict
 
 
@@ -567,6 +667,7 @@ def run_battery(
     panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
         build_universe_panel
     ),
+    spy_closes: pd.Series | None = None,
 ) -> BatteryOutcome:
     """Run the frozen battery on ONE current BH survivor (spec section 3).
 
@@ -580,9 +681,21 @@ def run_battery(
     arithmetic on a locally recomputed full-window sort (identical config to
     the journaled discovery trial -- deliberately NOT journaled again). The
     verdict is one kind="battery" event per (signal, universe); re-runs
-    replace by config hash. The promotion rule (frozen): eligible iff checks
-    1-6 all pass AND the 30 bps cost row retains t >= ELIGIBLE_MIN_COST_T.
-    Never touches holdout state."""
+    replace by config hash.
+
+    The promotion rule (2026-07-10 R1 amendment, spec section 2 -- amends the
+    prior "checks 1-6 pass AND 30bps L/S cost t >= 2.0" rule): eligible iff
+    checks 1-6 all pass AND the cost-charged long-only series' Sharpe over
+    the discovery window is >= SPY buy-and-hold's Sharpe over the identical
+    window AND its total return exceeds SPY's. Checks 1-6 keep their frozen
+    THRESHOLDS but re-anchor their statistics (orchestrator-ratified reading
+    of the spec's re-anchoring clause) onto the cost-charged LO-MINUS-SPY
+    ACTIVE RETURN series -- not the raw lo series, whose retention would
+    mostly test whether the market regime repeated (beta) rather than the
+    signal's edge over the benchmark. `spy_closes` lets callers (tests, or a
+    future non-largecap benchmark) inject the series directly; the default
+    loads data/equities-tiingo/SPY.parquet and refuses loudly (no silent
+    substitute) if that cache is absent. Never touches holdout state."""
     params = _hashed_params(quantiles, tercile_below, min_names)
     discovery = require_survivor(journal, signal_name, uspec.name,
                                  discovery_window, params)
@@ -595,20 +708,28 @@ def run_battery(
         _check_factor_coverage(factors, end)
     except ValueError as exc:
         raise SweepError(str(exc)) from exc
+    # R1 amendment: SPY is the frozen promotion comparator (spec section 2).
+    # Refuse pre-touch, same shape as the stale-factors check above, rather
+    # than silently substituting another benchmark or crashing mid-battery.
+    spy = spy_closes if spy_closes is not None else load_spy_closes(DEFAULT_SPY_CACHE_DIR)
+    if spy is None:
+        raise SweepError(
+            f"no {SPY_SYMBOL} cache at "
+            f"{DEFAULT_SPY_CACHE_DIR / f'{SPY_SYMBOL}.parquet'}; the long-only "
+            "gate benchmarks every candidate against SPY buy-and-hold and "
+            "refuses to substitute another proxy. Fetch SPY into that cache "
+            "(same Tiingo bar-cache pipeline as the other largecap symbols) "
+            "before running the battery"
+        )
     panel = panel_factory(uspec, factors)
     spec = SIGNALS[signal_name]
     _check_universe_supports(panel, spec, uspec.name)
-    ctx = BatteryContext(
-        journal=journal, panel=panel, spec=spec, factors=factors, ts=ts,
-        universe=uspec.name, window=discovery_window, full_alpha=full_alpha,
-        quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
-        tag=f"{signal_name}:{uspec.name}",
-    )
-    # Full-window sort recomputed ONCE, reused for checks 5-6 and cost/
-    # capacity -- same config as the journaled discovery trial, so journaling
-    # it again would only append a duplicate; spec: checks 5-7 journal no new
-    # trials. Computed HERE, before checks 1-4 journal a single battery
-    # trial, so the drift guard right below can refuse pre-touch.
+    # Full-window sort recomputed ONCE, reused for checks 5-6, cost/capacity,
+    # and the active-return baseline -- same config as the journaled discovery
+    # trial, so journaling it again would only append a duplicate; spec:
+    # checks 5-7 journal no new trials. Computed HERE, before checks 1-4
+    # journal a single battery trial, so the drift guard right below can
+    # refuse pre-touch.
     try:
         sort = portfolio_sort(
             panel, spec, panel.decision_dates(start, end), end,
@@ -641,23 +762,66 @@ def run_battery(
             "caches drifted since the discovery sweep; re-run the sweep for "
             "this trial before running its battery"
         )
+    # R1 re-anchor (spec section 2, orchestrator-ratified 2026-07-10): every
+    # check's retention/sign baseline is the full-window cost-charged
+    # LO-minus-SPY active return -- computed once here, shared with the
+    # promotion comparator below.
+    charged_lo, skipped_no_spread = cost_charged_lo(panel, sort.lo, sort.rebalances)
+    active_full = active_series(charged_lo, spy)
+    full_active = annualized_active_pct(active_full)
+    ctx = BatteryContext(
+        journal=journal, panel=panel, spec=spec, factors=factors, ts=ts,
+        universe=uspec.name, window=discovery_window, full_active=full_active,
+        spy_closes=spy,
+        quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+        tag=f"{signal_name}:{uspec.name}",
+    )
     checks = [check_subperiods(ctx), check_subsets(ctx), check_jitter(ctx),
               check_offset(ctx)]
     checks.append(check_name_concentration(ctx, sort))
-    checks.append(check_month_concentration(sort.ls))
+    checks.append(check_month_concentration(active_full))
     proxy = factor_proxy_flag(discovery.get("ls") or {})
     cost_rows = cost_adjusted_table(sort.ls, sort.rebalances,
                                     sort.turnover_monthly, factors)
     capacity_rows = capacity_curve(panel, sort.rebalances, sort.ls, factors)
-    cost_t = next(
-        (r["alpha_t"] for r in cost_rows if r["cost_bps"] == ELIGIBLE_COST_BPS),
-        None,
+    # R1 amendment (spec section 2): the promotion comparator is the
+    # spread-charged long-only series vs SPY buy-and-hold, both over the
+    # discovery window -- replacing the 30bps L/S cost-table row above.
+    # Fix (final review, 2026-07-10): if the window's LEADING decision
+    # date(s) are skipped (below min_names, or the degenerate-score guard),
+    # charged_lo's first observation lands on the first ACTUAL rebalance,
+    # not the nominal window start -- comparing its total return to SPY's
+    # total return over the FULL nominal window would compound different
+    # horizons (anti-conservative when the market fell during the skipped
+    # lead-in: SPY's full-window total would be dragged down by a decline
+    # the signal never had to sit through). Anchor SPY's benchmark window to
+    # the first ACTUAL DECISION date, not charged_lo.index[0]: portfolio_sort
+    # builds hold segments strictly after the decision date (sort.py), so
+    # charged_lo.index[0] is the first REALIZED RETURN day and already
+    # compounds the move from the decision date to that day -- one trading
+    # day later than SPY needs to match the identical economic horizon.
+    # sort.rebalances is guaranteed non-empty here: SortError above already
+    # refused an empty `tops`, which populates in lockstep with rebalances.
+    lo_window_start = sort.rebalances[0][0]
+    lo_sharpe = annualized_sharpe(charged_lo)
+    lo_total = total_return(charged_lo)
+    spy_stats = spy_benchmark(spy, lo_window_start, end)
+    long_only_gate_passed = (
+        not math.isnan(lo_sharpe) and not math.isnan(spy_stats.sharpe_annual)
+        and lo_sharpe >= spy_stats.sharpe_annual
+        and not math.isnan(lo_total) and not math.isnan(spy_stats.total_return)
+        and lo_total > spy_stats.total_return
     )
-    eligible = (
-        all(c.passed for c in checks)
-        and cost_t is not None
-        and float(cost_t) >= ELIGIBLE_MIN_COST_T
-    )
+    long_only_gate = {
+        "lo_sharpe": lo_sharpe,
+        "lo_total_return": lo_total,
+        "spy_sharpe": spy_stats.sharpe_annual,
+        "spy_total_return": spy_stats.total_return,
+        "active_annual_pct": _nan_none(full_active),  # the checks' baseline
+        "skipped_no_spread": skipped_no_spread,
+        "passed": long_only_gate_passed,
+    }
+    eligible = all(c.passed for c in checks) and long_only_gate_passed
     config = trial_config(signal_name, uspec.name, discovery_window,
                           params=params)
     verdict = {
@@ -668,6 +832,7 @@ def run_battery(
         "factor_proxy": proxy,
         "cost_table": cost_rows,
         "capacity_curve": capacity_rows,
+        "long_only_gate": long_only_gate,
         "eligible": eligible,
     }
     event = log_trial(journal, kind="battery", config=config, ts=ts,
@@ -675,5 +840,6 @@ def run_battery(
     return BatteryOutcome(
         signal=signal_name, universe=uspec.name, window=discovery_window,
         checks=tuple(checks), factor_proxy=proxy, cost_table=cost_rows,
-        capacity_curve=capacity_rows, eligible=eligible, event=event,
+        capacity_curve=capacity_rows, long_only_gate=long_only_gate,
+        eligible=eligible, event=event,
     )
