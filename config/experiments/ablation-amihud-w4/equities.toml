@@ -1,0 +1,152 @@
+# R2 WRAPPER-ABLATION CONFIG -- amihud / W4 (full, control).
+#
+# Cloned from config/experiments/amihud-midcap/equities.toml (the historical experiment config): ONLY the
+# wrapper flags below differ -- venue, costs, universe, signals, and data
+# are byte-identical to the source. See docs/superpowers/specs/
+# 2026-07-10-wrapper-ablation-design.md for the pre-registered matrix.
+#
+# This cell: everything ON, unchanged from the historical config -- must reproduce the recorded verdict
+#
+# Run:
+#   uv run python -m trading backtest --venue equities \
+#       --config-dir config/experiments/ablation-amihud-w4 --walk-forward
+# Never point the live/paper scheduler at this directory.
+
+# amihud-midcap: full cost-modeled tradability test of the battery-passed
+# alphasearch amihud:midcap survivor (docs/experiments.md section 11 -- the
+# ONLY signal so far to pass the 7-check robustness battery and land
+# HOLDOUT-ELIGIBLE). The battery's cost/capacity checks are a simplified
+# first-order model; this config runs the SAME MC-1 pure-sp400 + $20M
+# dollar-volume floor + 15bps mid-cap slippage universe as config/experiments/
+# midcap/equities.toml (momentum_v1's baseline config), with ONLY the ranker
+# swapped to amihud_v1, so the full walk-forward engine's fees/slippage/
+# regime/portfolio-construction machinery gets to answer the question the
+# battery could only approximate: does the illiquidity premium survive real
+# trading costs.
+
+[venue]
+name = "equities"
+benchmark = "SPY"
+
+[costs]
+taker_fee_bps = 0.0      # zero commission (spec)
+maker_fee_bps = 0.0
+slippage_bps = 15.0      # mid-cap realistic (3x large-cap); honest cost guard, held fixed
+settlement_days = 1      # T+1 cash account (spec)
+trades_24_7 = false
+
+[universe]
+min_dollar_volume = 20000000.0  # entry-filter floor (M2 applies it; spec: config)
+indices = ["sp400"]             # PURE S&P MidCap 400 (not added to large-caps)
+point_in_time = true            # PIT membership intervals: a member missing data
+                                # is a data outage and degrades backtest coverage
+# indices: which columns of equities_membership.csv count as "in the
+# universe"; defaults (unset here) to ("sp500", "ndx") -- today's live/paper
+# behavior. The CSV also carries sp400 (S&P MidCap 400) rows; a backtest
+# experiment opts in by pointing --config-dir at a copy of this file with
+# `indices = ["sp500", "ndx", "sp400"]` added here. Never set it here: that
+# would change the live/paper universe.
+
+[signals]
+momentum_windows = [63, 126, 252]  # trading days (spec)
+calendar_days = false           # lookbacks in trading-day rows
+vol_window = 20                 # realized-vol window for vol adjustment
+volume_week = 5                 # "current week" = 5 trading days
+volume_baseline = 63            # trailing 3 months = 63 trading days
+breakout_windows = [20, 60]     # spec: distance from 20/60-day highs
+rsi_window = 14                 # spec: RSI-14 stretch
+mean_window = 20                # spec: distance above 20-day mean
+raw_return_days = 30            # raw 30-day return (calendar), feeds M2 crypto fee gate
+ranker = "amihud_v1"            # key into trading.signals.registry.RANKERS
+
+[regime]
+sma_fast = 50
+sma_slow = 200
+vol_window = 20
+vol_lookback = 252
+vol_high_percentile = 0.80
+exposure_risk_on = 1.0
+exposure_neutral = 0.5
+exposure_risk_off = 0.0
+disabled = false  # R2 ablation flag (spec: regime gate on/off)
+
+[portfolio]  # consumed by the M2 simulator; shaped now so M2 does not restructure config
+max_positions = 20
+position_size_pct = 0.045
+starting_balance = 1000.0
+time_stop_bars = 60                 # 20 sessions (spec)
+stop_atr_multiple = 1.5
+regime_flush_atr_multiple = 1.0
+cooldown_days = 7
+max_daily_deployment_pct = 0.25
+drawdown_halt_pct = 0.2
+entry_score_threshold = 0.70        # R2 ablation: fixed for this cell, see header
+min_raw_return_cost_multiple = 0.0  # fee gate off for equities
+earnings_blackout_sessions = 5
+earnings_blackout_enabled = false   # yfinance earnings dates proved unreliable in practice (2026-07); see README
+staleness_hours = 2
+atr_window = 20                     # ATR-20 (spec); frozen at entry
+# A launchd-coalesced run can land while NYSE is still open; yfinance then
+# serves today's daily bar IN PROGRESS. Below this many minutes past 16:00
+# ET close, the runner aborts rather than treat a partial bar as final
+# (spec: Missed/late runs). 90min is comfortably past yfinance's post-close
+# settle time for the daily bar.
+# NYSE half-days (e.g. day after Thanksgiving, 13:00 ET close) are NOT special-
+# cased: the guard still waits for 16:00 ET + buffer. That is conservative --
+# it can only delay a half-day run by ~3h, never trade a partial bar. If that
+# delay ever matters, the fix is a session-calendar lookup feeding this guard,
+# not a smaller buffer.
+session_close_buffer_minutes = 90
+# exit_style: "frozen" (default) or "trailing" (experiment flag, evidence-driven
+# -- see README). "trailing" is under evaluation and not yet the default.
+exit_style = "frozen"
+bare_mode = false  # R2 ablation flag (spec: W0 rank-only/equal-weight/monthly)
+
+[data]
+cache_dir = "data/equities-midcap-tiingo"
+bar_source = "tiingo"    # survivorship-free re-run: includes delisted tickers
+refetch_days = 30       # trailing window always re-fetched (adjusted history rewrites)
+min_coverage = 0.90     # below this, abort the run (spec)
+max_daily_move = 0.40   # sanity quarantine bound (spec default); equities don't see
+                        # the 40-60% single-day moves crypto does, so this is unchanged
+history_days = 500      # calendar days fetched; covers 200-day SMA + 252-obs vol percentile
+# Outlier scan only looks at the trailing N calendar days of each symbol's
+# own history, anchored to its last bar. Window ~= refetch_days: the point
+# is recent-data sanity (bad prints in the live-refetched tail), not
+# history-wide policing of moves that happened many months ago.
+quarantine_window_days = 40
+# Equities runs happen in the evening after market close, so the last daily
+# bar is already fully formed by the time as_of rolls around -- no cut needed.
+drop_incomplete_last_bar = false
+
+# Deep-history backfill is a crypto concern (Kraken's 720-candle cap);
+# yfinance serves full adjusted history directly. Disabled here.
+backfill_exchange = ""
+backfill_page_limit = 0
+seam_max_gap_days = 0
+
+# M4 fundamentals overlay (used only when [signals] ranker requires it --
+# the default momentum_v1 never touches these). Weekly companyfacts top-up.
+fundamentals_dir = "data/fundamentals/equities"
+fundamentals_refresh_days = 7
+fundamentals_refresh_budget_s = 900  # 15 min ceiling on one weekly refresh call
+
+[backtest]  # spec: Backtesting & Validation
+start = 2018-01-01
+# Final holdout boundary: FIXED date (not rolling) so the untouched period is
+# deterministic and auditable. Everything from here on is spent the first time
+# `trading backtest --holdout` reads it.
+holdout_start = 2026-01-05
+train_months = 30            # spec: tune on 24-36 months
+test_months = 3              # spec: test on the following 3 months, roll
+entry_score_threshold_grid = [0.60, 0.65, 0.70, 0.75, 0.80]
+stop_atr_multiple_grid = [1.0, 1.5, 2.0, 2.5]
+# yfinance lacks most delisted tickers: early point-in-time sessions will not
+# reach the live 90% coverage bar. Below this floor a session is skipped
+# (state untouched, like a live coverage-failed run); the per-session ratio is
+# annotated on every result (spec: survivorship).
+min_session_coverage = 0.60
+periods_per_year = 252
+# The stitched OOS must fully cover at least one of these (spec: a bear market
+# that only appears in training data does not count as tested).
+stress_segments = [["2022-01-01", "2022-12-31"]]
