@@ -606,6 +606,16 @@ options-v2 + insider batch spec (one read after both data sets land), which
 will disclose the full trial count. New glossary section "Insider
 transactions (the Form 4 family)".
 
+**Form 4 store BUILT 2026-07-09 (real data):** 31 quarterly ZIPs
+(2018q3-2026q1; 2026q2 unpublished, tolerated), 924,625 P/S rows parsed with
+zero unparseable, 1,261 symbol parquets, window-membership coverage 96.6%
+(quiet companies legitimately lack rows), no per-year holes. EDGAR-grade
+spot-check against famous public filings passed: Berkshire's March 2022 OXY
+purchases (owner CIK 315090, $55.78/$57.38 — exact public dates/prices), the
+Saudi PIF Lucid injections, JAB's 2019 Coty tender. filed >= trans_date
+everywhere. The family now awaits the combined options-v2 + insider batch
+sweep.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
