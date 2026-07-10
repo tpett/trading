@@ -412,6 +412,44 @@ def _leg_stats(alpha: AlphaResult, returns: pd.Series) -> dict:
     }
 
 
+def evaluate_trial_with_sort(
+    panel: PanelData,
+    spec: SignalSpec,
+    window: str,
+    factors: pd.DataFrame,
+    *,
+    quantiles: int = QUANTILES,
+    tercile_below: int = TERCILE_BELOW,
+    min_names: int = MIN_NAMES,
+    symbol_subset: tuple[str, ...] | None = None,
+    calendar_offset: int = 0,
+):
+    """evaluate_trial plus the underlying SortResult. The R1-amended battery
+    needs each perturbed evaluation's raw lo series and memberships (to build
+    the cost-charged LO-minus-SPY active series the re-anchored checks score);
+    the journaled payload keeps only summary stats, so without this the
+    battery would have to run every sort twice."""
+    start, end = _window_bounds(window)
+    _check_factor_coverage(factors, end)
+    dates = panel.decision_dates(start, end, offset=calendar_offset)
+    sort = portfolio_sort(
+        panel, spec, dates, end,
+        quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+        symbol_subset=symbol_subset,
+    )
+    ls_alpha = evaluate_alpha(sort.ls, factors, self_financing=True)
+    lo_alpha = evaluate_alpha(sort.lo, factors, self_financing=False)
+    result = {
+        "n_dates": sort.n_dates,
+        "n_names_median": sort.n_names_median,
+        "ls": _leg_stats(ls_alpha, sort.ls),
+        "lo": _leg_stats(lo_alpha, sort.lo),
+        "turnover_monthly": sort.turnover_monthly,
+        "skipped_dates": list(sort.skipped_dates),
+    }
+    return result, sort
+
+
 def evaluate_trial(
     panel: PanelData,
     spec: SignalSpec,
@@ -429,24 +467,12 @@ def evaluate_trial(
     calendar_offset are Piece 3 battery perturbations: callers that set them
     MUST hash them into the trial config via _hashed_params (they change the
     outcome)."""
-    start, end = _window_bounds(window)
-    _check_factor_coverage(factors, end)
-    dates = panel.decision_dates(start, end, offset=calendar_offset)
-    sort = portfolio_sort(
-        panel, spec, dates, end,
+    result, _sort = evaluate_trial_with_sort(
+        panel, spec, window, factors,
         quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
-        symbol_subset=symbol_subset,
+        symbol_subset=symbol_subset, calendar_offset=calendar_offset,
     )
-    ls_alpha = evaluate_alpha(sort.ls, factors, self_financing=True)
-    lo_alpha = evaluate_alpha(sort.lo, factors, self_financing=False)
-    return {
-        "n_dates": sort.n_dates,
-        "n_names_median": sort.n_names_median,
-        "ls": _leg_stats(ls_alpha, sort.ls),
-        "lo": _leg_stats(lo_alpha, sort.lo),
-        "turnover_monthly": sort.turnover_monthly,
-        "skipped_dates": list(sort.skipped_dates),
-    }
+    return result
 
 
 # --------------------------------------------------------------------------- #

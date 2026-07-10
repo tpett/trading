@@ -368,19 +368,19 @@ def _fake_battery_outcome(*, eligible=False, flagged=True):
 
     checks = (
         CheckResult(1, "sub_period_halves", True, {"halves": [
-            {"window": "2019-01-01..2021-06-30", "alpha_annual_pct": 30.0,
-             "alpha_t": 4.0, "error": None, "passed": True},
-            {"window": "2021-07-01..2023-12-31", "alpha_annual_pct": 25.0,
-             "alpha_t": 3.0, "error": None, "passed": True}]}),
+            {"window": "2019-01-01..2021-06-30", "active_annual_pct": 30.0,
+             "active_t": 4.0, "error": None, "passed": True},
+            {"window": "2021-07-01..2023-12-31", "active_annual_pct": 25.0,
+             "active_t": 3.0, "error": None, "passed": True}]}),
         CheckResult(2, "universe_subsets", True,
                     {"draws": [], "n_pass": 5}),
         CheckResult(3, "parameter_jitter", True, {"trials": []}),
         CheckResult(4, "decision_offset", True,
-                    {"offset_sessions": 1, "alpha_annual_pct": 28.0,
-                     "alpha_t": 3.5, "retention": 0.9, "error": None}),
+                    {"offset_sessions": 1, "active_annual_pct": 28.0,
+                     "active_t": 3.5, "retention": 0.9, "error": None}),
         CheckResult(5, "name_concentration", False,
                     {"excluded": ["AAA", "BBB", "CCC"],
-                     "alpha_annual_pct": 5.0, "retention": 0.16, "error": None}),
+                     "active_annual_pct": 5.0, "retention": 0.16, "error": None}),
         CheckResult(6, "month_concentration", True, {"top3_share": 0.41}),
     )
     return BatteryOutcome(
@@ -400,6 +400,7 @@ def _fake_battery_outcome(*, eligible=False, flagged=True):
              "total_impact_charge": 1.0, "skipped_no_lambda": 0}],
         long_only_gate={"lo_sharpe": 0.9, "lo_total_return": 0.35,
                         "spy_sharpe": 0.6, "spy_total_return": 0.25,
+                        "active_annual_pct": 12.0,
                         "skipped_no_spread": 0, "passed": eligible},
         eligible=eligible,
         event={"event": "trial", "kind": "battery", "signal": "amihud",
@@ -441,7 +442,7 @@ def test_robustness_report_card_surfaces_errored_subset_draws(
     errored_subsets = CheckResult(
         2, "universe_subsets", False,
         {"n_pass": 0, "draws": [
-            {"seed": 42 + i, "n_symbols": 5, "alpha_annual_pct": None,
+            {"seed": 42 + i, "n_symbols": 5, "active_annual_pct": None,
              "error": "SortError: cross-section below minimum", "passed": False}
             for i in range(5)
         ]},

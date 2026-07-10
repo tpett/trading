@@ -781,6 +781,38 @@ def test_long_only_leaderboard_rederives_a_real_trial(tmp_path):
     assert row.skipped_no_spread == 0   # make_panel's bars always carry high/low
 
 
+def test_long_only_leaderboard_beats_spy_direction_is_pinned(tmp_path):
+    # R1 spec section 2 comparator direction: the SAME re-derived trial must
+    # flag beats_spy True against a weak benchmark and False against one no
+    # fixture leg outruns -- pinning that the comparison runs the right way.
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    kwargs = dict(panel_factory=lambda _u, _f: panel)
+    # Weak = declining drift at normal vol (zero-vol would mean a
+    # near-infinite benchmark Sharpe: constant returns, sd -> 0).
+    weak = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors,
+        make_spy_closes(drift=-0.001), **kwargs)
+    strong = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors,
+        make_spy_closes(drift=0.01, vol=0.0), **kwargs)
+    assert weak[0].beats_spy is True
+    assert weak[0].lo_total_return > weak[0].spy_total_return
+    assert strong[0].beats_spy is False
+    assert strong[0].lo_total_return < strong[0].spy_total_return
+    # NaN side (benchmark never overlaps the window): honest False, not a
+    # free pass -- and the row still ranks (error is None; data DID re-derive).
+    disjoint = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors,
+        make_spy_closes(start="2015-01-02", periods=100, vol=0.0), **kwargs)
+    assert disjoint[0].beats_spy is False
+    assert disjoint[0].spy_sharpe is None and disjoint[0].error is None
+
+
 def test_long_only_leaderboard_reports_na_for_unresolvable_universe(tmp_path):
     # A trial journaled under a universe name no longer in the resolved set
     # (e.g. a segment whose SIC map went missing) shows honestly as n/a,

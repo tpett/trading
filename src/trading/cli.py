@@ -1246,11 +1246,13 @@ def _render_battery(outcome) -> None:
         return "-" if value is None else fmt.format(value)
 
     def summary(check) -> str:
+        # "act" = annualized cost-charged LO-minus-SPY active return (%/yr),
+        # the R1 re-anchored statistic every check scores.
         d = check.detail
         if check.name == "sub_period_halves":
             return "; ".join(
-                f"{h['window']}: a={num(h['alpha_annual_pct'], '{:+.1f}')} "
-                f"t={num(h['alpha_t'])}" for h in d["halves"]
+                f"{h['window']}: act={num(h['active_annual_pct'], '{:+.1f}')} "
+                f"t={num(h['active_t'])}" for h in d["halves"]
             )
         if check.name == "universe_subsets":
             errored = [draw["error"] for draw in d["draws"] if draw.get("error")]
@@ -1263,11 +1265,11 @@ def _render_battery(outcome) -> None:
             ok = sum(1 for t in d["trials"] if t["passed"])
             return f"{ok}/4 jitter trials sign-matched (need 4)"
         if check.name == "decision_offset":
-            return (f"a={num(d['alpha_annual_pct'], '{:+.1f}')} "
+            return (f"act={num(d['active_annual_pct'], '{:+.1f}')} "
                     f"retention={num(d['retention'], '{:.2f}')} (need >=0.50)")
         if check.name == "name_concentration":
             return (f"excl {', '.join(d['excluded'])}: "
-                    f"a={num(d['alpha_annual_pct'], '{:+.1f}')} "
+                    f"act={num(d['active_annual_pct'], '{:+.1f}')} "
                     f"retention={num(d['retention'], '{:.2f}')} (need >=0.50)")
         if check.name == "month_concentration":
             return f"top-3 months share={num(d['top3_share'], '{:.0%}')} (need <=60%)"

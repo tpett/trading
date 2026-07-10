@@ -10,9 +10,12 @@ import pandas as pd
 import pytest
 
 from alphasearch_helpers import make_factors, make_panel, make_spy_closes
+from trading.alphasearch.costs import cost_charged_lo
 from trading.alphasearch.panel import PanelData
 from trading.alphasearch.robustness import (
     BatteryContext,
+    active_series,
+    annualized_active_pct,
     check_jitter,
     check_offset,
     check_subperiods,
@@ -26,7 +29,7 @@ from trading.alphasearch.spec import SIGNALS, SignalSpec
 from trading.alphasearch.sweep import (
     DISCOVERY_WINDOW,
     SweepError,
-    evaluate_trial,
+    evaluate_trial_with_sort,
     log_trial,
     trial_config,
     trials_journal,
@@ -35,17 +38,25 @@ from trading.alphasearch.sweep import (
 WINDOW = "2020-01-01..2020-06-30"
 
 
-def _ctx(journal, panel, factors, *, spec=None, full_alpha=None,
+def _ctx(journal, panel, factors, *, spec=None, full_active=None, spy=None,
          window=WINDOW, tercile_below=50, min_names=15, quantiles=5):
+    """BatteryContext with the R1-re-anchored baseline: the full-window
+    annualized cost-charged LO-minus-SPY active return, derived exactly as
+    run_battery derives it (or supplied directly for planted-baseline
+    tests)."""
     spec = spec if spec is not None else SIGNALS["mom21"]
-    if full_alpha is None:
-        full = evaluate_trial(panel, spec, window, factors,
-                              quantiles=quantiles, tercile_below=tercile_below,
-                              min_names=min_names)
-        full_alpha = full["ls"]["alpha_annual_pct"]
+    spy = spy if spy is not None else make_spy_closes()
+    if full_active is None:
+        _result, sort = evaluate_trial_with_sort(
+            panel, spec, window, factors,
+            quantiles=quantiles, tercile_below=tercile_below,
+            min_names=min_names)
+        charged, _ = cost_charged_lo(panel, sort.lo, sort.rebalances)
+        full_active = annualized_active_pct(active_series(charged, spy))
     return BatteryContext(
         journal=journal, panel=panel, spec=spec, factors=factors, ts="t1",
-        universe="largecap", window=window, full_alpha=float(full_alpha),
+        universe="largecap", window=window, full_active=float(full_active),
+        spy_closes=spy,
         quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
         tag=f"{spec.name}:largecap",
     )
@@ -90,7 +101,10 @@ def test_subset_draw_is_deterministic_sorted_and_half_sized():
 def test_check_subperiods_passes_on_a_stable_fixture(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel(n_symbols=40)
-    ctx = _ctx(journal, panel, make_factors())
+    # Deterministic benchmark (vol=0): check 1's active-t is computed on the
+    # daily LO-minus-SPY series, and a noisy 1%/day synthetic SPY would drown
+    # the planted drift spread over a 40-session half-window.
+    ctx = _ctx(journal, panel, make_factors(), spy=make_spy_closes(vol=0.0))
     got = check_subperiods(ctx)
     assert got.passed
     assert got.number == 1 and got.name == "sub_period_halves"
@@ -136,17 +150,17 @@ def _planted_rank_spec() -> SignalSpec:
 def test_check_subperiods_fails_a_two_regime_signal(tmp_path):
     journal = trials_journal(tmp_path / "journal")
     panel = _two_regime_panel()
-    # The discovery baseline is the first-half sign (positive): the battery
-    # compares halves against the JOURNALED full-window alpha, which the
-    # test supplies directly.
+    # The baseline is the first-half sign (positive): the check compares
+    # halves against the full-window active baseline, which the test
+    # supplies directly (R1: annualized LO-minus-SPY active return, %/yr).
     ctx = _ctx(journal, panel, make_factors(), spec=_planted_rank_spec(),
-               full_alpha=10.0)
+               full_active=10.0)
     got = check_subperiods(ctx)
     assert not got.passed
     first, second = got.detail["halves"]
     assert first["passed"] is True                 # regime 1: strong + right sign
     assert second["passed"] is False               # regime 2: sign flipped
-    assert second["alpha_annual_pct"] < 0
+    assert second["active_annual_pct"] < 0
 
 
 def test_check_subsets_passes_on_a_wide_fixture(tmp_path):
@@ -170,7 +184,7 @@ def test_check_subsets_error_draws_journal_and_fail(tmp_path):
     # perturbation is not a pass). The check itself fails 0/5.
     journal = trials_journal(tmp_path / "journal")
     panel = make_panel()                            # 16 symbols
-    ctx = _ctx(journal, panel, make_factors(), full_alpha=10.0)
+    ctx = _ctx(journal, panel, make_factors(), full_active=10.0)
     got = check_subsets(ctx)
     assert not got.passed and got.detail["n_pass"] == 0
     events = list(journal.events())
@@ -749,3 +763,62 @@ def test_run_battery_narrow_universe_fails_check2_via_error_trials(tmp_path):
     errored = [e for e in journal.events()
                if e.get("battery") is not None and e.get("error") is not None]
     assert len(errored) >= 5
+
+
+# --------------------------------------------------------------------------- #
+# LO-vs-SPY comparator direction (R1 spec section 2): the gate must flip on
+# WHICH side wins, pinned in both directions plus the NaN-side refusal.
+# --------------------------------------------------------------------------- #
+def test_run_battery_gate_passes_when_lo_beats_spy(tmp_path):
+    from trading.alphasearch.robustness import run_battery
+
+    journal, panel, factors, uspec = _swept_survivor(tmp_path)
+    # A weak benchmark -- declining drift, normal vol (a ZERO-vol benchmark
+    # would have a near-infinite Sharpe: constant returns, sd -> 0): the
+    # fixture's planted drift spread crushes it on both statistics.
+    weak_spy = make_spy_closes(drift=-0.001)
+    outcome = run_battery(uspec, journal, factors, "t1", "mom21",
+                          discovery_window=WINDOW,
+                          panel_factory=lambda _u, _f: panel,
+                          spy_closes=weak_spy)
+    gate = outcome.long_only_gate
+    assert gate["passed"] is True
+    assert gate["lo_sharpe"] > gate["spy_sharpe"]
+    assert gate["lo_total_return"] > gate["spy_total_return"]
+    # eligible remains checks AND gate: with the gate passing, eligibility
+    # is exactly the checks' verdict.
+    assert outcome.eligible == all(c.passed for c in outcome.checks)
+
+
+def test_run_battery_gate_fails_when_spy_wins(tmp_path):
+    from trading.alphasearch.robustness import run_battery
+
+    journal, panel, factors, uspec = _swept_survivor(tmp_path)
+    # A 1%/day deterministic benchmark: no fixture leg outruns it.
+    strong_spy = make_spy_closes(drift=0.01, vol=0.0)
+    outcome = run_battery(uspec, journal, factors, "t1", "mom21",
+                          discovery_window=WINDOW,
+                          panel_factory=lambda _u, _f: panel,
+                          spy_closes=strong_spy)
+    gate = outcome.long_only_gate
+    assert gate["passed"] is False
+    assert gate["lo_total_return"] < gate["spy_total_return"]
+    assert outcome.eligible is False          # a losing gate always blocks
+
+
+def test_run_battery_gate_fails_when_spy_side_is_nan(tmp_path):
+    from trading.alphasearch.robustness import run_battery
+
+    journal, panel, factors, uspec = _swept_survivor(tmp_path)
+    # SPY closes that never overlap the discovery window: the benchmark
+    # Sharpe/total are NaN -- an uncomputable comparison is a FAIL, never a
+    # free pass (spec section 6's rule applied to the gate).
+    disjoint_spy = make_spy_closes(start="2015-01-02", periods=100, vol=0.0)
+    outcome = run_battery(uspec, journal, factors, "t1", "mom21",
+                          discovery_window=WINDOW,
+                          panel_factory=lambda _u, _f: panel,
+                          spy_closes=disjoint_spy)
+    gate = outcome.long_only_gate
+    assert gate["passed"] is False
+    assert gate["spy_sharpe"] is None or math.isnan(gate["spy_sharpe"])
+    assert outcome.eligible is False

@@ -231,16 +231,19 @@ def make_panel(
 
 def make_spy_closes(
     start: str = "2015-01-02", periods: int = 4000, seed: int = 99,
-    drift: float = 0.0003,
+    drift: float = 0.0003, vol: float = 0.01,
 ) -> pd.Series:
     """Synthetic SPY buy-and-hold close series (R1 gate amendment) spanning
     essentially any fixture window used across the alphasearch tests --
     DISCOVERY_WINDOW, the holdout, the various small WINDOW fixtures -- so
     run_battery/leaderboard tests never depend on the real (gitignored)
-    data/equities-tiingo/SPY cache."""
+    data/equities-tiingo/SPY cache. vol=0.0 gives a deterministic
+    constant-drift benchmark: the re-anchored checks score the LO-minus-SPY
+    active series, and unit tests that plant a signal in the LO leg need the
+    benchmark side quiet enough not to drown it over short fixture windows."""
     rng = np.random.default_rng(seed)
     idx = pd.date_range(start, periods=periods, freq="B", tz="UTC")
-    rets = drift + rng.normal(0.0, 0.01, size=periods)
+    rets = drift + rng.normal(0.0, vol, size=periods)
     return pd.Series(100.0 * np.cumprod(1 + rets), index=idx)
 
 

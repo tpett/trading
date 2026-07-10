@@ -93,10 +93,14 @@ def test_golden_battery_verdict_gates_a_real_holdout(tmp_path):
     this run_battery outcome or the run_holdout gate's reaction to it would
     change, and one of the assertions below would break.
 
-    On this deterministic 40-name fixture the battery is NOT eligible (check 6
-    month-concentration fails: the L/S series' top-3 months carry 61.6% of the
-    cumulative log return on this window, just over the 60% frozen ceiling) --
-    so the holdout must refuse, pre-touch, naming the robustness command."""
+    On this deterministic 40-name fixture the battery is NOT eligible under
+    the R1-re-anchored checks (the §2 long-only gate itself PASSES -- the
+    planted drift spread crushes the synthetic SPY -- but check 6 fails: the
+    active series' top-3 months carry ~91% of the cumulative log return over
+    this 6-month window, far over the 60% frozen ceiling; check 1's first
+    half also falls below the active-t floor against the noisy synthetic
+    benchmark) -- so the holdout must refuse, pre-touch, naming the
+    robustness command."""
     uspec = _write_universe(tmp_path)
     journal = trials_journal(tmp_path / "journal")
     factors = make_factors()
@@ -105,7 +109,10 @@ def test_golden_battery_verdict_gates_a_real_holdout(tmp_path):
     outcome = run_battery(uspec, journal, factors, "t1", "mom21",
                           discovery_window=WINDOW, spy_closes=make_spy_closes())
 
-    # Pin the fixture's real outcome: not eligible, specifically via check 6.
+    # Pin the fixture's real outcome: the §2 comparator passes, yet the
+    # re-anchored checks (6, and 1's noisy first half) still block -- the
+    # battery is more than the comparator, by design.
+    assert outcome.long_only_gate["passed"] is True
     assert outcome.eligible is False
     month = next(c for c in outcome.checks if c.name == "month_concentration")
     assert not month.passed
