@@ -14,16 +14,18 @@ from trading.alphasearch.spec import SIGNALS
 AS_OF = pd.Timestamp("2020-06-30", tz="UTC")
 
 
-def _insider(rows: list[tuple[str, str, float, float, int, bool]]) -> pd.DataFrame:
-    """(filed_iso, code, shares, price, owner_cik, is_officer) -> store frame."""
+def _insider(rows: list[tuple]) -> pd.DataFrame:
+    """(filed_iso, code, shares, price, owner_cik, is_officer[, is_director])
+    -> store frame. is_director defaults to False when omitted."""
+    padded = [r if len(r) == 7 else (*r, False) for r in rows]
     frame = pd.DataFrame(
-        rows,
-        columns=["filed", "code", "shares", "price", "owner_cik", "is_officer"],
+        padded,
+        columns=["filed", "code", "shares", "price", "owner_cik", "is_officer",
+                 "is_director"],
     )
     frame["filed"] = pd.to_datetime(frame["filed"]).dt.tz_localize("UTC")
     frame["trans_date"] = frame["filed"] - pd.Timedelta(2, unit="D")
     frame["value"] = frame["shares"] * frame["price"]
-    frame["is_director"] = False
     frame["is_ten_pct"] = False
     return frame.set_index("filed").sort_index(kind="mergesort")
 
@@ -109,9 +111,13 @@ def test_cluster_buys_90_distinct_owners_and_the_zero_vs_nan_distinction():
 def test_officer_buy_90_raw_price_basis_and_nan_conventions():
     insider = {
         # Officer buys 100 sh @ 10 = 1000; a NON-officer buy of 2000 must not
-        # count. shares_outstanding 1e6, close_raw 50 -> 1000 / 5e7 = 2e-5.
+        # count, NOR must a director-only buy of 3000 (is_officer=False,
+        # is_director=True) -- officer_buy_90 is officer-only, not
+        # officer-or-director. shares_outstanding 1e6, close_raw 50 ->
+        # 1000 / 5e7 = 2e-5.
         "AAA": _insider([("2020-06-15", "P", 100.0, 10.0, 1, True),
-                         ("2020-06-16", "P", 200.0, 10.0, 2, False)]),
+                         ("2020-06-16", "P", 200.0, 10.0, 2, False),
+                         ("2020-06-17", "P", 300.0, 10.0, 4, False, True)]),
         # Covered, no officer buying -> 0.0 (real quiet), not NaN.
         "BBB": _insider([("2020-06-16", "S", 10.0, 10.0, 3, False)]),
     }

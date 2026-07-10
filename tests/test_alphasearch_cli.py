@@ -218,6 +218,7 @@ def test_sweep_segments_refusal_prints_signal_family_hint(tmp_path, monkeypatch,
     # hint containing them would hand the operator a still-failing command.
     assert "npr_90" not in err
     assert "cluster_buys_90" not in err
+    assert "officer_buy_90" not in err
     assert "opt-largecap:<segment>" in err
 
 
