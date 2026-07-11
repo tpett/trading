@@ -1208,6 +1208,51 @@ for 2019–23), not a delta-managed or iron-condor variant, not a calmer-period
 sample. Those refinements are untested. But the base signal — liquid options in
 this period weren't rich enough to sell profitably — is discouraging and
 consistent with the whole program. Holdout: not spent (nothing to spend it on).
+## 20. PEAD event study — a real but fragile drift that fails the liquid-band test (the last lead)
+
+The adversarial agent's committed last lead: post-earnings-announcement drift
+(PEAD), tested PROPERLY (market-adjusted / beta-stripped, event-driven, surprise
+× liquidity bucketed, error-barred) — the one candidate whose mechanism is
+behavioral (not a factor premium doomed to beta) and whose names are fillable.
+Pre-registered rule: alive only if the positive-surprise market-adjusted drift
+is POSITIVE, MONOTONIC in surprise, CI-clear-of-zero, AND present in the LIQUID
+(fillable) buckets. Cheap study on existing data (no earnings-date panel — we
+DON'T have one; used companyfacts 10-Q filed dates + an outlier-overnight-gap
+detector to locate the earnings day, then measured forward return MINUS SPY
+entered AFTER the reaction). 14,616 events 2019-2023, detection rate 72%,
+median detected gap 4.2% (earnings-scale, sane).
+
+**Result — clears 3 of the 4 conditions, fails the decisive one:**
+- POSITIVE + CI-clear at long horizons: large positive-surprise (T3) drift
+  ~+1.9% market-adjusted over 63d; T3−T1 spread +2.87% (large) [+1.45,+4.29] /
+  +2.52% (mid) [+0.37,+4.65]. A genuine beta-stripped positive drift — the first
+  CI-clear active return in the whole search that isn't obviously beta or the
+  microcap artifact.
+- **FAILS condition (d) — NOT in the liquid/fillable buckets.** The drift
+  concentrates in LOW/MID-liquidity names (largecap T3|MID 63d +3.16%
+  [+1.19,+5.24]) and goes FLAT in HIGH liquidity (T3|HIGH +0.35% [−1.49,+2.16],
+  CI straddles zero). Same wall: the edge lives in the less-arbitraged corner
+  and vanishes where you can fully trade it.
+- **Fragility 1:** midcap T3 MEDIAN drift 63d is −2.17% while the mean is +1.84%
+  — carried by a right-skewed minority of big winners, not the typical event.
+- **Fragility 2:** the negative-surprise leg is WRONG-SIGNED (+1.24%/+1.87% at
+  63d, should be down if PEAD is real) — dominated by a March-2020 COVID-crash
+  cluster rebounding (SPY-adjustment strips index but not sector beta). The
+  short leg contradicts rather than corroborates.
+- **Contamination:** the noisy detector caught non-earnings events (one GME
+  Nov-2020 "event" → the Jan-2021 squeeze, +1254% at 42d, drives a whole cell).
+
+**Verdict:** a real-but-fragile positive-surprise drift in moderately-liquid
+index names that FAILS the pre-registered liquid-band condition, is
+outlier-carried (median negative in midcap), and is not corroborated by the
+short leg. Even PEAD — the behavioral, fillable, not-a-factor-premium lead —
+shows its drift thinning to zero exactly as you move into the fully-tradeable
+liquid names. NEXT (only if pursued): a CLEAN version with real EDGAR 8-K
+Item-2.02 earnings dates + robust sector adjustment + a median (typical-event)
+gate would settle whether the LOW/MID-liquidity residual is real or a
+detector-noise/regime artifact — but the base case, given it fails the
+liquid-band test and matches the program's over-determined pattern, is the
+latter. Holdout: not spent.
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
