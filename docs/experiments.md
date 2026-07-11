@@ -971,6 +971,73 @@ down-cap fundamentals-store wiring to sweep the fundamentals family.
 spends none of it (spec §7). Next: register the `downcap-dv` universe from a
 `--no-cap-band` membership and run the Phase-B sweep.
 
+## 16. Concentration axis — the negative verdict was a construction artifact (in-sample): concentrated large-cap momentum BEATS SPY
+
+**This is the most promising in-sample result the program has produced, and it
+came from an adversarial audit, not the engine.** After R1/R2/R3 all returned
+"momentum ties SPY, never beats it," an independent adversarial reviewer
+(2026-07-11) caught that EVERY long-only-vs-SPY number in the program — 1,314
+of 1,326 journaled trials — used a top-QUINTILE equal-weight book (20 to
+*hundreds* of names), which by construction converges to market beta (that is
+*why* R2's bare momentum landed at Sharpe 0.96 = SPY). A ~$1k account holds
+~10–20 names. **Concentration was never a search axis, and R3's capacity-edge
+thesis was tested with the diluted opposite of the construction it was about.**
+Pre-registered amendment (before any run):
+`docs/superpowers/specs/2026-07-11-concentration-axis-amendment.md` froze a
+fixed-count top-N construction and the exact test (N ∈ {10, 20}; `mom_12_2`,
+`mom252`; largecap + `downcap-dv`; the R1 cost-charged long-only-vs-SPY gate).
+
+**Result (cost-charged long-only vs SPY, discovery 2019-01-01..2023-12-31):**
+
+| signal | universe | N | lo Sharpe | SPY | lo total | SPY total | beats |
+|---|---|---|---:|---:|---:|---:|:--:|
+| mom252 | largecap | **10** | **1.14** | 0.80 | **+373%** | +106% | ✅ |
+| mom_12_2 | largecap | 10 | 1.05 | 0.80 | +307% | +106% | ✅ |
+| mom252 | largecap | 20 | 1.00 | 0.80 | +223% | +106% | ✅ |
+| mom_12_2 | largecap | 20 | 0.97 | 0.80 | +208% | +106% | ✅ |
+| mom252 | downcap-dv | 10 | 0.87 | 0.73 | +589% | +91% | ✅ |
+| mom252 | downcap-dv | 20 | 0.72 | 0.73 | +221% | +91% | ✗ |
+| mom_12_2 | downcap-dv | 10 | 0.63 | 0.73 | +157% | +91% | ✗ |
+| mom_12_2 | downcap-dv | 20 | 0.61 | 0.73 | +131% | +91% | ✗ |
+
+**The audit was right.** In large-caps, concentrated momentum beats SPY on
+BOTH Sharpe and total return, and the beat is **monotonic in concentration**
+(top-10 > top-20 > the quintile that only tied) — exactly the tail-concentration
+mechanism (momentum's premium lives in the winner decile; averaging the top
+quintile dilutes it toward beta). The recorded "momentum ties SPY" verdict was
+a statement about the top-quintile construction, NOT about momentum at the
+account's real book. In `downcap-dv`, concentrated momentum crushes SPY on
+total return (+131% to +589% vs +91%) but a 10-name micro-cap book is high-vol,
+so risk-adjusted it only ties (mom252 top-10 at 0.87 the one exception).
+
+**Why this is a LEAD, not yet an edge — the mandatory caveats:**
+- **In-sample.** This is the discovery window (it does include the 2022
+  bear, which helps, but it is still in-sample). The R1 re-read (§13) found
+  ~45% of ALL trials beat SPY in-sample; an in-sample beat is necessary, not
+  sufficient.
+- **Concentration amplifies overfitting.** A top-10 book is the 10
+  best-in-hindsight-ranked names each month; it is mechanically more sensitive
+  to the ranking than a quintile, so *some* of the monotonic top-10 > top-20
+  gain is overfitting amplification, not pure tail-concentration edge. The two
+  effects are entangled here and only OOS can separate them.
+- **The real tests have NOT run.** Every prior candidate died out-of-sample
+  (survivorship-free momentum 0.45, amihud 0.16). What is still owed: (1) an
+  OOS walk-forward on the concentrated book; (2) the robustness battery —
+  which needs `top_n` threading (Piece 3 `robustness.py` was deliberately left
+  out of the concentration build, spec §6); (3) only on an explicit developer
+  decision, the once-only 2024+ holdout.
+- **Concentration cuts both ways** — a 10-name book has real single-name and
+  drawdown risk the Sharpe alone doesn't capture.
+
+**Holdout: still unspent.** These 8 top-N trials are journaled (972 deduped),
+BH-counted, classical-SE-caveated. **Next, in order:** thread `top_n` into the
+robustness battery and run it on the large-cap concentrated-momentum candidate
+(mom252/mom_12_2, top-10); an OOS walk-forward of the concentrated book; then,
+only on a developer decision, the holdout. The audit's other two leads
+(a holding-horizon axis, and a PEAD/earnings-surprise signal on the
+already-accumulating PIT earnings calendar) remain open and are now higher
+priority given concentration changed the answer.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
