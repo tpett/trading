@@ -1253,6 +1253,53 @@ gate would settle whether the LOW/MID-liquidity residual is real or a
 detector-noise/regime artifact — but the base case, given it fails the
 liquid-band test and matches the program's over-determined pattern, is the
 latter. Holdout: not spent.
+## 21. Clean PEAD test — the last lead is dead: it was momentum + outliers, not earnings drift
+
+The decisive version of §20, with REAL earnings dates (SEC 8-K Item-2.02 filing
+dates, EDGAR submissions, 23,191 events / 1,213 names 2019-2023, verified vs
+actual earnings calendars, no detector contamination) and the controls §20's
+noisy proxy couldn't apply — median gate, momentum control, COVID exclusion,
+negative-leg corroboration. Pre-registered rule
+(`2026-07-11-clean-pead-test.md` §4): a real tradeable edge iff ALL of (a)
+positive+monotonic, (b) CI-clear, (c) present in HIGH-liquidity/fillable names,
+(d) median (typical-event) positive, (e) survives the momentum control, (f)
+negative leg drifts down.
+
+**Result — fails the three decisive conditions:**
+- **(c) FAILS — no drift in fillable liquid names.** T3 (large positive
+  surprise) × HIGH-liquidity market-adjusted drift is +0.5%/near-zero, 95% CI
+  straddles zero in every cut (with/without COVID, 42d/63d), median NEGATIVE.
+  The same wall §20 hit, now with clean dates.
+- **(d) FAILS — the typical event doesn't drift.** The MEDIAN drift is negative
+  at every horizon/liquidity/COVID cut; the positive numbers exist only in the
+  MEAN (outlier-carried) — §20's fragility flag confirmed with clean data.
+- **(e) FAILS — it was momentum in disguise.** In the momentum-NEUTRAL tercile
+  the drift is flat-to-CI-clear-negative (ALL-pool median −0.44% to −1.08%,
+  CI-clear). Once you control for pre-earnings price momentum, the apparent PEAD
+  vanishes — exactly the "short-term strength in disguise → beta" kill.
+- (a)/(b) held ONLY in the mean and ONLY with COVID included (63d T3 +1.65%
+  CI-clear with COVID → +1.10% CI [−0.07,+2.40] once COVID dropped). (f) the
+  negative leg's MEDIAN does drift down correctly (−0.74% to −1.00%, CI-clear) —
+  a faint real earnings-reaction signal exists, but it's the un-shortable side.
+
+**Verdict:** PEAD — the adversarial agent's best committed lead, and the one
+that came closest (§20) — is dead in the tradeable band. The clean test shows
+§20's positive drift was the FRAGILITY, not an edge: mostly price momentum, a
+right-tail of outliers, and the COVID regime, with nothing left in the liquid,
+fillable names, and nothing in the typical event. This closes the last lead.
+
+**The search is now over-determined-complete.** Across 21 recorded experiments —
+every long-only construction (quintile, decile, top-N), every universe
+(large/mid/down-cap), market-neutral shorting, options VRP, and now event-driven
+PEAD tested as cleanly as the data allows — the result is one thing: where
+execution is clean and liquid, there is no edge; where an edge appears, it lives
+in the less-arbitraged/illiquid corner you cannot harvest, or it dissolves under
+proper controls (beta, momentum, median, error bars). The disciplined,
+honest answer is that this account has no harvestable alpha, and the deliverables
+are the engine and the discipline that proved it — including catching every
+in-sample artifact (concentration Sharpe 1.14, market-neutral Sharpe 2.8, PEAD)
+before any of it became a live bet. Holdout: NEVER spent — no candidate ever
+earned it.
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
