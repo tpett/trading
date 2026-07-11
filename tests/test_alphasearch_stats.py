@@ -5,8 +5,16 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
+import pytest
 
-from trading.alphasearch.stats import bh_fdr, deflated_sharpe, p_from_t
+from trading.alphasearch.stats import (
+    bh_fdr,
+    closed_form_sharpe_se,
+    deflated_sharpe,
+    p_from_t,
+    sharpe_ci,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -106,3 +114,68 @@ def test_dsr_more_trials_deflate_harder():
 def test_dsr_degenerate_inputs_are_nan():
     assert math.isnan(deflated_sharpe(0.1, 1, 0.0, 3.0, 10, 0.001))  # n_obs < 2
     assert math.isnan(deflated_sharpe(0.1, 252, 0.0, 3.0, 0, 0.001))  # no trials
+
+
+# --------------------------------------------------------------------------- #
+# sharpe_ci: stationary bootstrap CI, cross-checked against the closed-form SE
+# (R6 Stage 1 market-neutral gate amendment spec section 3)
+# --------------------------------------------------------------------------- #
+def _iid_normal_series(n=2520, mean=0.0006, sd=0.01, seed=42) -> pd.Series:
+    rng = np.random.default_rng(seed)
+    return pd.Series(rng.normal(mean, sd, size=n))
+
+
+def test_sharpe_ci_agrees_with_closed_form_se_on_iid_normal():
+    # A synthetic iid-normal series (no serial correlation, so the block
+    # bootstrap and the closed-form iid-normal SE should roughly agree): the
+    # bootstrap's central-95% half-width should be in the same ballpark as
+    # 1.96 * the closed-form SE.
+    r = _iid_normal_series()
+    point, lo, hi = sharpe_ci(r, seed=7, n_boot=2000, block=10)
+    assert not math.isnan(point)
+    se = closed_form_sharpe_se(point, len(r))
+    boot_half_width = (hi - lo) / 2.0
+    closed_form_half_width = 1.96 * se
+    assert boot_half_width == pytest.approx(closed_form_half_width, rel=0.35)
+    # The point estimate sits inside its own CI.
+    assert lo < point < hi
+
+
+def test_sharpe_ci_is_deterministic_given_a_seed():
+    r = _iid_normal_series(seed=11)
+    first = sharpe_ci(r, seed=123)
+    second = sharpe_ci(r, seed=123)
+    assert first == second
+
+
+def test_sharpe_ci_different_seeds_can_differ():
+    r = _iid_normal_series(seed=11)
+    a = sharpe_ci(r, seed=1)
+    b = sharpe_ci(r, seed=2)
+    assert a != b
+
+
+def test_sharpe_ci_near_zero_mean_series_straddles_zero():
+    # The whole point of the gate (spec section 3): a near-zero-mean series
+    # (no real edge) must yield a CI that straddles 0, so a naive positive
+    # point Sharpe would NOT clear the "CI lower bound > 0" gate.
+    r = _iid_normal_series(mean=0.0, sd=0.01, seed=5)
+    _point, lo, hi = sharpe_ci(r, seed=3)
+    assert lo < 0 < hi
+
+
+def test_sharpe_ci_nan_below_two_observations():
+    point, lo, hi = sharpe_ci(pd.Series([0.01]))
+    assert math.isnan(lo) and math.isnan(hi)
+
+
+def test_closed_form_sharpe_se_matches_the_frozen_formula():
+    # sqrt((1 + 0.5*SR^2) / T), T in years.
+    sr, n_obs = 1.2, 1260  # 5 years at 252 sessions/yr
+    expected = math.sqrt((1.0 + 0.5 * sr * sr) / (n_obs / 252.0))
+    assert closed_form_sharpe_se(sr, n_obs) == pytest.approx(expected)
+
+
+def test_closed_form_sharpe_se_nan_inputs():
+    assert math.isnan(closed_form_sharpe_se(float("nan"), 252))
+    assert math.isnan(closed_form_sharpe_se(1.0, 0))
