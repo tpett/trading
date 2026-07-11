@@ -12,11 +12,15 @@ from alphasearch_helpers import make_factors, make_panel, make_spy_closes
 from trading.alphasearch.panel import PanelError
 from trading.alphasearch.spec import SIGNALS, SignalSpec
 from trading.alphasearch.sweep import (
+    DEFAULT_PARAMS,
     RERUN_CONFIRMATION,
+    MarketNeutralRow,
     SweepError,
     UniverseSpec,
+    _hashed_params,
     build_leaderboard,
     build_long_only_leaderboard,
+    build_market_neutral_leaderboard,
     default_universes,
     discovery_trials,
     holdout_passes,
@@ -1042,3 +1046,234 @@ def test_long_only_leaderboard_aligns_spy_window_to_the_actual_lo_start(
     assert spy_window.index[0] == sort.rebalances[0][0]
     assert aligned.n_obs == len(spy_window) - 1
     assert aligned.n_obs == off_by_one.n_obs + 1
+
+
+# --------------------------------------------------------------------------- #
+# Default-off bit-identity (R6 Stage 1 market-neutral gate amendment, spec
+# section 6 -- PARAMOUNT): the market-neutral leaderboard is purely additive
+# read-side eval. No sweep param changed, so _hashed_params/DEFAULT_PARAMS
+# and the --long-only leaderboard must be untouched.
+# --------------------------------------------------------------------------- #
+def test_hashed_params_unchanged_by_market_neutral_addition():
+    # The exact frozen dict shape from before this amendment: no new key was
+    # added for the market-neutral read path (it hashes NO new sweep params
+    # -- it re-derives from the EXISTING journaled top_n/quantiles/etc).
+    assert DEFAULT_PARAMS == {
+        "quantiles": 5, "weighting": "equal", "cadence": "monthly",
+        "tercile_below": 50, "min_names": 15,
+    }
+    assert _hashed_params(5, 50, 15) == DEFAULT_PARAMS
+
+
+def test_long_only_leaderboard_output_pinned_after_market_neutral_addition(
+    tmp_path,
+):
+    # A byte-identical pin (spec section 6 PARAMOUNT): the exact same fixture
+    # test_long_only_leaderboard_rederives_a_real_trial exercises, pinned to
+    # the precise float values produced BEFORE any market-neutral code was
+    # added -- proving the long-only path is untouched by this amendment.
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, make_spy_closes(),
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.config_hash == "90b16087cebf"
+    assert row.lo_sharpe == pytest.approx(8.354236629560836)
+    assert row.lo_total_return == pytest.approx(0.07561957204016201)
+    assert row.spy_sharpe == pytest.approx(0.04298099280636386)
+    assert row.spy_total_return == pytest.approx(-0.0022820952608864076)
+    assert row.beats_spy is True
+    assert row.skipped_no_spread == 0
+
+
+# --------------------------------------------------------------------------- #
+# --market-neutral leaderboard (R6 Stage 1 market-neutral gate amendment,
+# docs/superpowers/specs/2026-07-11-market-neutral-gate-amendment.md)
+# --------------------------------------------------------------------------- #
+def test_market_neutral_leaderboard_rederives_a_real_trial(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    rows = build_market_neutral_leaderboard(
+        journal, _universe(tmp_path), factors,
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.signal == "mom21" and row.universe == "largecap"
+    assert row.window == WINDOW
+    assert row.error is None
+    assert row.top_n is None                # quintile trial, not top-N
+    assert row.mn_sharpe is not None
+    assert row.mn_sharpe_ci_lo is not None and row.mn_sharpe_ci_hi is not None
+    assert row.mn_sharpe_ci_lo <= row.mn_sharpe <= row.mn_sharpe_ci_hi
+    assert row.borrow_drag_bps is not None and row.borrow_drag_bps >= 0
+    assert row.spread_drag_bps is not None and row.spread_drag_bps >= 0
+    assert isinstance(row.passes, bool)
+
+
+def test_market_neutral_leaderboard_rederives_top_n_trial_as_top_n_not_quintile(
+    tmp_path,
+):
+    # Mirrors test_long_only_leaderboard_rederives_top_n_trial_as_top_n_not_
+    # quintile: the --market-neutral re-derivation must read a top-N trial's
+    # journaled params and rebuild it via the fixed-count construction.
+    from trading.alphasearch.costs import cost_charged_market_neutral
+    from trading.alphasearch.sort import portfolio_sort
+    from trading.alphasearch.stats import sharpe_ci
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW, top_n=5,
+              panel_factory=lambda _u, _f: panel)
+    rows = build_market_neutral_leaderboard(
+        journal, _universe(tmp_path), factors,
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.error is None
+    assert row.top_n == 5
+    start, end = pd.Timestamp("2020-01-01", tz="UTC"), pd.Timestamp("2020-06-30", tz="UTC")
+    dates = panel.decision_dates(start, end)
+    direct = portfolio_sort(panel, SIGNALS["mom21"], dates, end, top_n=5)
+    charged, _diag = cost_charged_market_neutral(panel, direct)
+    expected_sharpe, _lo, _hi = sharpe_ci(charged, seed=0)
+    assert row.mn_sharpe == pytest.approx(expected_sharpe)
+
+
+def test_market_neutral_leaderboard_pass_requires_ci_lo_positive_on_full_and_both_halves(
+    tmp_path, monkeypatch,
+):
+    # spec sections 3-4: passes iff the full-window CI lower bound AND both
+    # discovery-half CI lower bounds are > 0. Plant a signal so obviously
+    # strong and low-variance that ALL three CI-lo checks clear.
+    panel = make_panel()
+    factors = make_factors()
+
+    def fn(view, as_of):
+        # A rank-based score perfectly correlated with a persistent per-
+        # symbol drift the fixture's OWN closes carry (make_panel drifts
+        # symbol i at (i - n/2)*2bp/day) -- top bucket outperforms bottom by
+        # construction, every month, both halves.
+        return pd.Series({s: float(i) for i, s in enumerate(sorted(view.symbols))})
+
+    spec = SignalSpec("strong_mn", fn)
+    monkeypatch.setitem(SIGNALS, "strong_mn", spec)
+    journal = trials_journal(tmp_path / "journal")
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals={"strong_mn": spec}, window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    rows = build_market_neutral_leaderboard(
+        journal, _universe(tmp_path), factors,
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.error is None
+    # The engineered spread is strong and stable enough that all three CI-lo
+    # checks clear -- a real behavioral pass, not just internal consistency.
+    assert row.mn_sharpe_ci_lo is not None and row.mn_sharpe_ci_lo > 0
+    assert row.half1_ci_lo is not None and row.half1_ci_lo > 0
+    assert row.half2_ci_lo is not None and row.half2_ci_lo > 0
+    assert row.passes is True
+    # And the pass flag is EXACTLY that three-way conjunction (spec sections
+    # 3-4), not some other derivation.
+    assert row.passes == (
+        row.mn_sharpe_ci_lo is not None and row.mn_sharpe_ci_lo > 0
+        and row.half1_ci_lo is not None and row.half1_ci_lo > 0
+        and row.half2_ci_lo is not None and row.half2_ci_lo > 0
+    )
+
+
+def test_market_neutral_leaderboard_reports_na_for_unresolvable_universe(tmp_path):
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    log_trial(journal, kind="discovery",
+              config=trial_config("mom21", "largecap:gone", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=8.0, alpha_t=3.0, p=0.01))
+    rows = build_market_neutral_leaderboard(
+        journal, _universe(tmp_path), make_factors(),
+    )
+    assert len(rows) == 1
+    assert rows[0].error is not None and "unknown universe" in rows[0].error
+    assert rows[0].mn_sharpe is None and rows[0].passes is False
+
+
+def test_market_neutral_leaderboard_reports_na_for_unknown_signal(tmp_path):
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    log_trial(journal, kind="discovery",
+              config=trial_config("no_longer_exists", "largecap", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=8.0, alpha_t=3.0, p=0.01))
+    rows = build_market_neutral_leaderboard(
+        journal, _universe(tmp_path), make_factors(),
+        panel_factory=lambda _u, _f: make_panel(),
+    )
+    assert len(rows) == 1
+    assert rows[0].error is not None and "unknown signal" in rows[0].error
+
+
+def test_market_neutral_leaderboard_sorts_by_ci_lo_with_na_last(tmp_path):
+    from trading.alphasearch.sweep import log_trial, trial_config
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21", "rev5"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    log_trial(journal, kind="discovery",
+              config=trial_config("gone", "largecap", WINDOW),
+              ts="t1", result=_result_like(alpha_annual_pct=1.0, alpha_t=1.0, p=0.5))
+    rows = build_market_neutral_leaderboard(
+        journal, _universe(tmp_path), factors,
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 3
+    ranked = [r for r in rows if r.error is None]
+    assert len(ranked) == 2
+    assert ranked[0].mn_sharpe_ci_lo >= ranked[1].mn_sharpe_ci_lo
+    assert rows[-1].error is not None   # the n/a row sorts last
+
+
+def test_market_neutral_leaderboard_is_deterministic_across_calls(tmp_path):
+    # Same seed default (seed=0): re-running the leaderboard (a display, no
+    # re-journaling) must reproduce identical CI bounds.
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW,
+              panel_factory=lambda _u, _f: panel)
+    kwargs = dict(panel_factory=lambda _u, _f: panel)
+    first = build_market_neutral_leaderboard(journal, _universe(tmp_path), factors, **kwargs)
+    second = build_market_neutral_leaderboard(journal, _universe(tmp_path), factors, **kwargs)
+    assert first == second
+
+
+def test_market_neutral_row_is_a_frozen_dataclass_with_the_spec_fields():
+    import dataclasses
+
+    row = MarketNeutralRow(
+        signal="s", universe="u", window="w", top_n=None, config_hash="h",
+        mn_sharpe=None, mn_sharpe_ci_lo=None, mn_sharpe_ci_hi=None,
+        mn_total_return=None, borrow_drag_bps=None, spread_drag_bps=None,
+        half1_ci_lo=None, half2_ci_lo=None, passes=False, error="boom",
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        row.signal = "other"    # frozen
