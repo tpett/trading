@@ -7,6 +7,7 @@ from trading.alphasearch.panel import BAR_COLUMNS, PanelData
 from trading.alphasearch.sweep import UniverseSpec, build_universe_panel
 from trading.venues.universes.downcap_membership import (
     MEMBERSHIP_COLUMNS,
+    downcap_universes,
     load_band_membership,
 )
 
@@ -109,3 +110,34 @@ def test_universespec_partial_membership_config_raises(tmp_path):
     )
     panel = build_universe_panel(both)
     assert panel.membership == {"SML": (("2019-01-01", ""),)}
+
+
+def _write_full_membership(path):
+    rows = [
+        ("micro", "MIC", "2019-01-01", ""),
+        ("small", "SML", "2019-01-01", ""),
+    ]
+    pd.DataFrame(rows, columns=MEMBERSHIP_COLUMNS).to_csv(path, index=False)
+
+
+def test_downcap_universes_registers_three_specs(tmp_path):
+    path = tmp_path / "band_membership.csv"
+    _write_full_membership(path)
+    specs = downcap_universes(tmp_path, membership_path=path)
+    assert set(specs) == {"downcap", "downcap:small", "downcap:micro"}
+    # Full band = union of both names; sub-bands partition it.
+    assert set(specs["downcap"].symbols) == {"MIC", "SML"}
+    assert set(specs["downcap:small"].symbols) == {"SML"}
+    assert set(specs["downcap:micro"].symbols) == {"MIC"}
+    # Each carries its band filter + the membership CSV + fresh cache dir.
+    assert specs["downcap:micro"].bands == ("micro",)
+    assert specs["downcap"].bands == ("micro", "small")
+    assert specs["downcap"].membership_intervals == path
+    assert specs["downcap"].cache_dir == tmp_path / "data" / "equities-downcap-tiingo"
+    assert specs["downcap"].samples is None            # options signals refused
+
+
+def test_downcap_universes_absent_csv_returns_empty(tmp_path):
+    # No membership CSV built yet -> no specs (the leaderboard/sweep then just
+    # omits them, like segments do when their inputs are absent).
+    assert downcap_universes(tmp_path, membership_path=tmp_path / "missing.csv") == {}

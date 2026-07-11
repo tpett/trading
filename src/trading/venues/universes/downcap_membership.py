@@ -178,6 +178,49 @@ def load_band_membership(
     return {s: tuple(sorted(iv)) for s, iv in out.items()}
 
 
+_DOWNCAP_UNIVERSES = {
+    "downcap": ("micro", "small"),
+    "downcap:small": ("small",),
+    "downcap:micro": ("micro",),
+}
+
+
+def downcap_universes(
+    root: Path, *, membership_path: Path | None = None
+) -> dict:
+    """The three frozen down-cap UniverseSpecs (spec section 2). Each shares
+    the fresh bars cache and the band-membership CSV; identity is the NAME
+    (like segments). `samples=None` -> options signals refused; fundamentals
+    attach when the store exists so the fundamentals family sweeps the band to
+    the extent companyfacts covers it. Returns {} when the membership CSV is
+    absent (nothing built yet) -- callers then simply omit these universes,
+    mirroring segment_universes' absent-inputs behavior."""
+    from trading.alphasearch.sweep import UniverseSpec  # lazy: avoids import cycle
+
+    cache_dir = root / "data" / "equities-downcap-tiingo"
+    if membership_path is None:
+        membership_path = cache_dir / "band_membership.csv"
+    if not membership_path.exists():
+        return {}
+    fundamentals_dir = root / "data" / "fundamentals" / "equities"
+    specs: dict[str, UniverseSpec] = {}
+    for name, bands in _DOWNCAP_UNIVERSES.items():
+        members = load_band_membership(membership_path, frozenset(bands))
+        symbols = tuple(sorted(members))
+        if not symbols:
+            continue  # no names in this band's CSV yet -> omit (never empty spec)
+        specs[name] = UniverseSpec(
+            name=name,
+            cache_dir=cache_dir,
+            samples=None,                               # options signals refused
+            fundamentals_dir=fundamentals_dir if fundamentals_dir.is_dir() else None,
+            symbols=symbols,                            # ever-in-band union (bar loading)
+            membership_intervals=membership_path,       # per-date filter
+            bands=bands,
+        )
+    return specs
+
+
 def write_membership(
     build: MembershipBuild, membership_path: Path, diagnostics_path: Path
 ) -> None:
