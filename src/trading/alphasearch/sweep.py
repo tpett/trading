@@ -801,8 +801,8 @@ class MarketNeutralRow:
 
 def _half_ci_los(charged: pd.Series, *, seed: int) -> tuple[float, float]:
     """Sub-period halves (spec section 4's OOS proxy): split the cost-
-    charged series at its midpoint DATE (a calendar split of the discovery
-    window, not an observation-count split), Sharpe-CI each half
+    charged series at its midpoint OBSERVATION (charged.index[len//2]) into
+    two non-overlapping halves covering the window, Sharpe-CI each half
     independently with the SAME seed as the full-window call (determinism),
     and return just the lower CI bound of each -- the only number the pass
     rule (spec section 3) reads. NaN halves (too few observations) fail the

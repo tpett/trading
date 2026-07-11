@@ -136,7 +136,7 @@ def test_sharpe_ci_agrees_with_closed_form_se_on_iid_normal():
     se = closed_form_sharpe_se(point, len(r))
     boot_half_width = (hi - lo) / 2.0
     closed_form_half_width = 1.96 * se
-    assert boot_half_width == pytest.approx(closed_form_half_width, rel=0.35)
+    assert boot_half_width == pytest.approx(closed_form_half_width, rel=0.10)
     # The point estimate sits inside its own CI.
     assert lo < point < hi
 
@@ -170,9 +170,43 @@ def test_sharpe_ci_nan_below_two_observations():
 
 
 def test_closed_form_sharpe_se_matches_the_frozen_formula():
-    # sqrt((1 + 0.5*SR^2) / T), T in years.
+    # Lo (2002): sqrt((1 + 0.5*SR^2) / T) requires SR and T in the SAME
+    # frequency. `sharpe` here is ANNUALIZED and `n_obs` gives T in years,
+    # so the SR^2 term must be de-annualized (divided by TRADING_DAYS=252)
+    # before combining with T in years -- computed independently here from
+    # the daily-frequency form, not copied from the implementation:
+    #   daily SR = SR_ann / sqrt(252); T_days = n_obs
+    #   SE_daily = sqrt((1 + 0.5*sr_daily^2) / n_obs)
+    #   SE_ann = SE_daily * sqrt(252)   (SE scales with sqrt(frequency))
+    # sr=1.2, n_obs=1260 (5 years at 252 sessions/yr):
+    #   sr_daily = 1.2 / sqrt(252) = 0.07559289...
+    #   SE_daily = sqrt((1 + 0.5*0.07559289^2) / 1260) = sqrt(1.0028571/1260)
+    #            = 0.02821203...
+    #   SE_ann = 0.02821203 * sqrt(252) = 0.44785202...
     sr, n_obs = 1.2, 1260  # 5 years at 252 sessions/yr
-    expected = math.sqrt((1.0 + 0.5 * sr * sr) / (n_obs / 252.0))
+    sr_daily = sr / math.sqrt(252)
+    se_daily = math.sqrt((1.0 + 0.5 * sr_daily * sr_daily) / n_obs)
+    expected = se_daily * math.sqrt(252)
+    assert expected == pytest.approx(0.44785201637530736)
+    assert closed_form_sharpe_se(sr, n_obs) == pytest.approx(expected)
+
+
+def test_closed_form_sharpe_se_high_sharpe_discriminates_old_bug():
+    # At high annualized Sharpe the old (buggy) formula -- which mixed
+    # annualized SR with T in years without de-annualizing SR^2 -- was
+    # ~72% too wide. sr=2.0, T=4 years (n_obs=1008), independently derived
+    # the same way as the case above:
+    #   sr_daily = 2.0 / sqrt(252) = 0.12598816...
+    #   SE_daily = sqrt((1 + 0.5*0.12598816^2) / 1008) = sqrt(1.0079365/1008)
+    #            = 0.03162178...
+    #   SE_ann = 0.03162178 * sqrt(252) = 0.50198021...
+    # The buggy formula sqrt((1+0.5*4)/4) = sqrt(0.75) = 0.86603 would FAIL
+    # this assertion (0.86603 vs ~0.502, a ratio of 1.725x).
+    sr, n_obs = 2.0, 1008  # 4 years at 252 sessions/yr
+    sr_daily = sr / math.sqrt(252)
+    se_daily = math.sqrt((1.0 + 0.5 * sr_daily * sr_daily) / n_obs)
+    expected = se_daily * math.sqrt(252)
+    assert expected == pytest.approx(0.5019802057692384)
     assert closed_form_sharpe_se(sr, n_obs) == pytest.approx(expected)
 
 

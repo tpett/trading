@@ -152,17 +152,20 @@ def deflated_sharpe(
 # --------------------------------------------------------------------------- #
 def closed_form_sharpe_se(sharpe: float, n_obs: int) -> float:
     """Closed-form asymptotic SE of an ANNUALIZED Sharpe estimate (Lo 2002):
-    sqrt((1 + 0.5*SR^2) / T), T in YEARS = n_obs / TRADING_DAYS. A cross-
-    check reference for sharpe_ci's bootstrap CI (spec section 3), never a
-    substitute for it: this formula assumes iid normal daily returns, while
-    the bootstrap is nonparametric and captures whatever serial correlation
-    the block resampling preserves. NaN when n_obs < 1 (no defined T) or
-    `sharpe` is NaN.
+    the per-period result sqrt((1 + 0.5*SR^2) / T) requires SR and T in the
+    SAME frequency, so with `sharpe` annualized and T in years the SR^2 term
+    must be de-annualized by dividing by TRADING_DAYS before combining with
+    T in years: sqrt((1 + 0.5*SR^2/TRADING_DAYS) / T), T in YEARS = n_obs /
+    TRADING_DAYS. A cross-check reference for sharpe_ci's bootstrap CI (spec
+    section 3), never a substitute for it: this formula assumes iid normal
+    daily returns, while the bootstrap is nonparametric and captures
+    whatever serial correlation the block resampling preserves. NaN when
+    n_obs < 1 (no defined T) or `sharpe` is NaN.
     """
     if n_obs < 1 or math.isnan(sharpe):
         return float("nan")
     years = n_obs / TRADING_DAYS
-    return math.sqrt((1.0 + 0.5 * sharpe * sharpe) / years)
+    return math.sqrt((1.0 + 0.5 * sharpe * sharpe / TRADING_DAYS) / years)
 
 
 def _stationary_bootstrap_indices(
