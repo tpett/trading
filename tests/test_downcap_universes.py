@@ -137,6 +137,24 @@ def test_downcap_universes_registers_three_specs(tmp_path):
     assert specs["downcap"].samples is None            # options signals refused
 
 
+def test_downcap_universes_fallback_membership_yields_only_downcap_dv(tmp_path):
+    # A `--no-cap-band` (dollar-volume-only fallback, spec section 4) membership
+    # carries band == FALLBACK_BAND ("downcap") for every tradeable name and NO
+    # micro/small rows. downcap_universes must then register ONLY the single
+    # `downcap-dv` universe (the three cap universes are empty -> omitted).
+    path = tmp_path / "band_membership.csv"
+    rows = [
+        ("downcap", "AAA", "2019-01-01", ""),
+        ("downcap", "BBB", "2019-01-01", "2021-01-01"),
+    ]
+    pd.DataFrame(rows, columns=MEMBERSHIP_COLUMNS).to_csv(path, index=False)
+    specs = downcap_universes(tmp_path, membership_path=path)
+    assert set(specs) == {"downcap-dv"}          # cap universes empty -> omitted
+    assert specs["downcap-dv"].bands == ("downcap",)
+    assert set(specs["downcap-dv"].symbols) == {"AAA", "BBB"}
+    assert specs["downcap-dv"].membership_intervals == path
+
+
 def test_downcap_universes_absent_csv_returns_empty(tmp_path):
     # No membership CSV built yet -> no specs (the leaderboard/sweep then just
     # omits them, like segments do when their inputs are absent).

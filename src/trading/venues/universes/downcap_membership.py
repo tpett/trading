@@ -199,6 +199,13 @@ _DOWNCAP_UNIVERSES = {
     "downcap": ("micro", "small"),
     "downcap:small": ("small",),
     "downcap:micro": ("micro",),
+    # Dollar-volume-only fallback universe (spec section 4, developer-pre-approved):
+    # populated only from a `build_downcap_membership --no-cap-band` membership CSV,
+    # whose rows all carry band == FALLBACK_BAND ("downcap"). With a normal cap-mode
+    # membership these rows are absent, so this universe is empty -> omitted by
+    # downcap_universes (which skips empty specs); with a --no-cap-band membership the
+    # three cap universes above are empty/omitted and only this one populates.
+    "downcap-dv": (FALLBACK_BAND,),
 }
 
 
