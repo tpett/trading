@@ -1,6 +1,10 @@
 """Corwin-Schultz spread estimator + spread-based rebalance charges + the SPY
 benchmark (R1 gate amendment spec section 3): hand-computable fixtures, a
-real-AAPL sanity check, and the cost-charging/benchmark arithmetic."""
+real-AAPL sanity check, and the cost-charging/benchmark arithmetic.
+
+Also the market-neutral gate's short-borrow model + both-legs cost charging
+(R6 Stage 1 amendment, docs/superpowers/specs/2026-07-11-market-neutral-
+gate-amendment.md sections 2 and 6)."""
 
 from __future__ import annotations
 
@@ -11,19 +15,25 @@ import pandas as pd
 import pytest
 
 from trading.alphasearch.costs import (
+    BORROW_CAP_BPS,
     DEFAULT_SPY_CACHE_DIR,
+    GC_FLOOR_BPS,
     SPREAD_CAP,
     SPREAD_FLOOR,
     SPY_SYMBOL,
     apply_rebalance_charges,
     cost_charged_lo,
+    cost_charged_market_neutral,
     effective_spread,
     load_spy_closes,
+    short_borrow_bps,
+    short_borrow_daily_drag,
     spread_rebalance_charges,
     spy_benchmark,
     trailing_effective_spread,
 )
 from trading.alphasearch.panel import PanelData
+from trading.alphasearch.sort import SortResult
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 AAPL_CACHE = REPO_ROOT / "data" / "equities-tiingo" / "AAPL.parquet"
@@ -234,3 +244,249 @@ def test_spy_benchmark_restricts_to_the_window():
 
 def test_default_spy_cache_dir_is_the_largecap_tiingo_cache():
     assert DEFAULT_SPY_CACHE_DIR == Path("data") / "equities-tiingo"
+
+
+# --------------------------------------------------------------------------- #
+# spread_rebalance_charges(leg="bottom"): the short leg reuses the IDENTICAL
+# entry/exit half-spread construction as the long leg (spec section 2).
+# --------------------------------------------------------------------------- #
+def test_spread_rebalance_charges_leg_bottom_mirrors_leg_top():
+    # Same fixture as test_spread_rebalance_charges_entries_and_exits_hand_
+    # computed, but the SAME (A,B)->(A,C) turnover happens on the SHORT leg
+    # (the `bottom` slot of the membership tuple) instead of `top`: leg=
+    # "bottom" must produce byte-identical charges to what leg="top" would
+    # produce on the equivalent top-shaped rebalances -- proving it is the
+    # SAME machinery, not a parallel reimplementation.
+    panel = _panel_with_bars(["A", "B", "C"])
+    idx = panel.closes["A"].index
+    bottom_rebalances = (
+        (idx[3], (), ("A", "B")),
+        (idx[6], (), ("A", "C")),
+    )
+    top_rebalances = (
+        (idx[3], ("A", "B"), ()),
+        (idx[6], ("A", "C"), ()),
+    )
+    bottom_charges, bottom_skipped = spread_rebalance_charges(
+        panel, bottom_rebalances, leg="bottom"
+    )
+    top_charges, top_skipped = spread_rebalance_charges(panel, top_rebalances, leg="top")
+    assert bottom_skipped == top_skipped == 0
+    assert bottom_charges == top_charges
+
+
+def test_spread_rebalance_charges_rejects_unknown_leg():
+    panel = _panel_with_bars(["A", "B"])
+    idx = panel.closes["A"].index
+    with pytest.raises(ValueError, match="leg must be"):
+        spread_rebalance_charges(panel, ((idx[0], ("A",), ("B",)),), leg="sideways")
+
+
+# --------------------------------------------------------------------------- #
+# short_borrow_bps: the frozen borrow model (spec section 2)
+# --------------------------------------------------------------------------- #
+def test_short_borrow_bps_floor_median_and_monotonic():
+    assert short_borrow_bps(0.0) == pytest.approx(GC_FLOOR_BPS)
+    # k is fixed so the MEDIAN shorted name (pctile ~= 0.5, since a rank
+    # percentile is uniform on [0, 1]) pays ~1%/yr = 100bps.
+    assert short_borrow_bps(0.5) == pytest.approx(100.0)
+    lo, mid, hi = short_borrow_bps(0.1), short_borrow_bps(0.5), short_borrow_bps(0.9)
+    assert lo < mid < hi   # monotonic in illiquidity
+
+
+def test_short_borrow_bps_clamps_at_the_cap_for_out_of_domain_input():
+    # A well-formed [0, 1] percentile never reaches BORROW_CAP_BPS under this
+    # k (see costs.py docstring); the cap is a safety ceiling for an
+    # out-of-domain input (a percentile computed against a corrupted
+    # cross-section) -- exercised here directly since normal operation never
+    # binds it.
+    assert short_borrow_bps(100.0) == pytest.approx(BORROW_CAP_BPS)
+
+
+def test_short_borrow_bps_nan_in_nan_out():
+    assert math.isnan(short_borrow_bps(math.nan))
+
+
+# --------------------------------------------------------------------------- #
+# short_borrow_daily_drag / cost_charged_market_neutral: closed-form Amihud
+# fixture (the same constant-geometric-return / constant-dollar-volume trick
+# tests/test_amihud_ranker.py and tests/test_alphasearch_tier1.py use), so
+# every percentile below is EXACT, not approximated.
+# --------------------------------------------------------------------------- #
+RATE = 0.01
+N_BARS = 260  # >= 127 needed for the 126-valid-term amihud floor
+
+# Four names spanning a wide, exactly-orderable amihud_lambda range, so their
+# cross-sectional percentile (pandas .rank(pct=True) over 4 names) is exactly
+# 1.0 / 0.75 / 0.5 / 0.25 -- see test_amihud_ranker.py's identical trick.
+_GEOM_SPECS = [
+    ("AAA", 1e5),   # lambda = 1e-7 (most illiquid) -> percentile 1.0
+    ("BBB", 1e6),   # lambda = 1e-8 -> percentile 0.75
+    ("CCC", 1e7),   # lambda = 1e-9 -> percentile 0.5 (the MEDIAN short)
+    ("DDD", 1e8),   # lambda = 1e-10 (least illiquid) -> percentile 0.25
+]
+
+
+def _geom_bars(rate: float, dollar_volume: float, n: int = N_BARS,
+               start: str = "2020-01-02") -> pd.DataFrame:
+    idx = pd.date_range(start, periods=n, freq="B", tz="UTC")
+    close = pd.Series([100.0 * (1.0 + rate) ** i for i in range(n)], index=idx)
+    volume = dollar_volume / close
+    return pd.DataFrame(
+        {"open": close, "high": close * 1.001, "low": close * 0.999,
+         "close": close, "volume": volume, "div_cash": 0.0,
+         "split_factor": 1.0, "close_raw": close},
+        index=idx,
+    )
+
+
+def _geom_panel(specs=_GEOM_SPECS, n: int = N_BARS) -> PanelData:
+    bars = {name: _geom_bars(RATE, dv, n=n) for name, dv in specs}
+    closes = {name: frame["close"] for name, frame in bars.items()}
+    return PanelData(closes=closes, bars=bars, symbols=tuple(name for name, _ in specs))
+
+
+def test_short_borrow_daily_drag_hand_computed_median_short():
+    # Short leg = CCC alone (percentile exactly 0.5 by the closed-form
+    # construction) -> short_borrow_bps(0.5) = 100bps/yr -> a per-day rate of
+    # (100/1e4)/252 applied to every return day in the holding period.
+    panel = _geom_panel()
+    idx = panel.closes["AAA"].index
+    formation = idx[150]  # well past the 126-valid-term amihud floor
+    rebalances = ((formation, ("AAA",), ("CCC",)),)
+    ret_index = idx[(idx > formation)]
+    drag, skipped = short_borrow_daily_drag(panel, rebalances, ret_index)
+    assert skipped == 0
+    expected_daily = (short_borrow_bps(0.5) / 1e4) / 252.0
+    assert drag.to_numpy() == pytest.approx(expected_daily)
+
+
+def test_short_borrow_daily_drag_two_names_equal_weighted():
+    # Short leg = {AAA (pctile 1.0), DDD (pctile 0.25)} -> equal-weighted
+    # average of their two borrow rates, at 1/2 weight each.
+    panel = _geom_panel()
+    idx = panel.closes["AAA"].index
+    formation = idx[150]
+    rebalances = ((formation, ("BBB",), ("AAA", "DDD")),)
+    ret_index = idx[(idx > formation)]
+    drag, skipped = short_borrow_daily_drag(panel, rebalances, ret_index)
+    assert skipped == 0
+    expected = (
+        (short_borrow_bps(1.0) / 1e4) / 252.0 / 2
+        + (short_borrow_bps(0.25) / 1e4) / 252.0 / 2
+    )
+    assert drag.to_numpy() == pytest.approx(expected)
+
+
+def test_short_borrow_daily_drag_skips_and_counts_unmeasurable_illiquidity():
+    # A short name with too little history (< 126 valid amihud terms) has no
+    # computable percentile -- skipped and counted, $0 borrow for that name,
+    # never a fabricated rate.
+    panel = _geom_panel(specs=[("AAA", 1e5), ("SHORTHIST", 1e6)], n=N_BARS)
+    # Shrink SHORTHIST's own bars to under the 126-term floor.
+    thin = panel.bars["SHORTHIST"].iloc[:100]
+    panel = PanelData(
+        closes={**panel.closes, "SHORTHIST": thin["close"]},
+        bars={**panel.bars, "SHORTHIST": thin},
+        symbols=panel.symbols,
+    )
+    idx = panel.closes["AAA"].index
+    formation = idx[150]
+    rebalances = ((formation, ("AAA",), ("SHORTHIST",)),)
+    ret_index = idx[(idx > formation)]
+    drag, skipped = short_borrow_daily_drag(panel, rebalances, ret_index)
+    assert skipped == 1
+    assert (drag == 0.0).all()
+
+
+def test_short_borrow_daily_drag_is_pit_no_future_leakage():
+    # A future corporate action / future illiquidity dated AFTER the
+    # formation decision date must not change that holding period's borrow
+    # rate -- PanelView.bars truncates strictly at the decision date.
+    panel = _geom_panel()
+    idx = panel.closes["AAA"].index
+    formation = idx[150]
+    rebalances = ((formation, ("AAA",), ("CCC",)),)
+    ret_index = idx[(idx > formation) & (idx <= idx[180])]
+    baseline, _ = short_borrow_daily_drag(panel, rebalances, ret_index)
+
+    # Mutate CCC's volume (hence its amihud_lambda, hence its percentile)
+    # only on bars STRICTLY AFTER the formation date -- a "future illiquidity
+    # change" that must be invisible to a borrow rate fixed at formation.
+    mutated_ccc = panel.bars["CCC"].copy()
+    future_mask = mutated_ccc.index > formation
+    mutated_ccc.loc[future_mask, "volume"] *= 1000.0  # much more liquid, later
+    mutated_panel = PanelData(
+        closes={**panel.closes, "CCC": mutated_ccc["close"]},
+        bars={**panel.bars, "CCC": mutated_ccc},
+        symbols=panel.symbols,
+    )
+    mutated, _ = short_borrow_daily_drag(mutated_panel, rebalances, ret_index)
+    pd.testing.assert_series_equal(baseline, mutated)
+
+    # Sanity: the SAME mutation applied BEFORE formation (visible at the PIT
+    # cut) DOES change the rate -- proving this test is not vacuously
+    # insensitive to the mutation.
+    mutated_ccc_past = panel.bars["CCC"].copy()
+    past_mask = mutated_ccc_past.index <= formation
+    mutated_ccc_past.loc[past_mask, "volume"] *= 1000.0
+    mutated_past_panel = PanelData(
+        closes={**panel.closes, "CCC": mutated_ccc_past["close"]},
+        bars={**panel.bars, "CCC": mutated_ccc_past},
+        symbols=panel.symbols,
+    )
+    mutated_past, _ = short_borrow_daily_drag(mutated_past_panel, rebalances, ret_index)
+    assert not mutated_past.equals(baseline)
+
+
+def test_cost_charged_market_neutral_hand_computed():
+    # top=AAA (pctile 1.0, irrelevant to borrow), bottom=CCC (pctile 0.5 ->
+    # borrow 100bps/yr): net = gross - (long spread + short spread charges,
+    # via the SAME spread_rebalance_charges machinery cost_charged_lo uses)
+    # - (daily short-borrow accrual).
+    panel = _geom_panel()
+    idx = panel.closes["AAA"].index
+    formation = idx[150]
+    rebalances = ((formation, ("AAA",), ("CCC",)),)
+    ret_index = idx[(idx > formation) & (idx <= idx[170])]
+    # A deliberately non-degenerate gross series (not all-zero) so gross/net
+    # Sharpe are both finite and the decomposition is a real check, not a
+    # 0 - 0 = 0 tautology.
+    gross = pd.Series(
+        [0.001 if i % 2 == 0 else -0.0006 for i in range(len(ret_index))],
+        index=ret_index,
+    )
+    sort_result = SortResult(
+        ls=gross, lo=gross, turnover_monthly=0.0, skipped_dates=(),
+        n_dates=1, n_names_median=2.0, rebalances=rebalances,
+    )
+    charged, diagnostics = cost_charged_market_neutral(panel, sort_result)
+
+    long_charges, skipped_long = spread_rebalance_charges(panel, rebalances, leg="top")
+    short_charges, skipped_short = spread_rebalance_charges(panel, rebalances, leg="bottom")
+    borrow_drag, skipped_borrow = short_borrow_daily_drag(panel, rebalances, gross.index)
+    expected = apply_rebalance_charges(gross, long_charges)
+    expected = apply_rebalance_charges(expected, short_charges)
+    expected = expected - borrow_drag
+    pd.testing.assert_series_equal(charged, expected)
+
+    assert skipped_long == skipped_short == skipped_borrow == 0
+    assert diagnostics["skipped_no_spread_long"] == 0
+    assert diagnostics["skipped_no_spread_short"] == 0
+    assert diagnostics["skipped_no_illiquidity"] == 0
+    # The charged series is strictly worse than gross wherever a charge or
+    # borrow accrual landed -- costs never invent a tailwind.
+    assert (charged <= gross + 1e-15).all()
+    assert charged.iloc[0] < gross.iloc[0]     # the rebalance charge landed here
+    # Borrow rate hand-check: CCC's exact closed-form percentile is 0.5 (four
+    # names, lambda ordering AAA>BBB>CCC>DDD by construction), and every day
+    # in the window carries the SAME rate, so the annualized diagnostic
+    # exactly recovers short_borrow_bps(0.5) = 100bps/yr.
+    assert diagnostics["borrow_drag_bps"] == pytest.approx(short_borrow_bps(0.5), rel=1e-9)
+    assert diagnostics["gross_total_return"] == pytest.approx(
+        float((1.0 + gross).prod() - 1.0)
+    )
+    assert diagnostics["net_total_return"] == pytest.approx(
+        float((1.0 + charged).prod() - 1.0)
+    )
+    assert diagnostics["net_sharpe"] != diagnostics["gross_sharpe"]
