@@ -490,6 +490,103 @@ def test_long_only_leaderboard_downcap_merges_universes(tmp_path, monkeypatch, c
 
 
 # --------------------------------------------------------------------------- #
+# --market-neutral leaderboard (R6 Stage 1 market-neutral gate amendment)
+# --------------------------------------------------------------------------- #
+def _fake_market_neutral_rows():
+    from trading.alphasearch.sweep import MarketNeutralRow
+
+    return [
+        MarketNeutralRow(
+            signal="amihud", universe="midcap", window=DISCOVERY_WINDOW,
+            top_n=10, config_hash="mn123", mn_sharpe=1.1, mn_sharpe_ci_lo=0.3,
+            mn_sharpe_ci_hi=1.9, mn_total_return=0.22, borrow_drag_bps=80.0,
+            spread_drag_bps=150.0, half1_ci_lo=0.1, half2_ci_lo=0.2,
+            passes=True, error=None,
+        ),
+        MarketNeutralRow(
+            signal="rvol21", universe="largecap", window=DISCOVERY_WINDOW,
+            top_n=None, config_hash="mn456", mn_sharpe=None, mn_sharpe_ci_lo=None,
+            mn_sharpe_ci_hi=None, mn_total_return=None, borrow_drag_bps=None,
+            spread_drag_bps=None, half1_ci_lo=None, half2_ci_lo=None,
+            passes=False, error="unknown universe 'largecap:gone'",
+        ),
+    ]
+
+
+def test_market_neutral_leaderboard_renders_table(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.sweep.build_market_neutral_leaderboard",
+                        lambda *a, **k: _fake_market_neutral_rows())
+    rc = cli.main(["alphasearch", "leaderboard", "--market-neutral",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "amihud" in out and "PASS" in out
+    assert "unknown universe" in out
+    assert "CASH, not SPY" in out
+
+
+def test_market_neutral_leaderboard_json(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.sweep.build_market_neutral_leaderboard",
+                        lambda *a, **k: _fake_market_neutral_rows())
+    rc = cli.main(["alphasearch", "leaderboard", "--market-neutral",
+                   "--journal-dir", str(tmp_path), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["rows"]) == 2
+    assert payload["rows"][0]["signal"] == "amihud"
+    assert payload["rows"][0]["passes"] is True
+    assert payload["rows"][1]["error"] is not None
+
+
+def test_market_neutral_leaderboard_does_not_require_spy(tmp_path, capsys, monkeypatch):
+    # Market-neutral's benchmark is cash, not SPY (spec section 2): unlike
+    # --long-only, it must succeed with NO SPY cache stubbed at all.
+    monkeypatch.setattr("trading.alphasearch.costs.load_spy_closes",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("trading.alphasearch.evaluate.load_factors",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("trading.alphasearch.sweep.build_market_neutral_leaderboard",
+                        lambda *a, **k: [])
+    rc = cli.main(["alphasearch", "leaderboard", "--market-neutral",
+                   "--journal-dir", str(tmp_path)])
+    assert rc == 0
+
+
+def test_market_neutral_leaderboard_downcap_merges_universes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.chdir(tmp_path)
+    _write_downcap_membership(tmp_path)
+    captured = {}
+
+    def fake_build_market_neutral(journal, universes, factors):
+        captured["names"] = set(universes)
+        return []
+
+    monkeypatch.setattr(
+        "trading.alphasearch.sweep.build_market_neutral_leaderboard",
+        fake_build_market_neutral,
+    )
+    rc = cli.main(["alphasearch", "leaderboard", "--market-neutral", "--downcap",
+                   "--journal-dir", str(tmp_path / "journal"), "--json"])
+    assert rc == 0
+    assert {"downcap", "downcap:small", "downcap:micro"} <= captured["names"]
+
+
+def test_long_only_and_market_neutral_flags_default_off():
+    # Bit-identity guard (spec section 6, PARAMOUNT): neither new flag is set
+    # by default -- parsing the base command must not accidentally flip them.
+    args = cli.build_parser().parse_args(["alphasearch", "leaderboard"])
+    assert args.long_only is False
+    assert args.market_neutral is False
+
+
+# --------------------------------------------------------------------------- #
 # robustness (Piece 3)
 # --------------------------------------------------------------------------- #
 

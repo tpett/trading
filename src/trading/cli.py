@@ -202,6 +202,17 @@ def build_parser() -> argparse.ArgumentParser:
         "own window (R1 gate amendment); trials that can't be re-derived "
         "from current data show honestly as n/a",
     )
+    alphasearch.add_argument(
+        "--market-neutral",
+        dest="market_neutral",
+        action="store_true",
+        help="leaderboard only: rank every journaled discovery trial by "
+        "cost-charged market-neutral (long/short) Sharpe + bootstrap CI vs "
+        "cash (R6 market-neutral gate amendment); honors the trial's "
+        "journaled top_n (concentration axis) and composes with "
+        "--downcap/--segments; trials that can't be re-derived from current "
+        "data show honestly as n/a",
+    )
     alphasearch.add_argument("--journal-dir", default="journal", help="journal root")
     alphasearch.add_argument(
         "--factors-dir", default="data/factors", help="Ken French factor cache directory"
@@ -907,6 +918,30 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
             rows = engine.build_long_only_leaderboard(journal, universes, factors, spy_closes)
             _print_long_only_leaderboard(rows, as_json=args.json)
             return 0
+        if args.market_neutral:
+            factors = _load_alphasearch_factors(args)
+            if factors is None:
+                return 1
+            universes = engine.default_universes(Path("."))
+            try:
+                from trading.alphasearch.segments import segment_universes
+
+                seg_universes, _excluded = segment_universes(Path("."))
+                universes = {**universes, **seg_universes}
+            except engine.SweepError:
+                # Segment universes unavailable (no SIC map synced, etc.):
+                # their trials still show up, honestly n/a below, rather
+                # than aborting the whole view.
+                pass
+            if args.downcap:
+                from trading.venues.universes.downcap_membership import (
+                    downcap_universes,
+                )
+
+                universes = {**universes, **downcap_universes(Path("."))}
+            rows = engine.build_market_neutral_leaderboard(journal, universes, factors)
+            _print_market_neutral_leaderboard(rows, as_json=args.json)
+            return 0
         # The auditable view: recomputed from the journal alone, no new trials.
         rows, count = engine.build_leaderboard(journal)
         _print_alphasearch_leaderboard(rows, count, as_json=args.json)
@@ -1268,6 +1303,58 @@ def _print_long_only_leaderboard(rows, *, as_json: bool) -> None:
         "n/a (data/registry has changed since the trial was journaled; the "
         "raw daily series is never stored, only re-derivable from current "
         "caches). SPY series: data/equities-tiingo/SPY.parquet.",
+        highlight=False,
+    )
+
+
+def _print_market_neutral_leaderboard(rows, *, as_json: bool) -> None:
+    if as_json:
+        from dataclasses import asdict
+
+        print(json.dumps({"rows": [asdict(r) for r in rows]}))
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    def num(value, fmt="{:+.2f}"):
+        return "-" if value is None else fmt.format(value)
+
+    def bps(value):
+        return "-" if value is None else f"{value:.0f}"
+
+    def pct(value):
+        return "-" if value is None else f"{value:+.1%}"
+
+    console = Console() if sys.stdout.isatty() else Console(width=200)
+    table = Table(
+        title=f"alphasearch leaderboard — market-neutral L/S (cost-charged "
+        f"vs cash, {len(rows)} discovery trials)"
+    )
+    for col in ["signal", "universe", "window", "top_n", "MN Sharpe",
+                "CI lo", "CI hi", "MN total", "borrow bps", "spread bps",
+                "half1 lo", "half2 lo", "PASS", "n/a reason"]:
+        table.add_column(col, justify="right")
+    for r in rows:
+        table.add_row(
+            r.signal, r.universe, r.window,
+            "-" if r.top_n is None else str(r.top_n),
+            num(r.mn_sharpe), num(r.mn_sharpe_ci_lo), num(r.mn_sharpe_ci_hi),
+            pct(r.mn_total_return), bps(r.borrow_drag_bps), bps(r.spread_drag_bps),
+            num(r.half1_ci_lo), num(r.half2_ci_lo),
+            "PASS" if r.passes else "-",
+            r.error or "",
+        )
+    console.print(table)
+    console.print(
+        f"{sum(1 for r in rows if r.error is not None)}/{len(rows)} trials "
+        "n/a (data/registry has changed since the trial was journaled; the "
+        "raw daily series is never stored, only re-derivable from current "
+        "caches). Benchmark is CASH, not SPY: market-neutral is self-"
+        "financing and has no market benchmark. PASS requires the 95% "
+        "Sharpe CI lower bound > 0 on the full discovery window AND both "
+        "discovery halves (sub-period OOS proxy, spec sections 3-4) — a "
+        "positive point Sharpe alone does not pass.",
         highlight=False,
     )
 
