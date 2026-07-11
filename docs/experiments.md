@@ -927,11 +927,45 @@ delisted names are retained on equal footing. Fallback verdict: **GO** —
 survivorship 24.7% ≥ 15% ✓, breadth **4,443 tradeable names/month** ✓,
 shares-coverage non-gating. This defines a single `downcap-dv` universe.
 
-**Phase-B long-only-vs-SPY result:** _(pending — the sweep runs next, on the
-`downcap-dv` dollar-volume-only universe. Pre-registered primary hypothesis:
-`momentum_v1`'s long-only top-quintile series under the R1 cost-charged
-long-only-vs-SPY gate; the full signal battery runs alongside, exploratory,
-BH-FDR counted.)_
+**Phase-B result (2026-07-11): the momentum thesis is NOT confirmed —
+momentum ties SPY here too; the in-sample standouts are illiquidity + beta,
+consistent with the overfitting surface, not a new tradeable edge.** The
+sweep ran 18 bars-only signals on the `downcap-dv` universe (the fundamentals
+family was excluded — `downcap_universes` currently wires `fundamentals_dir`
+to the INDEX store, a known bug to fix before any fundamentals sweep on
+down-cap; options/insider unsupported). Cost-charged long-only vs SPY over
+2019-01-01..2023-12-31 (SPY 0.80 / +106% on the full window):
+
+- **Pre-registered momentum primary — a wash, exactly as R2 (§14) predicted
+  for the simple construction.** `mom252` (12-month) 0.74 vs SPY 0.73 (barely
+  beats); `mom_12_2` 0.72, `mom126` 0.75, `mom63` 0.51, `mom21` 0.50 — all at
+  or below SPY. Simple momentum *matches* the market in the down-cap universe
+  just as it does in large-caps; the account's smallness does NOT turn
+  momentum into a market-beater. **The R3 thesis is refuted for momentum.**
+- **In-sample standouts (necessary-not-sufficient, NOT promotions):**
+  `amihud` (illiquidity) 1.25 / +270%, `beta` 1.15 / +144%, `ind_mom` 0.86,
+  `vol_trend` 0.83, `mom252` 0.74 clear the beats-SPY bar in-sample. Read them
+  skeptically: (a) this is the DISCOVERY window, where the R1 re-read (§13)
+  showed ~45% of ALL trials beat SPY — an in-sample beat is the overfitting
+  surface, not evidence; (b) `amihud` is the program's one known real factor,
+  and its tradeable long-only form was ALREADY refuted out-of-sample in
+  mid-caps (0.16, § above) — down-cap changing that is a holdout question, not
+  answered here; (c) `beta` beating in a 2019–2021 bull window is a beta tilt,
+  not alpha; (d) the microcap-illiquidity artifact is loud — `rev5` posts
+  **+3854%** total return at a mediocre 0.49 Sharpe, the classic thin-name
+  in-sample explosion, so the large totals (`amihud` +270% included) are not
+  tradeable at any real size.
+- **BH-FDR** runs across all 964 deduped journaled trials as always; these 18
+  are counted. Classical-OLS-SE caveat applies (t inflated 10–30% vs HAC).
+
+**Net:** R3 answers its own question — a simple momentum tilt does NOT beat
+SPY in the survivorship-free down-cap universe (it ties, like everywhere
+else), so the capacity-edge-for-momentum thesis is refuted. The only thing
+that "beats" in-sample is illiquidity (amihud), which the program already
+knows is real-but-untradeable-long-only and OOS-refuted, plus beta. No signal
+is promoted; none is battery-tested or holdout-checked here. The follow-ups
+(if any): a market-neutral amihud construction (its own spec), and fixing the
+down-cap fundamentals-store wiring to sweep the fundamentals family.
 
 **Holdout: unspent.** No trial has touched the reserved 2024+ holdout; R3
 spends none of it (spec §7). Next: register the `downcap-dv` universe from a
