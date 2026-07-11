@@ -834,6 +834,79 @@ testing for a long-only account is a **simple** momentum tilt, not the
 inherited wrapper — which is exactly what R3 (down-cap universe) and R4
 (SPY-plus-tilt paper control) should carry. The holdout remains unspent.
 
+## 15. R3 — down-cap / illiquid universe (built, not yet run)
+
+**STUB — written BEFORE the sweep runs.** This section records the
+pre-registered thesis, the frozen construction, and the frozen GO/NO-GO gate
+for R3 (design: `docs/superpowers/specs/2026-07-10-downcap-universe-design.md`;
+plan: `docs/superpowers/plans/2026-07-10-downcap-universe.md`). The code is
+built and unit-tested
+(`src/trading/venues/universes/downcap_{roster,band,backfill,membership,verify}.py`,
+six dedicated test files plus additions to the alphasearch panel tests); the
+overnight bar+shares backfill and the sweep run-book have **NOT** been
+executed on mac-m1. Every placeholder below is literally unfilled — this is a
+pre-registration record, not a result, and should not be read as one.
+
+**Pre-registered thesis.** R2 (§14) showed bare momentum only *ties* SPY in
+large-cap waters. R3 asks whether the identical simple, wrapper-free momentum
+tilt (the alphasearch long-only top-quintile series — equal weight, monthly
+rebalance, rank-exit) *beats* SPY in the $50M–$2B down-cap band, where a
+~$1k account's smallness is a capacity edge institutions cannot exploit: same
+construction, different universe, betting the account's size is an advantage
+rather than an irrelevance.
+
+**Frozen construction.**
+- **Roster:** survivorship-free — Tiingo's full historical
+  `supported_tickers` list (delisted names included), filtered
+  *structurally* only (asset type = Stock, currency = USD, major US
+  common-stock exchanges), never by performance.
+- **Band membership (dynamic, PIT, recomputed every monthly decision date
+  D):** a candidate is in-band at D iff ALL of (1) raw-price market cap =
+  `shares_outstanding(latest companyfacts row FILED ≤ D) × close_raw(≤ D)` ∈
+  **[$50M, $2B]** — the raw/unadjusted price, never the split/dividend-adjusted
+  `close` (the same look-ahead class as the fixed `div_yield` bug, §10); (2)
+  trailing-63-session Corwin-Schultz effective spread **≤ 2%**; (3)
+  trailing-63-session median dollar-volume **≥ $50,000/day**. A candidate
+  with no PIT shares is excluded at D — fail-closed, never a guessed cap.
+- **Three frozen universes:** `downcap` (full $50M–$2B band), `downcap:small`
+  ($300M–$2B), `downcap:micro` ($50M–$300M) — ordinary `UniverseSpec`s
+  sharing a fresh `data/equities-downcap-tiingo/` bar cache and a
+  `(band, symbol, start, end)` membership CSV (glossary: "Band-membership
+  interval CSV").
+
+**Phase-A GO/NO-GO gate (frozen, decided before any sweep; computed by
+`downcap_verify.compute_gate` from the diagnostics artifact).** Four
+criteria:
+1. **Survivorship present:** delisted names ≥ **15%** of in-band
+   candidate-months.
+2. **Shares-coverage:** ≥ **70%** of tradeable candidate-months have PIT
+   shares; below 70% is a NO-GO on the market-cap band, with an automatic,
+   developer-pre-approved fallback to a dollar-volume-only band (drop the cap
+   bound, keep the two tradeability screens).
+3. **Spread realism:** the 2% CS-spread screen must be a real filter (report
+   median/IQR/% ≤ 2%), not a no-op or a near-total cull.
+4. **Breadth:** ≥ **15** tradeable names in every month of the discovery
+   window (2019-01-01..2023-12-31), per universe; any universe with a
+   sub-15 month is dropped from the sweep — recorded, never silently
+   skipped.
+
+**Phase-A verdict:** _(pending — run the verification gate)_
+
+**Shares-coverage figure + dropped-names size/vintage skew:** _(pending — no
+backfill has run yet; the §2 missing-shares survivorship risk this gate
+exists to catch has not been measured)_
+
+**Phase-B long-only-vs-SPY result:** _(pending — the sweep has not run.
+Pre-registered primary hypothesis: `momentum_v1`'s long-only top-quintile
+series on each of the three universes, under the R1 cost-charged
+long-only-vs-SPY gate; the full signal battery runs alongside, exploratory,
+BH-FDR counted.)_
+
+**Holdout: unspent.** No trial has touched the reserved 2024+ holdout, and
+R3 is designed to spend none of it (spec §7). Next step is the overnight
+bar+shares backfill on mac-m1, then Phase A's written report and GO/NO-GO,
+then — only on a GO — Phase B's sweep.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
@@ -851,7 +924,8 @@ inherited wrapper — which is exactly what R3 (down-cap universe) and R4
 - **Liquidity-floored, survivorship-free breadth** — expand beyond the S&P 500
   by trailing dollar volume (a hard liquidity floor) rather than by adding an
   index, tested against the exp 4 negative result. Only worth it if exp 7 shows
-  the core edge survives.
+  the core edge survives. (Superseded/formalized by §15 R3's frozen down-cap
+  band construction, which has since been built but not yet run.)
 - **Earnings-aware entry blackout** — the earnings filter was dropped (stale
   yfinance dates); a point-in-time earnings history is now being accumulated
   from the Robinhood calendar to reinstate and backtest it.

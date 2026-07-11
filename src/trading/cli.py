@@ -173,6 +173,12 @@ def build_parser() -> argparse.ArgumentParser:
         "the exclusions report (sweep only)",
     )
     alphasearch.add_argument(
+        "--downcap",
+        action="store_true",
+        help="include the R3 down-cap universes (needs the band_membership.csv "
+        "from Phase A)",
+    )
+    alphasearch.add_argument(
         "--signals",
         default=None,
         help="comma-separated signal subset for the sweep; every run is still "
@@ -882,6 +888,12 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
                 # their trials still show up, honestly n/a below, rather
                 # than aborting the whole view.
                 pass
+            if args.downcap:
+                from trading.venues.universes.downcap_membership import (
+                    downcap_universes,
+                )
+
+                universes = {**universes, **downcap_universes(Path("."))}
             rows = engine.build_long_only_leaderboard(journal, universes, factors, spy_closes)
             _print_long_only_leaderboard(rows, as_json=args.json)
             return 0
@@ -921,6 +933,19 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
                     f"({row['count']} names, {row['reason']})",
                     file=sys.stderr,
                 )
+        if args.downcap:
+            from trading.venues.universes.downcap_membership import downcap_universes
+
+            dc = downcap_universes(Path("."))
+            if not dc:
+                print(
+                    "ERROR: --downcap requested but no data/equities-downcap-tiingo/"
+                    "band_membership.csv found; build it with "
+                    "scripts/build_downcap_membership.py after Phase A backfill",
+                    file=sys.stderr,
+                )
+                return 1
+            universes = {**universes, **dc}
         if args.universe != "all":
             if args.universe not in universes:
                 known = ", ".join(sorted(universes))

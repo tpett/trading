@@ -334,6 +334,123 @@ def test_holdout_resolves_segment_universe_names_without_a_flag(
 
 
 # --------------------------------------------------------------------------- #
+# --downcap (R3)
+# --------------------------------------------------------------------------- #
+
+
+def _write_downcap_membership(root):
+    from trading.venues.universes.downcap_membership import MEMBERSHIP_COLUMNS
+
+    cache_dir = root / "data" / "equities-downcap-tiingo"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / "band_membership.csv"
+    rows = [
+        ("micro", "MIC", "2019-01-01", ""),
+        ("small", "SML", "2019-01-01", ""),
+    ]
+    pd.DataFrame(rows, columns=MEMBERSHIP_COLUMNS).to_csv(path, index=False)
+    return path
+
+
+def test_sweep_downcap_merges_the_three_universes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.chdir(tmp_path)
+    _write_downcap_membership(tmp_path)
+    captured = {}
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        captured["names"] = set(universes)
+        return [], len(universes)
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--downcap",
+                   "--journal-dir", str(tmp_path / "journal"), "--json"])
+    assert rc == 0
+    assert captured["names"] == {
+        "largecap", "midcap", "downcap", "downcap:small", "downcap:micro",
+    }
+
+
+def test_sweep_downcap_universe_flag_selects_a_single_downcap_universe(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.chdir(tmp_path)
+    _write_downcap_membership(tmp_path)
+    captured = {}
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        captured["names"] = set(universes)
+        return [], len(universes)
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--downcap",
+                   "--universe", "downcap:micro",
+                   "--journal-dir", str(tmp_path / "journal"), "--json"])
+    assert rc == 0
+    assert captured["names"] == {"downcap:micro"}
+
+
+def test_sweep_downcap_missing_membership_csv_is_an_actionable_error(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["alphasearch", "sweep", "--downcap",
+                   "--journal-dir", str(tmp_path / "journal")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "band_membership.csv" in err
+    assert "build_downcap_membership.py" in err
+
+
+def test_sweep_without_downcap_flag_omits_downcap_universes(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.chdir(tmp_path)
+    _write_downcap_membership(tmp_path)
+    captured = {}
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        captured["names"] = set(universes)
+        return [], len(universes)
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--journal-dir", str(tmp_path / "journal")])
+    assert rc == 0
+    assert captured["names"] == {"largecap", "midcap"}
+
+
+def test_long_only_leaderboard_downcap_merges_universes(tmp_path, monkeypatch, capsys):
+    _stub_spy(monkeypatch)
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    monkeypatch.chdir(tmp_path)
+    _write_downcap_membership(tmp_path)
+    captured = {}
+
+    def fake_build_long_only(journal, universes, factors, spy_closes):
+        captured["names"] = set(universes)
+        return []
+
+    monkeypatch.setattr(
+        "trading.alphasearch.sweep.build_long_only_leaderboard", fake_build_long_only
+    )
+    rc = cli.main(["alphasearch", "leaderboard", "--long-only", "--downcap",
+                   "--journal-dir", str(tmp_path / "journal"), "--json"])
+    assert rc == 0
+    assert {"downcap", "downcap:small", "downcap:micro"} <= captured["names"]
+
+
+# --------------------------------------------------------------------------- #
 # robustness (Piece 3)
 # --------------------------------------------------------------------------- #
 

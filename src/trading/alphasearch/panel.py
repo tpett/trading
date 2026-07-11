@@ -410,7 +410,15 @@ class PanelView:
 
     @property
     def symbols(self) -> tuple[str, ...]:
-        return self._panel.symbols
+        membership = self._panel.membership
+        if not membership:
+            return self._panel.symbols
+        iso = self.as_of.date().isoformat()
+        return tuple(
+            s
+            for s in self._panel.symbols
+            if any(a <= iso and (b == "" or iso < b) for (a, b) in membership.get(s, ()))
+        )
 
     def closes(self, symbol: str) -> pd.Series:
         """The symbol's closes up to and including as_of (empty if none)."""
@@ -578,6 +586,13 @@ class PanelData:
     # symbol -> frozen SEGMENTS sector (the 10-way partition); absent =
     # unmapped, and industry-relative signals then score NaN, never a guess.
     sectors: dict[str, str] = field(default_factory=dict)
+    # symbol -> tuple of (start_iso, end_iso) band-membership intervals (end
+    # EXCLUSIVE, "" = open). Non-empty ONLY for dynamic-membership universes
+    # (R3 down-cap): PanelView.symbols then restricts to names whose interval
+    # contains as_of, the point-in-time-correct expression of a band that a
+    # name enters/leaves as its cap and liquidity cross the bounds. Empty {}
+    # (the default) preserves Piece 1/2 behavior exactly.
+    membership: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
 
     def view(self, as_of: pd.Timestamp) -> PanelView:
         if as_of.tzinfo is None:
@@ -618,6 +633,7 @@ def build_panel(
     symbols: tuple[str, ...] | None = None,
     factors: pd.DataFrame | None = None,
     sectors: dict[str, str] | None = None,
+    membership: dict[str, tuple[tuple[str, str], ...]] | None = None,
 ) -> PanelData:
     """Assemble one universe's PanelData.
 
@@ -684,4 +700,7 @@ def build_panel(
         features={s: features[s] for s in universe if s in features},
         has_option_volume=has_volume,
         sectors={} if sectors is None else {s: sectors[s] for s in universe if s in sectors},
+        membership=(
+            {} if membership is None else {s: membership[s] for s in universe if s in membership}
+        ),
     )

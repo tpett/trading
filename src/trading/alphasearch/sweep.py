@@ -235,6 +235,12 @@ class UniverseSpec:
     # trial config: like bar caches, the map is committed data, and the
     # universe's identity is its NAME.
     sic_map_path: Path | None = None
+    # R3 down-cap: the (band, symbol, start, end) membership CSV and the band(s)
+    # this universe counts. When set, build_universe_panel loads the per-symbol
+    # intervals for `bands` and hands them to build_panel, so PanelView.symbols
+    # is per-date band-filtered. None (the default) = Piece 1/2 static behavior.
+    membership_intervals: Path | None = None
+    bands: tuple[str, ...] | None = None
 
 
 def default_universes(root: Path) -> dict[str, UniverseSpec]:
@@ -277,11 +283,33 @@ def _universe_sectors(sic_map_path: Path | None) -> dict[str, str]:
 def build_universe_panel(
     spec: UniverseSpec, factors: pd.DataFrame | None = None
 ) -> PanelData:
+    has_intervals = spec.membership_intervals is not None
+    has_bands = spec.bands is not None
+    if has_intervals != has_bands:
+        # A one-sided config (e.g. a typo that sets membership_intervals but
+        # forgets bands, or vice versa) must never silently fall through to
+        # the unfiltered default below -- that would run the sweep on the
+        # FULL panel instead of the intended down-cap band, a silent science
+        # error nobody would notice until the results looked off.
+        raise ValueError(
+            f"universe {spec.name!r}: membership_intervals and bands must both be "
+            f"set or both be None, got membership_intervals={spec.membership_intervals!r} "
+            f"bands={spec.bands!r}"
+        )
+    membership = None
+    if has_intervals and has_bands:
+        # Lazy import: downcap_membership imports UniverseSpec from this module,
+        # so a top-level import here would be a cycle (same pattern as
+        # _universe_sectors' lazy segments import).
+        from trading.venues.universes.downcap_membership import load_band_membership
+
+        membership = load_band_membership(spec.membership_intervals, frozenset(spec.bands))
     return build_panel(
         spec.cache_dir, spec.samples, spec.fundamentals_dir,
         insider_dir=spec.insider_dir,
         symbols=spec.symbols, factors=factors,
         sectors=_universe_sectors(spec.sic_map_path),
+        membership=membership,
     )
 
 
