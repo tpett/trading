@@ -85,31 +85,44 @@ def candidates_at(roster: pd.DataFrame, d: datetime.date) -> set[str]:
 # an `endDate` equal to the file's fetch/build date -- NOT empty). So a
 # non-empty `endDate` is NOT a delisted flag by itself. The reference date
 # ("today" as of the file) isn't carried anywhere else in the roster, so it's
-# inferred as the MAX endDate present -- that's what an active name's endDate
-# converges to. This buffer absorbs active names whose last trade lands a few
-# calendar days before that inferred max (thin volume, a holiday, a data
-# lag) so they aren't misclassified as delisted.
+# inferred as the MAX endDate present (clamped to wall-clock as_of; see
+# delisted_symbols) -- that's what an active name's endDate converges to.
+# This buffer absorbs active names whose last trade lands a few calendar days
+# before that inferred reference (thin volume, a holiday, a data lag) so they
+# aren't misclassified as delisted.
 DELISTED_BUFFER_DAYS = 7
 
 
-def delisted_symbols(roster: pd.DataFrame) -> set[str]:
+def delisted_symbols(roster: pd.DataFrame, *, as_of: datetime.date | None = None) -> set[str]:
     """Tickers that are genuinely DELISTED as of the roster's own data-as-of
     date -- the survivorship metric numerator (spec section 4).
 
     `endDate` is Tiingo's LAST-DATA-DATE, set for active names too (see
     DELISTED_BUFFER_DAYS above), so "non-empty" is not "delisted": a name
     counts as delisted only when its endDate parses AND falls strictly more
-    than DELISTED_BUFFER_DAYS before the roster's inferred data-as-of date
-    (the max endDate present in the roster). An empty or unparseable endDate
-    is an anomaly under live data -- which always populates it for both
-    active and delisted names -- so it is treated as NOT delisted rather
-    than guessed at. With this fix, `survivorship_pct`
-    (downcap_verify.compute_gate) is a genuine measurement, not a lower
-    bound via over-counting."""
+    than DELISTED_BUFFER_DAYS before the roster's inferred data-as-of date.
+    An empty or unparseable endDate is an anomaly under live data -- which
+    always populates it for both active and delisted names -- so it is
+    treated as NOT delisted rather than guessed at. With this fix,
+    `survivorship_pct` (downcap_verify.compute_gate) is a genuine
+    measurement, not a lower bound via over-counting.
+
+    The data-as-of reference is the max endDate present CLAMPED to not exceed
+    the real wall-clock `as_of` (default today). Without the clamp a single
+    corrupt future-dated endDate row (e.g. a `2099-01-01` typo, plausible in
+    a 15k-row live file) would poison `end.max()` and push the cutoff so far
+    forward that genuinely active names (endDate == today) get misclassified
+    as delisted -- re-breaking the survivorship metric via a spurious ~100%.
+    `as_of` is a keyword so tests can pin the reference deterministically;
+    production callers pass none and get today's date."""
+    as_of_ts = pd.Timestamp(as_of or datetime.date.today())
     end = pd.to_datetime(roster["endDate"], format="%Y-%m-%d", errors="coerce")
     if end.notna().sum() == 0:
         return set()
-    reference_date = end.max()
+    # Clamp the file's max endDate to the wall-clock as_of so a garbage
+    # future endDate cannot inflate the reference. If EVERY endDate is in the
+    # future (degenerate), min() falls back to as_of.
+    reference_date = min(end.max(), as_of_ts)
     # pd.Timedelta(days=...) triggers a spurious numpy-generic-unit
     # DeprecationWarning on this pandas version; datetime.timedelta avoids it
     # and subtracts from a Timestamp just as well.

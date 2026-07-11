@@ -93,6 +93,26 @@ def test_delisted_excludes_active_names_with_recent_enddate():
     assert "DELISTED" in delisted
 
 
+def test_delisted_reference_is_not_poisoned_by_future_enddate():
+    # A single corrupt FUTURE-dated endDate row (a 2099 typo, plausible in a
+    # 15k-row live file) must NOT poison the data-as-of reference. Without the
+    # clamp, end.max() = 2099 pushes the cutoff decades forward and drags the
+    # genuinely ACTIVE name (endDate == as_of) into "delisted" -- re-breaking
+    # the survivorship metric. This test FAILS under the unclamped end.max().
+    as_of = datetime.date(2026, 7, 10)
+    roster = pd.DataFrame(
+        {
+            "ticker": ["ACTIVE", "OLDCO", "POISON"],
+            "endDate": ["2026-07-10", "2015-06-30", "2099-01-01"],
+        }
+    )
+    delisted = dr.delisted_symbols(roster, as_of=as_of)
+    assert "ACTIVE" not in delisted   # endDate == as_of -> still active
+    assert "OLDCO" in delisted        # old endDate -> genuinely delisted
+    # POISON is future-of-everything; it may land either way, but it must not
+    # have dragged ACTIVE in with it.
+
+
 def test_fetch_supported_tickers_uses_download_seam(tmp_path, monkeypatch):
     def fake_download(url, dest):
         _zip_with(CSV, dest)
