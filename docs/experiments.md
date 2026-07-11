@@ -1030,13 +1030,47 @@ so risk-adjusted it only ties (mom252 top-10 at 0.87 the one exception).
   drawdown risk the Sharpe alone doesn't capture.
 
 **Holdout: still unspent.** These 8 top-N trials are journaled (972 deduped),
-BH-counted, classical-SE-caveated. **Next, in order:** thread `top_n` into the
-robustness battery and run it on the large-cap concentrated-momentum candidate
-(mom252/mom_12_2, top-10); an OOS walk-forward of the concentrated book; then,
-only on a developer decision, the holdout. The audit's other two leads
-(a holding-horizon axis, and a PEAD/earnings-surprise signal on the
-already-accumulating PIT earnings calendar) remain open and are now higher
-priority given concentration changed the answer.
+BH-counted, classical-SE-caveated.
+
+### The OOS resolution (2026-07-11): the concentration lead was in-sample overfitting — it does NOT survive out of sample
+
+The in-sample beat demanded an out-of-sample test before belief. Ran a true
+walk-forward (train/test-split, the M2 bare simulator = R2's W0 harness: bare
+momentum, regime off, `momentum_v1`, monthly, rank-exit) at
+`max_positions` ∈ {20, 10, 5}, on large-cap survivorship-free bars, scored on
+stitched OOS segments vs SPY 0.96:
+
+| construction | in-sample (alphasearch) | **OOS (walk-forward)** |
+|---|---|---|
+| top-20 (R2 W0) | ~0.97–1.00 (beats) | **0.96 — ties SPY** |
+| top-10 | 1.05–1.14 (beats most) | **0.76 — FAIL, below SPY** |
+| top-5 | — | **0.76 — FAIL, below SPY** |
+
+**Concentration helps in-sample and HURTS out-of-sample — the textbook
+overfitting signature.** Holding the signal fixed (`momentum_v1`), tightening
+the book 20 → 10 → 5 names *raises* in-sample Sharpe but *drops* OOS Sharpe
+from 0.96 to 0.76 (below SPY). The construction that looked best in-sample
+(top-10, monotonically increasing) is the worst out-of-sample: fitting the ten
+best-in-hindsight-ranked names to the discovery window does not generalize.
+The in-sample top-10 beat (1.14) was the overfitting the §16 caveats warned
+about, now measured. (Minor confound: the OOS harness uses the `momentum_v1`
+composite vs the in-sample `mom252`/`mom_12_2`; but at top-20 both engines
+agree (~0.96–1.0) and the same-signal 20→10→5 OOS decline is clean, so the
+divergence is concentration/overfitting, not the signal.)
+
+**Verdict: the negative conclusion STANDS, now properly tested at the account's
+real construction.** The adversarial audit was right that concentration had
+never been tested — and testing it correctly (in-sample AND out-of-sample)
+confirms rather than overturns the result: a concentrated long-only momentum
+book does not beat SPY out of sample; it does worse. This is the
+pre-registration + OOS discipline doing exactly its job — catching an
+in-sample artifact before it became a live bet. **The holdout was NOT spent**
+(a candidate that fails the OOS walk-forward does not warrant it) and remains
+reserved. The audit's other two leads are untouched by this and remain the
+open frontier: a holding-horizon axis (their §9 skew study: OOS tercile spread
+t=0.04 at 21d but t=3.2 at 63d — the monthly-only engine is blind to
+medium-horizon anomalies) and a PEAD / earnings-surprise signal on the
+point-in-time earnings calendar already being accumulated.
 
 ## Known caveats affecting these numbers
 
