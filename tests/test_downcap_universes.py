@@ -141,3 +141,65 @@ def test_downcap_universes_absent_csv_returns_empty(tmp_path):
     # No membership CSV built yet -> no specs (the leaderboard/sweep then just
     # omits them, like segments do when their inputs are absent).
     assert downcap_universes(tmp_path, membership_path=tmp_path / "missing.csv") == {}
+
+
+def _write_bars_at(cache_dir, symbols, periods=40):
+    # Like _write_bar_cache above, but at a CALLER-CHOSEN path -- needed here
+    # because downcap_universes derives cache_dir itself
+    # (root/data/equities-downcap-tiingo), so the bar fixture must live there
+    # rather than at the ad hoc tmp_path/"cache" the other helper uses.
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    idx = pd.date_range("2019-01-01", periods=periods, freq="B", tz="UTC")
+    for symbol in symbols:
+        frame = pd.DataFrame(
+            {c: (1.0 if c != "volume" else 1e5) for c in BAR_COLUMNS}, index=idx
+        )[BAR_COLUMNS]
+        frame.to_parquet(cache_dir / f"{symbol}.parquet")
+    return idx
+
+
+def test_downcap_universe_loads_through_build_universe_panel_and_filters(tmp_path):
+    # End-to-end proof for the R3 down-cap chain (B2 review: this was only
+    # verified by inspection before). A downcap_universes() spec must load
+    # through build_universe_panel without tripping B1's partial-config
+    # ValueError (membership_intervals and bands both set), and the resulting
+    # panel's per-date membership must actually restrict PanelView.symbols.
+    cache_dir = tmp_path / "data" / "equities-downcap-tiingo"
+    _write_bars_at(cache_dir, ("MIC", "SML"))
+
+    membership_csv = tmp_path / "band_membership.csv"
+    rows = [
+        ("micro", "MIC", "2019-01-01", "2019-02-01"),  # in-band Jan only
+        ("small", "SML", "2019-01-01", ""),             # in-band throughout
+    ]
+    pd.DataFrame(rows, columns=MEMBERSHIP_COLUMNS).to_csv(membership_csv, index=False)
+
+    specs = downcap_universes(tmp_path, membership_path=membership_csv)
+    spec = specs["downcap"]
+    assert spec.membership_intervals == membership_csv
+    assert spec.bands == ("micro", "small")
+
+    # The B1 guard fires only on a ONE-SIDED config; the factory always sets
+    # both membership_intervals and bands together, so this must not raise.
+    panel = build_universe_panel(spec)
+
+    assert panel.membership == {
+        "MIC": (("2019-01-01", "2019-02-01"),),
+        "SML": (("2019-01-01", ""),),
+    }
+    assert set(panel.symbols) == {"MIC", "SML"}
+
+    jan = panel.view(pd.Timestamp("2019-01-15", tz="UTC"))
+    assert set(jan.symbols) == {"MIC", "SML"}   # both in-band in January
+
+    feb = panel.view(pd.Timestamp("2019-02-15", tz="UTC"))
+    assert set(feb.symbols) == {"SML"}          # MIC left the band -> excluded at D
+
+    # downcap:small (bands=("small",)) excludes the micro-only symbol
+    # entirely -- proving the band filter flows through to symbol selection,
+    # not just the per-date view.
+    small_spec = specs["downcap:small"]
+    assert small_spec.bands == ("small",)
+    small_panel = build_universe_panel(small_spec)
+    assert set(small_panel.symbols) == {"SML"}
+    assert small_panel.membership == {"SML": (("2019-01-01", ""),)}
