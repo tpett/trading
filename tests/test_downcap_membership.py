@@ -4,6 +4,13 @@ import pytest
 from trading.alphasearch.panel import BAR_COLUMNS
 from trading.venues.universes import downcap_membership as dm
 
+# Live Tiingo semantics (downcap_roster.delisted_symbols): endDate is the
+# LAST-DATA-DATE, populated for ACTIVE names too -- so active tickers here
+# carry a RECENT endDate rather than an empty one, and delisted tickers
+# carry an OLD one, well outside DELISTED_BUFFER_DAYS of the active date.
+_ACTIVE_ENDDATE = "2024-12-31"
+_DELISTED_ENDDATE = "2023-06-30"
+
 
 def _roster(tickers, delisted=()):
     n = len(tickers)
@@ -14,7 +21,7 @@ def _roster(tickers, delisted=()):
             "assetType": ["Stock"] * n,
             "priceCurrency": ["USD"] * n,
             "startDate": ["2018-01-01"] * n,
-            "endDate": ["2023-06-30" if t in delisted else "" for t in tickers],
+            "endDate": [_DELISTED_ENDDATE if t in delisted else _ACTIVE_ENDDATE for t in tickers],
         }
     )
 
@@ -86,7 +93,11 @@ def test_membership_intervals_coalesce_contiguous_months():
 
 
 def test_delisted_flag_recorded_for_survivorship_metric():
-    roster = _roster(["MIC"], delisted=["MIC"])
+    # REF establishes a recent roster-wide reference endDate (live semantics:
+    # active names carry the file's fetch date, not an empty endDate) without
+    # itself appearing in diagnostics (no bars supplied for it, so it's never
+    # evaluated -- only its endDate feeds delisted_symbols' reference date).
+    roster = _roster(["MIC", "REF"], delisted=["MIC"])
     bars = {"MIC": _bars(10.0)}
     store = _Store({"MIC": 20_000_000.0})
     build = dm.build_band_membership(roster, bars, store,

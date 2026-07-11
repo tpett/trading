@@ -80,17 +80,39 @@ def candidates_at(roster: pd.DataFrame, d: datetime.date) -> set[str]:
     return set(active["ticker"])
 
 
-def delisted_symbols(roster: pd.DataFrame) -> set[str]:
-    """Tickers with a non-empty endDate -- they left an exchange, so their
-    presence is what makes the roster survivorship-free (spec section 4's
-    survivorship metric numerator).
+# Tiingo's `endDate` is the LAST-DATA-DATE, populated for ACTIVE names too
+# (verified against the live supported_tickers file: AAPL/MSFT/NVDA all carry
+# an `endDate` equal to the file's fetch/build date -- NOT empty). So a
+# non-empty `endDate` is NOT a delisted flag by itself. The reference date
+# ("today" as of the file) isn't carried anywhere else in the roster, so it's
+# inferred as the MAX endDate present -- that's what an active name's endDate
+# converges to. This buffer absorbs active names whose last trade lands a few
+# calendar days before that inferred max (thin volume, a holiday, a data
+# lag) so they aren't misclassified as delisted.
+DELISTED_BUFFER_DAYS = 7
 
-    KNOWN LIMITATION (disclosed, not fixed): Tiingo assigns a non-empty
-    `endDate` to ticker RENAMES / re-symbolings on the OLD symbol, not only
-    to true delistings -- so this over-counts "delisted" names. That makes
-    `survivorship_pct` (downcap_verify.compute_gate) an OPTIMISTIC estimate,
-    i.e. a LOWER bound on true survivorship-freeness, which is the safe
-    direction against a >= 15% floor: over-counting only makes the floor
-    easier to clear, and the floor's job is to confirm delisted names EXIST
-    in the roster, not to measure the rate precisely."""
-    return set(roster.loc[roster["endDate"] != "", "ticker"])
+
+def delisted_symbols(roster: pd.DataFrame) -> set[str]:
+    """Tickers that are genuinely DELISTED as of the roster's own data-as-of
+    date -- the survivorship metric numerator (spec section 4).
+
+    `endDate` is Tiingo's LAST-DATA-DATE, set for active names too (see
+    DELISTED_BUFFER_DAYS above), so "non-empty" is not "delisted": a name
+    counts as delisted only when its endDate parses AND falls strictly more
+    than DELISTED_BUFFER_DAYS before the roster's inferred data-as-of date
+    (the max endDate present in the roster). An empty or unparseable endDate
+    is an anomaly under live data -- which always populates it for both
+    active and delisted names -- so it is treated as NOT delisted rather
+    than guessed at. With this fix, `survivorship_pct`
+    (downcap_verify.compute_gate) is a genuine measurement, not a lower
+    bound via over-counting."""
+    end = pd.to_datetime(roster["endDate"], format="%Y-%m-%d", errors="coerce")
+    if end.notna().sum() == 0:
+        return set()
+    reference_date = end.max()
+    # pd.Timedelta(days=...) triggers a spurious numpy-generic-unit
+    # DeprecationWarning on this pandas version; datetime.timedelta avoids it
+    # and subtracts from a Timestamp just as well.
+    cutoff = reference_date - datetime.timedelta(days=DELISTED_BUFFER_DAYS)
+    is_delisted = end.notna() & (end < cutoff)
+    return set(roster.loc[is_delisted, "ticker"])
