@@ -11,6 +11,7 @@ from trading.alphasearch.panel import PanelData
 from trading.alphasearch.sort import (
     SortError,
     assign_quantiles,
+    assign_top_n,
     portfolio_sort,
 )
 from trading.alphasearch.spec import SignalSpec
@@ -322,3 +323,94 @@ def test_rebalances_record_actual_memberships_only():
     assert top == ("S5", "S6") and bottom == ("S1", "S2")   # tercile extremes
     # Every attempted date either rebalanced (recorded) or was skipped.
     assert len(got.rebalances) + len(got.skipped_dates) == got.n_dates
+
+
+# --------------------------------------------------------------------------- #
+# Concentration axis (2026-07-11 amendment): top_n fixed-count construction.
+# --------------------------------------------------------------------------- #
+
+
+def test_assign_top_n_picks_exact_highest_and_lowest():
+    scores = pd.Series({"S1": 1.0, "S2": 5.0, "S3": 3.0, "S4": 4.0, "S5": 2.0})
+    top, bottom = assign_top_n(scores, 2)
+    assert set(top) == {"S2", "S4"}      # two highest: 5.0, 4.0
+    assert set(bottom) == {"S1", "S5"}   # two lowest: 1.0, 2.0
+
+
+def test_assign_top_n_deterministic_tie_break():
+    scores = pd.Series({"B": 1.0, "A": 1.0, "D": 1.0, "C": 1.0})
+    top, bottom = assign_top_n(scores, 2)
+    assert bottom == ["A", "B"] and top == ["C", "D"]   # alphabetical on ties
+
+
+def test_top_n_lo_and_ls_hand_computed():
+    # Same SIX fixture/extremes as test_ls_and_lo_daily_returns_hand_computed,
+    # but selected via the fixed-count construction (assign_top_n) instead of
+    # assign_quantiles: top_n=2 on 6 distinct scores -> top={S5,S6},
+    # bottom={S1,S2}, matching that test's tercile top/bottom exactly.
+    panel = _panel(SIX)
+    end = panel.closes["S1"].index[-1]
+    dates = panel.decision_dates(panel.closes["S1"].index[30], end)
+    result = portfolio_sort(panel, _mom21(), dates, end, top_n=2)
+    expected_lo = (0.02 + 0.03) / 2
+    expected_ls = expected_lo - (-0.02 + -0.01) / 2
+    assert len(result.ls) > 0
+    assert all(math.isclose(v, expected_ls, rel_tol=1e-9) for v in result.ls)
+    assert all(math.isclose(v, expected_lo, rel_tol=1e-9) for v in result.lo)
+    assert result.skipped_dates == ()
+
+
+def test_top_n_min_n_skip_holds_through_prior_portfolio():
+    # The top_n floor mirrors the quintile path's min_names skip: a date
+    # whose tradeable cross-section is thinner than top_n is skipped
+    # (hold-through), never a gap in the daily series.
+    panel = _panel(SIX)
+    idx = panel.closes["S1"].index
+    dates = panel.decision_dates(idx[0], idx[-1])[:3]
+    assert len(dates) == 3
+    spec = _skipping_spec(skip_calls={2})   # 2-name cross-section < top_n=3
+    result = portfolio_sort(panel, spec, dates, idx[-1], top_n=3)
+    expected_days = idx[(idx > dates[0]) & (idx <= idx[-1])]
+    assert list(result.ls.index) == list(expected_days)
+    assert result.skipped_dates == (dates[1].date().isoformat(),)
+    # (dates[1], dates[2]]: prior top3={S4,S5,S6}/bottom3={S1,S2,S3} held.
+    held_lo = result.lo[(result.lo.index > dates[1]) & (result.lo.index <= dates[2])]
+    expected_held_lo = (0.01 + 0.02 + 0.03) / 3
+    assert len(held_lo) > 0
+    assert all(math.isclose(v, expected_held_lo, rel_tol=1e-9) for v in held_lo)
+
+
+def test_top_n_ls_overlap_guard_nans_that_holding_period():
+    # Cross-section of 4 < 2*top_n(3)=6: top-3/bottom-3 necessarily share
+    # members, so ls degrades to NaN for that holding period (dropped from
+    # the final series) while lo -- the gate series -- is computed normally.
+    panel = _panel(SIX)
+    end = panel.closes["S1"].index[-1]
+    dates = panel.decision_dates(panel.closes["S1"].index[30], end)
+    subset = ("S1", "S2", "S3", "S4")   # rates -0.02, -0.01, 0.0, 0.01
+    result = portfolio_sort(panel, _mom21(), dates, end, top_n=3,
+                            symbol_subset=subset)
+    assert result.ls.empty                        # every period is invalid
+    expected_lo = (-0.01 + 0.0 + 0.01) / 3         # top 3 of the subset == 0.0
+    assert len(result.lo) > 0
+    assert all(math.isclose(v, expected_lo, rel_tol=1e-9, abs_tol=1e-9)
+              for v in result.lo)
+
+
+def test_top_n_none_reproduces_quantile_output_bit_for_bit():
+    # Default-off bit-identity guard: omitting top_n (or passing None
+    # explicitly) must be indistinguishable from today's quantile call.
+    panel = _panel(SIX)
+    end = panel.closes["S1"].index[-1]
+    dates = panel.decision_dates(panel.closes["S1"].index[30], end)
+    baseline = portfolio_sort(panel, _mom21(), dates, end,
+                              quantiles=3, tercile_below=0, min_names=3)
+    explicit_none = portfolio_sort(panel, _mom21(), dates, end,
+                                   quantiles=3, tercile_below=0, min_names=3,
+                                   top_n=None)
+    pd.testing.assert_series_equal(baseline.ls, explicit_none.ls)
+    pd.testing.assert_series_equal(baseline.lo, explicit_none.lo)
+    assert baseline.skipped_dates == explicit_none.skipped_dates
+    assert baseline.rebalances == explicit_none.rebalances
+    assert baseline.turnover_monthly == explicit_none.turnover_monthly
+    assert baseline.n_names_median == explicit_none.n_names_median

@@ -185,6 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
         "a journaled trial",
     )
     alphasearch.add_argument(
+        "--top-n",
+        dest="top_n",
+        type=int,
+        default=None,
+        help="sweep only: fixed-count top-N/bottom-N construction (concentration "
+        "axis amendment) instead of the top-quintile default; e.g. --top-n 10. "
+        "Composes with --signals/--universe/--downcap; journaled as its own "
+        "trial identity (top_n enters the hashed config)",
+    )
+    alphasearch.add_argument(
         "--long-only",
         action="store_true",
         help="leaderboard only: rank every journaled discovery trial by "
@@ -958,7 +968,8 @@ def _cmd_alphasearch(args: argparse.Namespace) -> int:
             universes = {args.universe: universes[args.universe]}
         try:
             rows, count = engine.run_sweep(
-                universes, journal, factors, _utcnow().isoformat(), signals=signals
+                universes, journal, factors, _utcnow().isoformat(), signals=signals,
+                top_n=args.top_n,
             )
         except (engine.SweepError, PanelError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)

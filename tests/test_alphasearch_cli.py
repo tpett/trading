@@ -153,6 +153,45 @@ def test_sweep_unknown_signal_rejected_before_any_io(tmp_path, capsys):
     assert not (tmp_path / "alphasearch-trials.jsonl").exists()
 
 
+def test_sweep_top_n_flag_threads_into_run_sweep(tmp_path, monkeypatch):
+    # Concentration axis amendment: --top-n must reach run_sweep as the
+    # top_n kwarg (which in turn enters the hashed trial config); composes
+    # with --signals like every other sweep flag.
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    captured = {}
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        captured["top_n"] = kwargs.get("top_n")
+        captured["signals"] = kwargs.get("signals")
+        return [], 0
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep", "--top-n", "10", "--signals", "mom21",
+                   "--journal-dir", str(tmp_path / "journal"), "--json"])
+    assert rc == 0
+    assert captured["top_n"] == 10
+    assert set(captured["signals"]) == {"mom21"}
+
+
+def test_sweep_without_top_n_flag_leaves_it_unset(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "trading.alphasearch.evaluate.load_factors", lambda *a, **k: pd.DataFrame()
+    )
+    captured = {}
+
+    def fake_run_sweep(universes, journal, factors, ts, **kwargs):
+        captured["top_n"] = kwargs.get("top_n")
+        return [], 0
+
+    monkeypatch.setattr("trading.alphasearch.sweep.run_sweep", fake_run_sweep)
+    rc = cli.main(["alphasearch", "sweep",
+                   "--journal-dir", str(tmp_path / "journal"), "--json"])
+    assert rc == 0
+    assert captured["top_n"] is None
+
+
 def test_holdout_requires_trial_id(tmp_path, capsys):
     rc = cli.main(["alphasearch", "holdout", "--journal-dir", str(tmp_path)])
     assert rc == 1

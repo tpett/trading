@@ -17,6 +17,18 @@ fragility is visible early.
 Forward returns are computed HERE, from panel.closes -- a separate pass from
 signal scoring, which only ever sees a PanelView truncated at the decision
 date. That separation is the engine's no-look-ahead guarantee.
+
+Concentration axis (2026-07-11 amendment, docs/superpowers/specs/2026-07-11-
+concentration-axis-amendment.md section 2): `top_n` swaps the quantile
+construction for a FIXED COUNT -- the N highest-signal-score names (bottom
+= N lowest, for the ls diagnostic) -- at each decision date, equal-weight,
+same hold-to-next-rebalance machinery. Default-off: top_n=None reproduces
+the quantile path bit-for-bit (the `current_ls_valid` flag below is only
+ever set False by the top_n branch, so the quintile path's ls is untouched).
+The cross-section floor becomes N (min_names/tercile_below are irrelevant to
+this path); a cross-section with N <= n < 2N would make top/bottom overlap,
+so that holding period's ls contribution is NaN (degrade gracefully -- lo,
+the gate series, is unaffected) rather than silently inflate the spread.
 """
 
 from __future__ import annotations
@@ -69,6 +81,20 @@ def assign_quantiles(scores: pd.Series, quantiles: int) -> tuple[list[str], list
     return list(buckets[-1]), list(buckets[0])
 
 
+def assign_top_n(scores: pd.Series, n: int) -> tuple[list[str], list[str]]:
+    """(top, bottom) = the n highest / n lowest scores of a NaN-free series.
+
+    Same deterministic tie-handling as assign_quantiles: sort ascending by
+    (score, symbol) -- the mergesort-on-sorted-index trick -- so ties resolve
+    alphabetically and the selection is reproducible. When the cross-section
+    has fewer than 2*n names, the returned top and bottom sets can share
+    members; portfolio_sort's overlap guard (section 2 of the concentration
+    axis amendment) handles that, not this function.
+    """
+    ordered = scores.sort_index().sort_values(kind="mergesort")
+    return list(ordered.index[-n:]), list(ordered.index[:n])
+
+
 def portfolio_sort(
     panel: PanelData,
     spec: SignalSpec,
@@ -79,10 +105,19 @@ def portfolio_sort(
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
     symbol_subset: tuple[str, ...] | None = None,
+    top_n: int | None = None,
 ) -> SortResult:
-    """Build the daily L/S and long-only series over [dates[0], end]."""
+    """Build the daily L/S and long-only series over [dates[0], end].
+
+    top_n=None (default): today's quantile construction, bit-for-bit.
+    top_n=N: fixed-count top-N/bottom-N construction (concentration axis
+    amendment); min_names/tercile_below/quantiles are then irrelevant -- the
+    cross-section floor is N, see assign_top_n and the module docstring.
+    """
     if not dates:
         raise SortError(f"{spec.name}: no decision dates in the window")
+    if top_n is not None and top_n < 1:
+        raise SortError(f"{spec.name}: top_n must be >= 1, got {top_n}")
     # Per-symbol close-to-close returns on each symbol's OWN calendar, aligned
     # to the union calendar afterwards; a symbol's missing day stays NaN and
     # mean(skipna) simply equal-weights the members that traded.
@@ -100,6 +135,11 @@ def portfolio_sort(
     # no portfolio yet, so those days contribute nothing.
     current_top: list[str] | None = None
     current_bottom: list[str] | None = None
+    # Only the top_n branch below ever sets this False; the quantile branch
+    # never touches it, so it stays True for the life of a top_n=None call --
+    # the ls_parts.append line degrades to today's unconditional expression,
+    # bit-identical (spec section 2's overlap guard is top_n-only).
+    current_ls_valid = True
 
     for i, date in enumerate(dates):
         scores = spec.fn(panel.view(date), date).dropna()
@@ -112,7 +152,26 @@ def portfolio_sort(
             # (min_names skip, tercile fallback, distinct-score guard) then
             # applies to the SUBSET.
             scores = scores[scores.index.isin(symbol_subset)]
-        if len(scores) < min_names:
+        if top_n is not None:
+            # Concentration axis (section 2): the floor is N itself, and
+            # min_names/tercile_below/the degenerate-score guard are all
+            # irrelevant -- assign_top_n's tie-break is deterministic
+            # regardless of how many distinct scores exist.
+            if len(scores) < top_n:
+                skipped.append(date.date().isoformat())
+            else:
+                current_top, current_bottom = assign_top_n(scores, top_n)
+                # Overlap guard: a cross-section thinner than 2*N makes top
+                # and bottom share members, which would silently inflate the
+                # ls diagnostic. Degrade gracefully -- NaN this holding
+                # period's ls contribution below, keep lo (the gate series).
+                current_ls_valid = len(scores) >= 2 * top_n
+                tops.append(set(current_top))
+                names_per_date.append(len(scores))
+                rebalances.append(
+                    (date, tuple(current_top), tuple(current_bottom))
+                )
+        elif len(scores) < min_names:
             skipped.append(date.date().isoformat())
         else:
             q = quantiles if len(scores) >= tercile_below else 3
@@ -140,12 +199,16 @@ def portfolio_sort(
         segment = returns.loc[(returns.index > date) & (returns.index <= hold_end)]
         top_mean = segment[current_top].mean(axis=1)
         bottom_mean = segment[current_bottom].mean(axis=1)
-        ls_parts.append(top_mean - bottom_mean)
+        ls_parts.append(
+            top_mean - bottom_mean if current_ls_valid
+            else pd.Series(math.nan, index=top_mean.index)
+        )
         lo_parts.append(top_mean)
 
     if not tops:
+        floor = top_n if top_n is not None else min_names
         raise SortError(
-            f"{spec.name}: every decision date skipped (cross-section < {min_names})"
+            f"{spec.name}: every decision date skipped (cross-section < {floor})"
         )
     ls = pd.concat(ls_parts).dropna()
     lo = pd.concat(lo_parts).dropna()
