@@ -189,11 +189,12 @@ def compute_gate(diagnostics: pd.DataFrame, *, require_cap_band: bool = True) ->
         # traded and must not count toward the breadth floor.
         tradeable_in_band = in_band[in_band["tradeable"]]
 
-        # Survivorship: delisted share of IN-BAND candidate-months. NOTE:
-        # `delisted` over-counts ticker renames as delistings (see
-        # downcap_roster.delisted_symbols) -- survivorship_pct is therefore a
-        # lower bound on true survivorship-freeness, the safe direction for
-        # a >= floor check.
+        # Survivorship: delisted share of IN-BAND candidate-months.
+        # `delisted` comes from downcap_roster.delisted_symbols, which
+        # compares each ticker's endDate (Tiingo's last-data-date, set for
+        # active names too) against the roster's own inferred data-as-of
+        # date -- so survivorship_pct is a genuine measurement, not a lower
+        # bound via over-counting.
         survivorship_pct = float(in_band["delisted"].mean()) if len(in_band) else 0.0
         # Spread realism: distribution across in-band rows.
         spreads = in_band["spread"].dropna()
@@ -212,8 +213,8 @@ def compute_gate(diagnostics: pd.DataFrame, *, require_cap_band: bool = True) ->
     else:
         # Dollar-volume-only universe: no cap sub-bands, no `band` filter.
         # Survivorship + breadth are measured over the SAME tradeable
-        # population shares-coverage was measured over above. Same
-        # rename-over-count caveat as the cap-mode branch above applies.
+        # population shares-coverage was measured over above -- same
+        # genuine-measurement basis as the cap-mode branch above.
         survivorship_pct = float(tradeable["delisted"].mean()) if len(tradeable) else 0.0
         spreads = tradeable["spread"].dropna()
         breadth = [_breadth_from(tradeable, FALLBACK_UNIVERSE_NAME)]
