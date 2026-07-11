@@ -1072,6 +1072,54 @@ t=0.04 at 21d but t=3.2 at 63d — the monthly-only engine is blind to
 medium-horizon anomalies) and a PEAD / earnings-surprise signal on the
 point-in-time earnings calendar already being accumulated.
 
+## 17. Skew traded natively (options) — dies on execution costs (the last lead, closed)
+
+After the concentration lead resolved as overfitting (§16), a second adversarial
+review made the sharpest structural argument in the program: (a) a long-only US
+equity book is ~90% market beta, so the residual cross-sectional premium any
+factor leaves can't clear SPY's bull-market Sharpe net of forced beta — which is
+why every construction (momentum quintile/decile/top-N, amihud, value, quality,
+skew-long-only) lands in the same 0.45–0.96 band around SPY; and (b) the go-live
+gate is a naked `lo_sharpe > spy_sharpe` point comparison with NO error bars,
+while over a ~4.5yr OOS window the standard error of an annualized Sharpe is
+≈0.5 — so 0.96, 0.76, 0.45 and SPY are all within ~1 SE of each other. **The
+whole promote/refute ledger has been decided on Sharpe differences we lack the
+data to measure.** Rigor was spent on the in-sample diagnostic (BH-FDR, DSR),
+not on the gate that matters. Both points say: the long-only-equity-tilt question
+is answered AND statistically unmeasurable — more signals is motion, not progress.
+
+The one remaining lead the review endorsed: **skew is the only signal in the
+program with model-free, statistically-significant power (§9: t=3.2 at 63d, 2× in
+stress), and it was never traded in its native instrument (options) — we trade
+the stock, monthly, long-only, the exact construction §9 proved buries it.** The
+account can trade options directly. So we made the one clean pass — starting, per
+the review's own first pre-commitment, with the decisive killer: realistic
+options execution cost, measured from the ThetaData bid/ask we already gathered
+(7,399 largecap + 11,235 midcap cells).
+
+**Result — option bid/ask spread as % of the option's mid (the in/out cost):**
+best case is a large-cap ATM call at **3.8% median (7.6% round-trip)**; large-cap
+OTM calls 9.9% median; mid-cap ATM 9.5% (median volume 5 contracts, OI 94 — not
+fillable); mid-cap OTM 21.8% median, 115% at p90. **The best-case round-trip
+execution cost (~7.6%) is roughly double the entire skew premium it would harvest
+(~3.5%/quarter, §9)** — before theta, before the option's embedded time premium
+(a ~3.5% predicted quarterly move can't overcome a 63-day ATM option's time value
++ spread), before the tail. And the crisis-tilt that makes skew real (2× in
+high-vol) coincides with the widest option markets, so the signal is strongest
+exactly where it's least harvestable. No options expression escapes it (buying
+convexity pays the spread in stress; selling premium is short-vol crushed in the
+same stress, and unsuitable risk on $1k).
+
+**Verdict: the amihud trap in its purest form — a real signal whose only native
+instrument costs more than the edge. The skew-in-options lead is closed on a
+data-backed execution-cost check, without building a backtest (which would only
+confirm it at cost). This closes the last lead. The disciplined terminal finding:
+across every construction and both instruments, this account has no harvestable
+long-only-or-options edge that beats SPY net of realistic costs — and the
+differences involved are, in any case, below the statistical resolution of the
+available data. The engine and the discipline were the deliverables; the P&L
+answer is "index it." Holdout: never spent.**
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
