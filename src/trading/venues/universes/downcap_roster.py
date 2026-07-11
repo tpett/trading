@@ -83,5 +83,14 @@ def candidates_at(roster: pd.DataFrame, d: datetime.date) -> set[str]:
 def delisted_symbols(roster: pd.DataFrame) -> set[str]:
     """Tickers with a non-empty endDate -- they left an exchange, so their
     presence is what makes the roster survivorship-free (spec section 4's
-    survivorship metric numerator)."""
+    survivorship metric numerator).
+
+    KNOWN LIMITATION (disclosed, not fixed): Tiingo assigns a non-empty
+    `endDate` to ticker RENAMES / re-symbolings on the OLD symbol, not only
+    to true delistings -- so this over-counts "delisted" names. That makes
+    `survivorship_pct` (downcap_verify.compute_gate) an OPTIMISTIC estimate,
+    i.e. a LOWER bound on true survivorship-freeness, which is the safe
+    direction against a >= 15% floor: over-counting only makes the floor
+    easier to clear, and the floor's job is to confirm delisted names EXIST
+    in the roster, not to measure the rate precisely."""
     return set(roster.loc[roster["endDate"] != "", "ticker"])

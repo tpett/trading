@@ -113,6 +113,16 @@ def build_band_membership(
     discovery_window: str = DISCOVERY_WINDOW,
     require_cap_band: bool = True,
 ) -> MembershipBuild:
+    """WINDOW-SCOPED, do not reuse across windows: an interval's `end` is ""
+    (open) when the symbol is still in-band at the FINAL decision date of
+    `discovery_window`, and `load_band_membership`/the panel filter treat
+    `end == ""` as in-band for ALL future dates -- not just through the
+    window this build actually evaluated. A membership CSV built over the
+    2019-2023 discovery window is therefore stale (look-ahead-adjacent) if
+    ever queried for a later window, e.g. the 2024+ holdout: it would assert
+    band membership for dates it never checked. Rebuild membership over the
+    new window before reusing it for anything beyond the window it was built
+    over."""
     start_s, _, end_s = discovery_window.partition("..")
     start = pd.Timestamp(start_s, tz="UTC")
     end = pd.Timestamp(end_s, tz="UTC")
@@ -169,7 +179,14 @@ def load_band_membership(
     """Read the (band, symbol, start, end) CSV, keep only rows whose band is in
     `bands`, and return symbol -> tuple of (start_iso, end_iso) intervals (end
     EXCLUSIVE, "" = open) -- the interval shape PanelView.symbols filters on,
-    mirroring equities_membership.csv's overlap logic."""
+    mirroring equities_membership.csv's overlap logic.
+
+    WINDOW-SCOPED: `end == ""` means "still in-band at the end of the
+    discovery window the CSV was built over" (see build_band_membership), and
+    this loader treats it as in-band for every date the caller later queries
+    -- including dates past that window. Do not point this at a CSV built
+    over a different (e.g. earlier/holdout) window without rebuilding it
+    first."""
     df = pd.read_csv(path, dtype=str).fillna("")
     df = df[df["band"].isin(bands)]
     out: dict[str, list[tuple[str, str]]] = {}
@@ -224,6 +241,9 @@ def downcap_universes(
 def write_membership(
     build: MembershipBuild, membership_path: Path, diagnostics_path: Path
 ) -> None:
+    """Writes the CSV pair as-is -- WINDOW-SCOPED to whatever `discovery_window`
+    `build` was constructed over (see build_band_membership); the written
+    membership CSV must be rebuilt, not reused, for a different window."""
     membership_path.parent.mkdir(parents=True, exist_ok=True)
     build.membership.to_csv(membership_path, index=False)
     build.diagnostics.to_csv(diagnostics_path, index=False)
