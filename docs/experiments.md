@@ -1170,6 +1170,44 @@ not promoted. Holdout: not spent (a candidate that only "works" via
 un-achievable illiquid returns does not warrant it). The multi-leg options /
 VRP track (R6 Stage 2) remains the other unexplored capability.
 
+## 19. R6 Stage 2 — the VRP / IV-crush trade: no harvestable edge on tradeable options
+
+The multi-leg-options capability's one candidate edge (the adversarial agents'
+last lead): sell overpriced option volatility (short OTM strangle / defined-risk
+condor). Per discipline we ran the CHEAP data study before any backtester —
+using the 18,634 ThetaData option cells + raw underlying expiry prices we
+already hold. Frozen method: for each cell, a short OTM strangle (sell the
+gathered OTM put + OTM call at the BID) held to expiry, P&L = credit − payoff,
+normalized by spot; a load-bearing liquidity filter (both legs bid>0, spread
+≤15%, OI≥100) to avoid Stage-18's illiquid-instrument trap; a bootstrap CI on
+the mean; split-guard for corporate actions.
+
+**Result (net P&L per ~47-day cell, return on notional):**
+- **Liquid largecap (fillable, trustworthy): LOSES. net −1.36%, 95% CI
+  [−1.66%, −1.08%], and even GROSS at mid −1.25%.** 63% of cells win small but
+  the ~37% that run through a strike lose big (worst-5% = −19%). On names whose
+  options you can actually trade, the OTM options were NOT overpriced enough to
+  cover the 2019–23 move distribution — the strangle is a loser *before* the
+  spread, not merely eaten by it. (~55% of largecap cells survive the liquidity
+  filter; median OTM spread ~5.5%, OI ~3000.)
+- **Thin midcap ("tradeable"): +0.70%/cell, CI [+0.23%, +1.15%]** (+2.08%
+  ex-worst-5%, so not pure tail-luck) — the ONE positive, but only 17% of midcap
+  cells survive even a generous 15%-spread/OI≥100 filter, and a 15%-wide,
+  ~100-OI option is a real question mark on getting filled at the bid in size —
+  the same illiquid-instrument wall that fabricated §18's Sharpe-3. Illiquid
+  midcap (un-fillable): net ~0, CI straddles 0.
+
+**Verdict:** the same pattern as everything else — **where execution is clean
+(liquid largecap), there is no edge (negative); where a hint of edge appears
+(thin midcap), you probably can't harvest it.** The VRP-via-short-strangle does
+not survive the cheap feasibility check on tradeable options, without building
+anything. HONEST SCOPE CAVEATS: this is ONE structure (short strangle, held to
+expiry, ~monthly snapshots, ~10% OTM, one 2019–23 macro draw) — NOT the
+earnings-timed IV-crush specifically (we lack historical earnings-date alignment
+for 2019–23), not a delta-managed or iron-condor variant, not a calmer-period
+sample. Those refinements are untested. But the base signal — liquid options in
+this period weren't rich enough to sell profitably — is discouraging and
+consistent with the whole program. Holdout: not spent (nothing to spend it on).
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
