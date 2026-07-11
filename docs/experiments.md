@@ -1120,6 +1120,56 @@ differences involved are, in any case, below the statistical resolution of the
 available data. The engine and the discipline were the deliverables; the P&L
 answer is "index it." Holdout: never spent.**
 
+## 18. R6 Stage 1 — shorting (market-neutral) does NOT rescue amihud; the "edge" is the illiquidity artifact
+
+Assuming a shorting-capable venue (IBKR-class), we built a **market-neutral
+(long/short) gate WITH error bars** — the engine's `ls` series (long top, short
+bottom), both legs cost-charged (Corwin-Schultz) + a PIT short-borrow model,
+benchmark cash, promoted only if the **95% bootstrap Sharpe CI lower bound > 0**
+on the full window AND both discovery halves (spec
+`2026-07-11-market-neutral-gate-amendment.md`; the CI is the statistical-power
+fix §17 exposed). This directly tests what the long-only Robinhood constraint
+forbade, on the pre-registered primary `amihud` (the lone BH survivor, refuted
+only long-only).
+
+**Result — it passes on illiquid universes and fails on liquid ones, which is
+the tell.** Market-neutral amihud:
+- **largecap (LIQUID, tradeable): 0/13 pass** — plain `amihud:largecap` Sharpe
+  +0.62, CI **[−0.22, +1.52]** (includes zero), total +62%. On names whose
+  recorded returns are actually achievable, shorting unlocks **nothing** — a
+  statistical wash.
+- **midcap (illiquid): Sharpe +2.83, CI [+2.09, +4.26], "passes"** — but the
+  diagnostics expose it: **+1,723% total return over 5 years (~78%/yr),
+  ~50–108% EVERY year, at 8 bps modeled spread cost + 60 bps borrow.** A
+  market-neutral book returning 78%/yr at Sharpe 2.8 with 8 bps of cost is
+  physically impossible for a real premium. It is the **microcap-illiquidity
+  artifact**: the illiquid long leg's close-to-close returns are bid-ask bounce
+  / stale-price noise a trader cannot capture (the same artifact that inflated
+  long-only amihud to +270% and `rev5` to +3854%, §15). The "edge" scales with
+  illiquidity (midcap median total +331%, opt-midcap:trade +534%) — the more
+  un-tradeable the universe, the bigger the mirage.
+
+**Two findings.** (1) **Shorting does not rescue our one real factor.** On
+liquid, tradeable names amihud market-neutral is indistinguishable from zero;
+the constraint was never the long-only leg — it's that amihud's premium lives
+in illiquid names whose returns aren't achievable, and shorting the liquid leg
+doesn't change that. The pre-registered base case (§5) is confirmed. (2)
+**Methodological catch — the gate has an illiquidity blind spot.** Both the
+long-only and market-neutral gates charge the *quoted* spread but trust the
+*recorded returns* of illiquid names, which overstate what's achievable. The
+gate is trustworthy on LIQUID universes (where amihud correctly fails) and
+foolable on illiquid ones (the +1,723% "pass"). Before trusting any
+market-neutral result from an illiquid universe, it needs an illiquidity/impact
+haircut or a hard liquid-tradeability restriction — a real limitation now
+documented.
+
+**Net:** the expanded (shorting) capability was tested rigorously with proper
+error bars, and it does not surface a tradeable edge on liquid names; the one
+"passing" candidate is the known illiquidity artifact, correctly diagnosed and
+not promoted. Holdout: not spent (a candidate that only "works" via
+un-achievable illiquid returns does not warrant it). The multi-leg options /
+VRP track (R6 Stage 2) remains the other unexplored capability.
+
 ## Known caveats affecting these numbers
 
 - **Survivorship bias** (being measured by exp 7): experiments 0–6 ran on
