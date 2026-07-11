@@ -67,8 +67,15 @@ RUN-BOOK (on the run host, in order):
         --fundamentals-dir data/fundamentals/equities-downcap
 (`--stage all` runs current->historical->merge->shares in one process; the
 split above is preferred on the host so each network stage can be resumed
-independently. Re-running any stage is safe: current/historical/merge
-overwrite their outputs deterministically; shares is append-only.)
+independently. Re-running current/historical/merge is safe: they overwrite
+their outputs deterministically. The shares store is append-only, which gives
+mid-run RESUME within one clean run -- but a rerun AFTER a cik_map change (a
+corrected resolution, extended EXCLUSIONS, a dropped symbol) must start from an
+EMPTY store, else the changed symbol's parquet keeps its stale (wrong-company)
+rows. So before re-running --stage shares after any current/historical/merge
+change, CLEAR the store first:
+    rm -rf data/fundamentals/equities-downcap
+stage_shares REFUSES a non-empty store rather than silently mixing regimes.)
 """
 
 from __future__ import annotations
@@ -84,6 +91,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backfill_fundamentals import (  # noqa: E402
     RAW_DIR,
     SOURCE_MARKER,
+    _ensure_empty_for_rebuild,
     _read_source_marker,
     _write_source_marker,
     download,
@@ -91,6 +99,7 @@ from backfill_fundamentals import (  # noqa: E402
 from build_cik_map import (  # noqa: E402
     EXCLUSIONS,
     build_rows,
+    check_identity_mismatches,
     fetch_company_tickers_raw,
     merge_historical,
 )
@@ -173,10 +182,15 @@ def roster_tenure(
 ) -> dict[str, tuple[str, str]]:
     """{symbol: (start, end)} in the SAME (lo, hi) shape membership_tenure
     yields for resolve_target / choose_interval. start = the roster listing's
-    startDate; end = min(endDate, discovery_end) (empty endDate -> discovery
-    end), so hi is always a concrete date <= the window end. A symbol with
-    multiple roster rows takes (min start, max end), matching membership_
-    tenure's aggregation across a symbol's intervals."""
+    startDate; end = min(endDate, discovery_end), so hi is always a concrete
+    date <= the window end. Note (downcap_roster.py): Tiingo's endDate is the
+    file BUILD date even for still-active names (never empty under live data),
+    which for an active down-cap name sits after the window -- the `end >
+    DISCOVERY_END` clamp pins those to the discovery end. The `endDate or
+    DISCOVERY_END` fallback only guards a degenerate empty-endDate row (an
+    anomaly, not the normal case). A symbol with multiple roster rows takes
+    (min start, max end), matching membership_tenure's aggregation across a
+    symbol's intervals."""
     wanted = set(candidates)
     tenure: dict[str, tuple[str, str]] = {}
     for row in roster.itertuples():
@@ -242,6 +256,11 @@ def stage_current(roster_zip: Path) -> None:
         f"{len(unmapped)} unmapped -> need FSDS historical resolution"
     )
     print(f"wrote {CURRENT_MAP} and {UNMAPPED_CSV}")
+    # Report-only identity audit (reused from build_cik_map): surface any
+    # symbol whose resolved CIK disagrees with its OWN direct current listing.
+    # More valuable on the ~10x-larger, less-curated roster; does NOT filter
+    # rows (the file is already written above).
+    check_identity_mismatches(rows, current_tickers_raw)
 
 
 def stage_historical(roster_zip: Path) -> None:
@@ -352,6 +371,19 @@ def stage_merge() -> None:
 
 
 def stage_shares() -> None:
+    """companyfacts shares backfill into the isolated down-cap store.
+
+    Like the index companyfacts path, this REFUSES to run against a non-empty
+    store (_ensure_empty_for_rebuild): FundamentalsStore.append() is
+    append-only, so a rebuild on top of existing rows would silently KEEP the
+    old CIK's shares for every already-stored filed date instead of the new
+    map's. That is a correctness hazard specifically across a resolution
+    CORRECTION: if a rerun of current/historical/merge drops or re-points a
+    symbol (extended EXCLUSIONS, a corrected FSDS resolution), the symbol's
+    parquet would still hold the STALE (wrong-company) rows. So a rerun after
+    any cik_map change MUST start from an empty store -- clear
+    data/fundamentals/equities-downcap/ first (see the run-book). Within a
+    SINGLE clean run the append-only store still gives mid-run resume."""
     if not CIK_MAP.exists():
         sys.exit(f"ERROR: {CIK_MAP} missing; run --stage merge first")
     if STORE_DIR.resolve() == INDEX_STORE_DIR.resolve():
@@ -362,6 +394,7 @@ def stage_shares() -> None:
             f"FATAL: {STORE_DIR} was built with --source {marker!r} "
             f"(its {SOURCE_MARKER} says so); refusing to mix regimes"
         )
+    _ensure_empty_for_rebuild(STORE_DIR)  # non-empty store -> refuse (stale-CIK guard)
     cik_map = load_cik_map(CIK_MAP)
     store = FundamentalsStore(STORE_DIR)  # creates STORE_DIR if needed
     _write_source_marker(STORE_DIR, "companyfacts")

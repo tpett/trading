@@ -21,28 +21,31 @@ def _roster() -> pd.DataFrame:
     # BBB: mid-window listing that delists inside the window.
     # CCC: delisted BEFORE the window -> not a candidate.
     # DDD: listed AFTER the window -> not a candidate.
-    # EEE: corrupt far-future endDate -> candidate, end must clamp to window.
+    # EEE: still-active name -> endDate is Tiingo's post-window file BUILD date
+    #      (the NORMAL live case, never empty); end must clamp to window.
+    # FFF: empty endDate -> the degenerate-anomaly fallback branch.
     return pd.DataFrame(
         {
-            "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE"],
-            "exchange": ["NYSE"] * 5,
-            "assetType": ["Stock"] * 5,
-            "priceCurrency": ["USD"] * 5,
+            "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"],
+            "exchange": ["NYSE"] * 6,
+            "assetType": ["Stock"] * 6,
+            "priceCurrency": ["USD"] * 6,
             "startDate": [
                 "2018-01-01",
                 "2020-06-01",
                 "2010-01-01",
                 "2025-01-01",
                 "2019-01-01",
+                "2018-01-01",
             ],
-            "endDate": ["", "2021-03-15", "2015-06-30", "2026-01-01", "2099-01-01"],
+            "endDate": ["2024-06-01", "2021-03-15", "2015-06-30", "2026-01-01", "2099-01-01", ""],
         }
     )
 
 
 def test_downcap_fundamentals_roster_candidates_window_scoped():
     candidates = m.roster_candidates(_roster())
-    assert candidates == ["AAA", "BBB", "EEE"]  # sorted; CCC/DDD out of window
+    assert candidates == ["AAA", "BBB", "EEE", "FFF"]  # sorted; CCC/DDD out of window
 
 
 def test_downcap_fundamentals_tenure_shape_matches_resolve_target():
@@ -52,9 +55,11 @@ def test_downcap_fundamentals_tenure_shape_matches_resolve_target():
     for value in tenure.values():
         assert isinstance(value, tuple) and len(value) == 2
         assert all(isinstance(x, str) for x in value)
-    assert tenure["AAA"] == ("2018-01-01", m.DISCOVERY_END)  # open end -> window end
+    # AAA: active name, post-window build-date endDate -> clamped to window end
+    assert tenure["AAA"] == ("2018-01-01", m.DISCOVERY_END)
     assert tenure["BBB"] == ("2020-06-01", "2021-03-15")  # in-window delist kept
-    assert tenure["EEE"] == ("2019-01-01", m.DISCOVERY_END)  # future endDate clamped
+    assert tenure["EEE"] == ("2019-01-01", m.DISCOVERY_END)  # far-future endDate clamped
+    assert tenure["FFF"] == ("2018-01-01", m.DISCOVERY_END)  # empty-endDate anomaly fallback
 
 
 def test_downcap_fundamentals_tenure_usable_by_qualifying_candidates():
@@ -161,6 +166,21 @@ def test_downcap_fundamentals_shares_refuses_foreign_source_marker(tmp_path, mon
     monkeypatch.setattr(m, "CIK_MAP", cik_map_path)
     monkeypatch.setattr(m, "backfill_from_companyfacts", lambda *a, **k: pytest.fail("ran"))
     with pytest.raises(SystemExit):
+        m.stage_shares()
+
+
+def test_downcap_fundamentals_shares_refuses_nonempty_store(tmp_path, monkeypatch):
+    # Mirrors the index companyfacts guard: append-only store means a rebuild
+    # on top of existing rows would keep stale (possibly wrong-CIK) shares.
+    store_dir = tmp_path / "equities-downcap"
+    store_dir.mkdir()
+    (store_dir / "AAA.parquet").write_bytes(b"stale")
+    cik_map_path = tmp_path / "cik_map.csv"
+    m._write_map(cik_map_path, [("AAA", 111, "2017-01-01", "")], ["# map"])
+    monkeypatch.setattr(m, "STORE_DIR", store_dir)
+    monkeypatch.setattr(m, "CIK_MAP", cik_map_path)
+    monkeypatch.setattr(m, "backfill_from_companyfacts", lambda *a, **k: pytest.fail("ran"))
+    with pytest.raises(SystemExit, match="EMPTY store"):
         m.stage_shares()
 
 
