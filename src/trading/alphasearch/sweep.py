@@ -55,13 +55,18 @@ HOLDOUT_PASS_RATIO = 0.5                      # pre-registered (spec 3.6)
 # hash of every one of the journal's existing trials (799 at Piece 3 time),
 # severing them from their dedupe identities. A default-valued perturbation
 # IS the plain trial, so omission is also semantically exact. Pinned by
-# test_default_config_hash_is_pinned_to_the_live_journal.
+# test_default_config_hash_is_pinned_to_the_live_journal. top_n (2026-07-11
+# concentration axis amendment) follows the identical omit-when-default rule:
+# top_n=None is the plain quantile trial, so it MUST NOT add a "top_n": null
+# key -- that would change every one of the journal's 1,326 existing trial
+# hashes. Pinned by test_hashed_params_top_n_none_is_bit_identical_to_today.
 def _hashed_params(
     quantiles: int,
     tercile_below: int,
     min_names: int,
     symbol_subset: tuple[str, ...] | None = None,
     calendar_offset: int = 0,
+    top_n: int | None = None,
 ) -> dict:
     params = {
         "quantiles": quantiles,
@@ -74,6 +79,8 @@ def _hashed_params(
         params["symbol_subset"] = sorted(symbol_subset)
     if calendar_offset != 0:
         params["calendar_offset"] = calendar_offset
+    if top_n is not None:
+        params["top_n"] = top_n
     return params
 
 
@@ -451,6 +458,7 @@ def evaluate_trial_with_sort(
     min_names: int = MIN_NAMES,
     symbol_subset: tuple[str, ...] | None = None,
     calendar_offset: int = 0,
+    top_n: int | None = None,
 ):
     """evaluate_trial plus the underlying SortResult. The R1-amended battery
     needs each perturbed evaluation's raw lo series and memberships (to build
@@ -463,7 +471,7 @@ def evaluate_trial_with_sort(
     sort = portfolio_sort(
         panel, spec, dates, end,
         quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
-        symbol_subset=symbol_subset,
+        symbol_subset=symbol_subset, top_n=top_n,
     )
     ls_alpha = evaluate_alpha(sort.ls, factors, self_financing=True)
     lo_alpha = evaluate_alpha(sort.lo, factors, self_financing=False)
@@ -489,16 +497,19 @@ def evaluate_trial(
     min_names: int = MIN_NAMES,
     symbol_subset: tuple[str, ...] | None = None,
     calendar_offset: int = 0,
+    top_n: int | None = None,
 ) -> dict:
     """Score -> sort -> regress. Raises SortError/ValueError/LinAlgError on
     failure; the caller journals that as an error trial. symbol_subset and
     calendar_offset are Piece 3 battery perturbations: callers that set them
     MUST hash them into the trial config via _hashed_params (they change the
-    outcome)."""
+    outcome). top_n is the concentration axis amendment's fixed-count
+    construction (same hashing requirement)."""
     result, _sort = evaluate_trial_with_sort(
         panel, spec, window, factors,
         quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
         symbol_subset=symbol_subset, calendar_offset=calendar_offset,
+        top_n=top_n,
     )
     return result
 
@@ -676,6 +687,7 @@ def _rederive_long_only_row(
     spec = SIGNALS[signal_name]
     params = trial.get("params") or {}
     subset = params.get("symbol_subset")
+    top_n = params.get("top_n")
     try:
         start, end = _window_bounds(window)
         dates = panel.decision_dates(start, end, offset=int(params.get("calendar_offset", 0)))
@@ -685,6 +697,10 @@ def _rederive_long_only_row(
             tercile_below=int(params.get("tercile_below", TERCILE_BELOW)),
             min_names=int(params.get("min_names", MIN_NAMES)),
             symbol_subset=tuple(subset) if subset is not None else None,
+            # Concentration axis (2026-07-11 amendment): a top-N trial's
+            # journaled params carry "top_n", so it re-derives via the
+            # fixed-count construction, not the quantile default.
+            top_n=int(top_n) if top_n is not None else None,
         )
         charged_lo, skipped = cost_charged_lo(panel, sort.lo, sort.rebalances)
         # Fix (final review, 2026-07-10): same alignment as run_battery's
@@ -765,19 +781,25 @@ def run_sweep(
     quantiles: int = QUANTILES,
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
+    top_n: int | None = None,
     panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
         build_universe_panel
     ),
 ) -> tuple[list[LeaderboardRow], int]:
     """Enumerate signals x universes serially; build each panel once; journal
     EVERY trial BEFORE the leaderboard is computed (spec 3.6) so a crash
-    mid-sweep can never yield counted-but-unjournaled trials."""
+    mid-sweep can never yield counted-but-unjournaled trials.
+
+    top_n: concentration axis amendment (2026-07-11) -- None (default) sweeps
+    today's quantile construction; an int runs the fixed-count top-N/bottom-N
+    construction instead, journaled under its own config hash (top_n enters
+    _hashed_params)."""
     if signals is not None and not signals:
         # `signals or SIGNALS` would silently expand an explicitly-empty
         # selection to the full registry; sweeping nothing is a caller bug.
         raise SweepError("no signals selected")
     chosen = SIGNALS if signals is None else signals
-    params = _hashed_params(quantiles, tercile_below, min_names)
+    params = _hashed_params(quantiles, tercile_below, min_names, top_n=top_n)
     # Validate the FULL signal x universe cross-product BEFORE any trial runs
     # (spec section 6: refused at sweep-ASSEMBLY time). Checking per-universe
     # inside the trial loop would abort mid-sweep, making "which trials got
@@ -802,7 +824,7 @@ def run_sweep(
                 result: dict | None = evaluate_trial(
                     panel, chosen[name], window, factors,
                     quantiles=quantiles, tercile_below=tercile_below,
-                    min_names=min_names,
+                    min_names=min_names, top_n=top_n,
                 )
                 # Spec section 6: corrupt cells are skipped AND counted; the
                 # count rides on every trial event so coverage loss is audible.
@@ -874,6 +896,7 @@ def run_holdout(
     quantiles: int = QUANTILES,
     tercile_below: int = TERCILE_BELOW,
     min_names: int = MIN_NAMES,
+    top_n: int | None = None,
     min_factor_span_days: int = HOLDOUT_MIN_FACTOR_SPAN_DAYS,
     panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
         build_universe_panel
@@ -889,11 +912,14 @@ def run_holdout(
     holdout; battery not passed (Piece 3). The realized window end --
     min(latest bar, factor end), i.e. exactly what evaluate_trial sees -- is
     journaled so the evaluation is exactly reproducible.
+
+    top_n: concentration axis amendment -- must match the discovery trial's
+    top_n for find_discovery_trial's hash lookup to bind to the right trial.
     """
     if signal_name not in SIGNALS:
         known = ", ".join(sorted(SIGNALS))
         raise SweepError(f"unknown signal {signal_name!r}; known: {known}")
-    params = _hashed_params(quantiles, tercile_below, min_names)
+    params = _hashed_params(quantiles, tercile_below, min_names, top_n=top_n)
     discovery = find_discovery_trial(
         journal, signal_name, uspec.name, discovery_window, params=params
     )
@@ -985,6 +1011,7 @@ def run_holdout(
         result: dict | None = evaluate_trial(
             panel, spec, window, factors,
             quantiles=quantiles, tercile_below=tercile_below, min_names=min_names,
+            top_n=top_n,
         )
         error = None
     except (SortError, ValueError, np.linalg.LinAlgError) as exc:

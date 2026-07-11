@@ -273,6 +273,95 @@ def test_tercile_below_change_is_a_new_trial(tmp_path):
     assert (first, second) == (1, 2)
 
 
+# --------------------------------------------------------------------------- #
+# Concentration axis (2026-07-11 amendment): top_n threaded through identity,
+# the sweep evaluation, and --long-only re-derivation.
+# --------------------------------------------------------------------------- #
+def test_hashed_params_top_n_none_is_bit_identical_to_default_params():
+    from trading.alphasearch.sort import MIN_NAMES, QUANTILES, TERCILE_BELOW
+    from trading.alphasearch.sweep import DEFAULT_PARAMS, _hashed_params
+
+    got = _hashed_params(QUANTILES, TERCILE_BELOW, MIN_NAMES, top_n=None)
+    assert got == DEFAULT_PARAMS
+    assert "top_n" not in got
+
+
+def test_hashed_params_top_n_set_adds_the_key():
+    from trading.alphasearch.sort import MIN_NAMES, QUANTILES, TERCILE_BELOW
+    from trading.alphasearch.sweep import _hashed_params
+
+    got = _hashed_params(QUANTILES, TERCILE_BELOW, MIN_NAMES, top_n=10)
+    assert got["top_n"] == 10
+
+
+def test_top_n_hash_distinctness():
+    from trading.alphasearch.sweep import trial_config, trial_config_hash
+
+    quintile = trial_config("mom21", "largecap", WINDOW)          # top_n=None
+    ten = trial_config("mom21", "largecap", WINDOW,
+                       params={**trial_config("mom21", "largecap", WINDOW)["params"],
+                               "top_n": 10})
+    twenty = trial_config("mom21", "largecap", WINDOW,
+                          params={**trial_config("mom21", "largecap", WINDOW)["params"],
+                                  "top_n": 20})
+    hashes = {trial_config_hash(quintile), trial_config_hash(ten),
+              trial_config_hash(twenty)}
+    assert len(hashes) == 3
+
+
+def test_run_sweep_top_n_journals_a_distinct_trial_with_top_n_in_params(tmp_path):
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    kwargs = dict(signals=_subset("mom21"), window=WINDOW,
+                  panel_factory=lambda _u, _f: panel)
+    _, quintile_n = run_sweep(_universe(tmp_path), journal, make_factors(), "t1",
+                              **kwargs)
+    _, top_n_n = run_sweep(_universe(tmp_path), journal, make_factors(), "t2",
+                           top_n=5, **kwargs)
+    assert (quintile_n, top_n_n) == (1, 2)     # distinct trials, not deduped
+    trials = discovery_trials(journal)
+    top_trial = next(t for t in trials if t["params"].get("top_n") == 5)
+    assert top_trial["params"]["top_n"] == 5
+    quintile_trial = next(t for t in trials if "top_n" not in t["params"])
+    assert quintile_trial["config_hash"] != top_trial["config_hash"]
+    # The top-N trial actually ran the fixed-count construction: 5 names,
+    # not a quintile of the 16-symbol fixture (which would be 3-4 names).
+    assert top_trial["n_names_median"] == 16.0   # full cross-section reached
+
+
+def test_long_only_leaderboard_rederives_top_n_trial_as_top_n_not_quintile(
+    tmp_path,
+):
+    # The --long-only re-derivation must read a top-N trial's journaled
+    # params and rebuild it via the fixed-count construction; if it silently
+    # hardcoded quintile, its lo series would differ from a direct top_n
+    # portfolio_sort call on the same panel/window.
+    from trading.alphasearch.sort import portfolio_sort
+    from trading.alphasearch.spec import SIGNALS
+
+    journal = trials_journal(tmp_path / "journal")
+    panel = make_panel()
+    factors = make_factors()
+    run_sweep(_universe(tmp_path), journal, factors, ts="t1",
+              signals=_subset("mom21"), window=WINDOW, top_n=5,
+              panel_factory=lambda _u, _f: panel)
+    rows = build_long_only_leaderboard(
+        journal, _universe(tmp_path), factors, make_spy_closes(),
+        panel_factory=lambda _u, _f: panel,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.error is None
+    start, end = pd.Timestamp("2020-01-01", tz="UTC"), pd.Timestamp("2020-06-30", tz="UTC")
+    dates = panel.decision_dates(start, end)
+    direct = portfolio_sort(panel, SIGNALS["mom21"], dates, end, top_n=5)
+    from trading.alphasearch.costs import cost_charged_lo
+    from trading.alphasearch.evaluate import annualized_sharpe
+
+    charged, _skipped = cost_charged_lo(panel, direct.lo, direct.rebalances)
+    assert row.lo_sharpe == pytest.approx(annualized_sharpe(charged))
+
+
 def test_bh_gate_spans_the_whole_journal_not_one_sweep(tmp_path):
     # Trials from an EARLIER sweep (different window -> different hashes)
     # must raise n for the BH gate of a later sweep.
