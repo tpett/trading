@@ -768,6 +768,163 @@ def build_long_only_leaderboard(
 
 
 # --------------------------------------------------------------------------- #
+# --market-neutral leaderboard (R6 Stage 1 market-neutral gate amendment,
+# docs/superpowers/specs/2026-07-11-market-neutral-gate-amendment.md sections
+# 3-6): re-derives EVERY journaled discovery trial's cost-charged long/short
+# (ls) series from CURRENT data -- honoring the trial's journaled top_n, the
+# concentration axis's fixed-count construction, exactly like --long-only --
+# charges BOTH legs via cost_charged_market_neutral, and computes a
+# stationary-bootstrap Sharpe CI over the full discovery window AND each
+# discovery half (the sub-period OOS proxy, spec section 4). Benchmark is
+# CASH (an absolute Sharpe gate), never SPY -- market-neutral has no market
+# benchmark (spec section 2). A DISPLAY, never a re-journaling: no trial is
+# re-scored, no event written, no touch spent -- mirrors --long-only exactly.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class MarketNeutralRow:
+    signal: str
+    universe: str
+    window: str
+    top_n: int | None
+    config_hash: str
+    mn_sharpe: float | None
+    mn_sharpe_ci_lo: float | None
+    mn_sharpe_ci_hi: float | None
+    mn_total_return: float | None
+    borrow_drag_bps: float | None
+    spread_drag_bps: float | None
+    half1_ci_lo: float | None
+    half2_ci_lo: float | None
+    passes: bool               # CI-lo>0 on full window AND both halves
+    error: str | None          # set -> every numeric field above is None
+
+
+def _half_ci_los(charged: pd.Series, *, seed: int) -> tuple[float, float]:
+    """Sub-period halves (spec section 4's OOS proxy): split the cost-
+    charged series at its midpoint OBSERVATION (charged.index[len//2]) into
+    two non-overlapping halves covering the window, Sharpe-CI each half
+    independently with the SAME seed as the full-window call (determinism),
+    and return just the lower CI bound of each -- the only number the pass
+    rule (spec section 3) reads. NaN halves (too few observations) fail the
+    pass rule honestly rather than raising."""
+    from trading.alphasearch import stats
+
+    if len(charged) < 4:
+        return math.nan, math.nan
+    mid = charged.index[len(charged) // 2]
+    first = charged.loc[charged.index < mid]
+    second = charged.loc[charged.index >= mid]
+    lo1 = stats.sharpe_ci(first, seed=seed)[1] if len(first) >= 2 else math.nan
+    lo2 = stats.sharpe_ci(second, seed=seed)[1] if len(second) >= 2 else math.nan
+    return lo1, lo2
+
+
+def _rederive_market_neutral_row(
+    trial: dict,
+    universes: dict[str, UniverseSpec],
+    panels: dict[str, PanelData],
+    *,
+    seed: int = 0,
+) -> MarketNeutralRow:
+    from trading.alphasearch import stats
+    from trading.alphasearch.costs import cost_charged_market_neutral
+    from trading.alphasearch.evaluate import total_return
+
+    signal_name, universe_name, window = trial["signal"], trial["universe"], trial["window"]
+    config_hash = trial["config_hash"]
+    params = trial.get("params") or {}
+    top_n_param = params.get("top_n")
+    top_n = int(top_n_param) if top_n_param is not None else None
+
+    def _na(error: str) -> MarketNeutralRow:
+        return MarketNeutralRow(
+            signal=signal_name, universe=universe_name, window=window,
+            top_n=top_n, config_hash=config_hash,
+            mn_sharpe=None, mn_sharpe_ci_lo=None, mn_sharpe_ci_hi=None,
+            mn_total_return=None, borrow_drag_bps=None, spread_drag_bps=None,
+            half1_ci_lo=None, half2_ci_lo=None, passes=False, error=error,
+        )
+
+    if signal_name not in SIGNALS:
+        return _na(f"unknown signal {signal_name!r} (registry has changed)")
+    if universe_name not in universes:
+        return _na(f"unknown universe {universe_name!r} (not resolved for this view)")
+    panel = panels.get(universe_name)
+    if panel is None:
+        return _na(f"panel for universe {universe_name!r} could not be assembled")
+    spec = SIGNALS[signal_name]
+    subset = params.get("symbol_subset")
+    try:
+        start, end = _window_bounds(window)
+        dates = panel.decision_dates(start, end, offset=int(params.get("calendar_offset", 0)))
+        sort = portfolio_sort(
+            panel, spec, dates, end,
+            quantiles=int(params.get("quantiles", QUANTILES)),
+            tercile_below=int(params.get("tercile_below", TERCILE_BELOW)),
+            min_names=int(params.get("min_names", MIN_NAMES)),
+            symbol_subset=tuple(subset) if subset is not None else None,
+            # Concentration axis: a top-N trial's journaled params carry
+            # "top_n", so it re-derives as top-N/bottom-N L/S, not quintile.
+            top_n=top_n,
+        )
+        charged, diagnostics = cost_charged_market_neutral(panel, sort)
+        mn_sharpe, ci_lo, ci_hi = stats.sharpe_ci(charged, seed=seed)
+        mn_total = total_return(charged)
+        half1_lo, half2_lo = _half_ci_los(charged, seed=seed)
+    except (SweepError, SortError, ValueError, IndexError, np.linalg.LinAlgError) as exc:
+        return _na(f"{type(exc).__name__}: {exc}")
+
+    passes = (
+        not math.isnan(ci_lo) and ci_lo > 0
+        and not math.isnan(half1_lo) and half1_lo > 0
+        and not math.isnan(half2_lo) and half2_lo > 0
+    )
+    return MarketNeutralRow(
+        signal=signal_name, universe=universe_name, window=window,
+        top_n=top_n, config_hash=config_hash,
+        mn_sharpe=None if math.isnan(mn_sharpe) else mn_sharpe,
+        mn_sharpe_ci_lo=None if math.isnan(ci_lo) else ci_lo,
+        mn_sharpe_ci_hi=None if math.isnan(ci_hi) else ci_hi,
+        mn_total_return=None if math.isnan(mn_total) else mn_total,
+        borrow_drag_bps=diagnostics.get("borrow_drag_bps"),
+        spread_drag_bps=diagnostics.get("spread_drag_bps_total"),
+        half1_ci_lo=None if math.isnan(half1_lo) else half1_lo,
+        half2_ci_lo=None if math.isnan(half2_lo) else half2_lo,
+        passes=passes, error=None,
+    )
+
+
+def build_market_neutral_leaderboard(
+    journal: Journal,
+    universes: dict[str, UniverseSpec],
+    factors: pd.DataFrame,
+    *,
+    seed: int = 0,
+    panel_factory: Callable[[UniverseSpec, pd.DataFrame | None], PanelData] = (
+        build_universe_panel
+    ),
+) -> list[MarketNeutralRow]:
+    """Every journaled discovery trial, re-derived and ranked by cost-charged
+    market-neutral Sharpe CI lower bound (spec sections 3-4). Rows sorted by
+    mn_sharpe_ci_lo descending, n/a (unrankable) rows last."""
+    trials = discovery_trials(journal)
+    panels: dict[str, PanelData] = {}
+    for name, uspec in universes.items():
+        try:
+            panels[name] = panel_factory(uspec, factors)
+        except PanelError:
+            continue   # every trial in this universe honestly shows n/a below
+    rows = [
+        _rederive_market_neutral_row(trial, universes, panels, seed=seed)
+        for trial in trials
+    ]
+    rows.sort(
+        key=lambda r: (r.mn_sharpe_ci_lo is None, -(r.mn_sharpe_ci_lo or 0.0))
+    )
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # The sweep runner (spec 3.6)
 # --------------------------------------------------------------------------- #
 def run_sweep(
