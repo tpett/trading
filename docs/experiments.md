@@ -834,18 +834,17 @@ testing for a long-only account is a **simple** momentum tilt, not the
 inherited wrapper — which is exactly what R3 (down-cap universe) and R4
 (SPY-plus-tilt paper control) should carry. The holdout remains unspent.
 
-## 15. R3 — down-cap / illiquid universe (built, not yet run)
+## 15. R3 — down-cap / illiquid universe (Phase A run; cap band NO-GO → dollar-volume fallback GO; sweep pending)
 
-**STUB — written BEFORE the sweep runs.** This section records the
-pre-registered thesis, the frozen construction, and the frozen GO/NO-GO gate
-for R3 (design: `docs/superpowers/specs/2026-07-10-downcap-universe-design.md`;
-plan: `docs/superpowers/plans/2026-07-10-downcap-universe.md`). The code is
-built and unit-tested
+**Pre-registered record + Phase-A results.** Design:
+`docs/superpowers/specs/2026-07-10-downcap-universe-design.md`; plan:
+`docs/superpowers/plans/2026-07-10-downcap-universe.md`. The code is built and
+unit-tested
 (`src/trading/venues/universes/downcap_{roster,band,backfill,membership,verify}.py`,
-six dedicated test files plus additions to the alphasearch panel tests); the
-overnight bar+shares backfill and the sweep run-book have **NOT** been
-executed on mac-m1. Every placeholder below is literally unfilled — this is a
-pre-registration record, not a result, and should not be read as one.
+six dedicated test files plus alphasearch panel additions). Phase A (roster +
+overnight bar backfill + best-effort companyfacts shares + membership + the
+frozen gate) RAN on mac-m1 2026-07-10/11; the Phase-B sweep has not yet run.
+The gate verdict is below.
 
 **Pre-registered thesis.** R2 (§14) showed bare momentum only *ties* SPY in
 large-cap waters. R3 asks whether the identical simple, wrapper-free momentum
@@ -890,22 +889,53 @@ criteria:
    sub-15 month is dropped from the sweep — recorded, never silently
    skipped.
 
-**Phase-A verdict:** _(pending — run the verification gate)_
+**Phase-A verdict: NO-GO on the market-cap band → automatic developer-
+pre-approved dollar-volume-only fallback: GO.** The roster resolved to 15,335
+survivorship-free US-common-stock names (structural filter; ~49% delisted);
+10,636 were discovery-window candidates. Bars backfilled for 13,295 names
+(99.5% Tiingo coverage). The gate (over 403,767 diagnostics candidate-months):
+- survivorship 23.1% ≥ 15% ✓
+- **shares-coverage 61.7% < 70% ✗ ← the sole failing criterion**
+- spread median 0.0002 (2 bps, the CS floor), 100% ≤ 2% ✓ (screen is real but
+  these names are liquid enough that spread never binds)
+- breadth (min tradeable names/month): downcap 1470, downcap:small 943,
+  downcap:micro 509 — all ≫ 15 ✓
 
-**Shares-coverage figure + dropped-names size/vintage skew:** _(pending — no
-backfill has run yet; the §2 missing-shares survivorship risk this gate
-exists to catch has not been measured)_
+**Shares-coverage figure + dropped-names size skew (the §2 survivorship risk,
+now measured).** The market-cap band needs PIT shares to compute a cap; those
+come from SEC companyfacts, which requires a resolved CIK. Full best-effort
+resolution: 5,147/10,636 (48.4%) via SEC `company_tickers.json` (current
+tickers) **plus** a dedicated FSDS historical resolution recovering 1,646 of
+5,486 delisted names (all verified against submissions JSON; 3,774 were absent
+from the FSDS 10-K/10-Q filings entirely — they never filed XBRL, so no shares
+are obtainable) → 6,793 CIKs → companyfacts shares for 5,777 names. That still
+lands at **61.7%** shares-coverage over tradeable candidate-months. Critically,
+the 118,644 dropped (tradeable, no PIT shares) candidate-months skew **smaller**
+— median dollar-volume **$1.13M vs $7.08M** for shares-kept months — so
+including only shares-having names would bias the cap band toward the larger,
+better-documented end. **This is the finding: a survivorship-clean market-cap
+band cannot be built from free data for this universe** — the smallest,
+most-delisted micro-caps are exactly the ones SEC XBRL / companyfacts don't
+cover, and the frozen 70% gate correctly refused rather than ship a
+survivor-tilted cap band. (Vintage/listing-date skew is not carried in the
+diagnostics artifact, so only the dollar-volume size proxy is reported.)
 
-**Phase-B long-only-vs-SPY result:** _(pending — the sweep has not run.
-Pre-registered primary hypothesis: `momentum_v1`'s long-only top-quintile
-series on each of the three universes, under the R1 cost-charged
+**The fallback (spec §4, developer-pre-approved) is survivorship-clean by
+construction** — it drops the cap bound and keeps only the two tradeability
+screens (CS spread ≤ 2%, dollar-volume ≥ $50k/day), which need no shares, so
+delisted names are retained on equal footing. Fallback verdict: **GO** —
+survivorship 24.7% ≥ 15% ✓, breadth **4,443 tradeable names/month** ✓,
+shares-coverage non-gating. This defines a single `downcap-dv` universe.
+
+**Phase-B long-only-vs-SPY result:** _(pending — the sweep runs next, on the
+`downcap-dv` dollar-volume-only universe. Pre-registered primary hypothesis:
+`momentum_v1`'s long-only top-quintile series under the R1 cost-charged
 long-only-vs-SPY gate; the full signal battery runs alongside, exploratory,
 BH-FDR counted.)_
 
-**Holdout: unspent.** No trial has touched the reserved 2024+ holdout, and
-R3 is designed to spend none of it (spec §7). Next step is the overnight
-bar+shares backfill on mac-m1, then Phase A's written report and GO/NO-GO,
-then — only on a GO — Phase B's sweep.
+**Holdout: unspent.** No trial has touched the reserved 2024+ holdout; R3
+spends none of it (spec §7). Next: register the `downcap-dv` universe from a
+`--no-cap-band` membership and run the Phase-B sweep.
 
 ## Known caveats affecting these numbers
 
