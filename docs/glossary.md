@@ -513,3 +513,43 @@ outperforms SPY — that's what the amended gate measures. See
   against SPY over the trial's own window. A display, never a
   re-journaling: no trial is re-scored. Trials whose signal/universe no
   longer resolves show honestly as n/a.
+
+---
+
+## The down-cap universe (R3, built 2026-07-10 — not yet run)
+
+The frozen construction + verification gate for the $50M–$2B down-cap sweep.
+The code is built and unit-tested; the data backfill and the sweep itself
+have NOT run (experiments log §15 — read every figure there as a pending
+placeholder, not a result).
+
+- **Down-cap universe (R3)** — the survivorship-free $50M–$2B market-cap band;
+  dynamic PIT membership recomputed monthly from raw-price cap plus the two
+  tradeability screens (below). Three frozen `UniverseSpec`s partition it by
+  cap: `downcap` (the full band), `downcap:small` ($300M–$2B), and
+  `downcap:micro` ($50M–$300M).
+- **Raw-price market cap** — `shares_outstanding(latest companyfacts row
+  FILED ≤ D) × close_raw(≤ D)`. Uses the unadjusted price, never the
+  split/dividend-adjusted `close`, so a later corporate action can't leak
+  into a past cap — the same look-ahead class the `div_yield` fix closed
+  (see "The anomaly zoo"). The two tradeability screens reuse the R1
+  Corwin-Schultz spread estimator (see "The long-only gate") but at a
+  63-session trailing window, not R1's 21-session: CS effective spread ≤ 2%,
+  and trailing-63 median dollar-volume ≥ $50,000/day.
+- **Band-membership interval CSV** — the `(band, symbol, start, end)`
+  artifact (end exclusive, `""` = open) that expresses dynamic per-date
+  membership; loaded into `PanelData.membership` and filtered per `as_of` in
+  `PanelView.symbols`. Deliberately mirrors `equities_membership.csv`'s
+  interval-overlap logic (the existing index-membership precedent), so every
+  registry signal — including `momentum_v1` — automatically ranks only the
+  names in-band at each decision date, with no signal-level change needed.
+- **Shares-coverage gate + dollar-volume-only fallback** — the ≥ 70% (of
+  tradeable candidate-months with PIT shares) frozen Phase-A criterion.
+  Below it: a NO-GO on the market-cap band and a developer-pre-approved
+  amendment that drops the cap bound entirely, screening on the two
+  tradeability screens (spread + dollar-volume) alone.
+- **Phase-A GO/NO-GO** — the frozen, pre-sweep verification (survivorship
+  present ≥ 15% of in-band candidate-months, shares-coverage ≥ 70%, spread
+  realism, breadth ≥ 15 tradeable names in every discovery month) computed
+  by `downcap_verify.compute_gate` from the diagnostics artifact, decided
+  before any sweep trial runs.
