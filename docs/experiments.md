@@ -69,6 +69,50 @@ on survivor-only data but **0.45** on delisted-inclusive data — so a meaningfu
 chunk of the apparent edge was survivorship bias. Live paper trading runs on the
 exp-3 config, but its honest OOS Sharpe is ~0.45, not 0.59.
 
+## Where this ended up — the full arc (§9–21) and the terminal conclusion
+
+Experiments 0–8 (above) were the momentum era. §9 onward is the **alpha-discovery
+engine era**: a rigorous, pre-registered, survivorship-clean cross-sectional
+sweep engine (`src/trading/alphasearch/`), then a strategy audit that reopened
+the search across constructions, universes, instruments, and venue capabilities.
+These don't fit the walk-forward table above (they're cross-sectional sweeps and
+event studies), so here are their one-line verdicts:
+
+| § | What was tested | Verdict |
+|---|---|---|
+| 9 | Options IV-skew (long-only, monthly) | real but weak; the OPT-1 0.79 pass was beta+tuning; monthly premium ≈ 0 OOS, only quarterly/crisis |
+| 10 | Alpha-search engine + first sweep (238 trials) | comprehensive honest null; 0 BH survivors |
+| 11 | Tier-1 batch (799 trials) | **first BH survivor: amihud** (illiquidity), midcap t=8.34 — but no-cost |
+| 12 | Options-v2 + insider batch (946 trials) | null beyond amihud |
+| 13 | R1 long-only-vs-SPY gate + re-read | reframes the ledger: 45% "beat SPY" in-sample = the overfitting surface |
+| 14 | R2 wrapper ablation | the recorded "momentum 0.45 refuted" was the WRAPPER; bare momentum ties SPY |
+| 15 | R3 down-cap universe | cap band NO-GO (shares-coverage 61.7%); dv-fallback GO; sweep = momentum ties SPY |
+| 16 | Concentration axis (top-N) | in-sample top-10 momentum BEAT SPY (1.14) → but OOS 0.76 FAIL = overfitting |
+| 17 | Skew traded as options | dies on execution costs (round-trip ~2× the premium) |
+| 18 | R6 Stage 1: market-neutral shorting | amihud MN = the illiquidity artifact; wash on liquid names |
+| 19 | R6 Stage 2: options VRP (short strangle) | loses on liquid names (before costs); positive only where un-fillable |
+| 20 | PEAD event study (proxy dates) | real-but-fragile drift; fails the liquid-band test |
+| 21 | Clean PEAD test (real EDGAR dates) | **dead** — was price momentum + outliers; fails median/liquidity/momentum controls |
+
+**Terminal conclusion (2026-07-11):** across every long-only construction
+(quintile, decile, concentrated top-N), every universe (large/mid/down-cap),
+market-neutral shorting on an IBKR-class venue, options volatility-premium
+selling, and event-driven PEAD tested with real earnings dates — the result is
+one thing: **where execution is clean and liquid, there is no edge; where an
+edge appears, it lives in the less-arbitraged/illiquid corner you cannot harvest,
+or it dissolves under honest controls (beta, momentum, the median, error bars).**
+This held for the $1k Robinhood account and again when the capability model was
+expanded to $12.5k with shorting and multi-leg options — so the binding
+constraint was never the platform's features; it is that the tradeable liquid
+market is efficient enough that these signals do not beat it net of what is
+actually capturable. The disciplined answer for the account is to **index it**.
+The durable deliverables are the engine and a pre-registration/error-bar
+discipline that caught every in-sample artifact (concentration Sharpe 1.14,
+market-neutral Sharpe 2.83, PEAD) before any became a live bet — and a
+**once-only 2024+ holdout that was never spent, because no candidate ever earned
+it.** See §9–21 for the detail; "What we've learned overall" (below) carries the
+synthesized lessons.
+
 ## The experiments in detail
 
 ### 0. Baseline momentum — OOS Sharpe 0.52
@@ -187,6 +231,39 @@ but 16/729 ≈ 2% won't change the conclusion.
    96 names that listed after 2018 — a real offline bug to fix before any
    reproducible offline re-run); the census, not the ceiling number, is the
    evidence.
+
+*Lessons from the alpha-discovery-engine era (§9–21), added 2026-07-11:*
+
+6. **Long-only equity factor tilts collapse to market beta.** Every signal
+   (momentum, amihud, value, quality, skew) evaluated as a long-only top-quantile
+   book lands in a tight 0.45–0.96 Sharpe band *around* SPY — because a long-only
+   US-equity book is ~90% market beta and the residual cross-sectional premium
+   can't clear SPY's bull-market Sharpe net of the beta you're forced to carry.
+   More signals is motion, not progress.
+7. **The gate must have error bars.** The go-live decision was for a long time a
+   naked `lo_sharpe > spy_sharpe` point comparison — but over a ~4.5yr window the
+   standard error of an annualized Sharpe is ≈0.5, so 0.96/0.76/0.45 and SPY are
+   all within ~1 SE. Many promote/refute calls were on differences below the
+   data's resolution. A Sharpe confidence interval (`stats.sharpe_ci`) is now the
+   standard; gate on the CI lower bound, not the point.
+8. **"Clean = no edge; illiquid = un-harvestable" is the deepest pattern.**
+   Every apparent edge — amihud (§11), concentration (§16), market-neutral amihud
+   (§18), VRP (§19), PEAD (§20–21) — either vanishes in the liquid, fillable
+   names or lives only in illiquid names whose recorded returns/prices aren't
+   achievable. The engine's cost model charges the quoted spread but trusts
+   illiquid names' recorded returns; it is trustworthy on liquid universes and
+   *foolable* on illiquid ones — always require an edge to survive in the liquid
+   band.
+9. **In-sample beats are the overfitting surface, and concentration amplifies it.**
+   ~45% of all trials beat SPY in the discovery window (§13). Concentrating a book
+   (top-N) raised in-sample Sharpe and *lowered* OOS Sharpe (§16) — the textbook
+   overfitting signature. A discovery-window win is necessary, never sufficient;
+   the OOS walk-forward and the reserved holdout govern.
+10. **The platform's features were never the binding constraint.** Expanding the
+    capability model from Robinhood (long-only, single-leg) to an IBKR-class venue
+    (shorting, multi-leg options, $12.5k) did not change the answer — the liquid
+    market is efficient enough that these signals don't beat it net of realistic
+    execution. See the terminal conclusion under "Where this ended up," above.
 
 ## 9. Options IV-skew — the first differential signal (OPT-1 0.79, OPT-2 0.73; momentum-on-same-names control 0.46)
 
@@ -893,7 +970,22 @@ criteria:
 pre-approved dollar-volume-only fallback: GO.** The roster resolved to 15,335
 survivorship-free US-common-stock names (structural filter; ~49% delisted);
 10,636 were discovery-window candidates. Bars backfilled for 13,295 names
-(99.5% Tiingo coverage). The gate (over 403,767 diagnostics candidate-months):
+(99.5% Tiingo coverage).
+
+*Live-data catch (methodological, fixed pre-run):* validating the roster against
+the live Tiingo `supported_tickers` file revealed that its `endDate` is the
+**last-data-date** — populated for ACTIVE names too (AAPL's endDate is today's
+date), NOT a delisting flag. The original "delisted = non-empty endDate" logic
+therefore flagged 100% of the roster as delisted, which would have made the
+survivorship gate meaningless. Fixed: delisted = endDate more than 7 days before
+the data-as-of reference (max endDate, clamped to wall-clock so a corrupt future
+date can't poison it); `candidates_at` was unaffected (its `[start,end]` interval
+is correct with end=last-data-date). The roster is a healthy **~49% (50.9%)
+delisted** — genuinely survivorship-free. (This class of bug — a metric that only
+looks right until you see live data — is exactly why every data source is
+validated before a run.)
+
+The gate (over 403,767 diagnostics candidate-months):
 - survivorship 23.1% ≥ 15% ✓
 - **shares-coverage 61.7% < 70% ✗ ← the sole failing criterion**
 - spread median 0.0002 (2 bps, the CS floor), 100% ≤ 2% ✓ (screen is real but
@@ -1314,26 +1406,33 @@ earned it.
 
 ## Not yet run / candidate experiments
 
-- **Liquidity-floored, survivorship-free breadth** — expand beyond the S&P 500
-  by trailing dollar volume (a hard liquidity floor) rather than by adding an
-  index, tested against the exp 4 negative result. Only worth it if exp 7 shows
-  the core edge survives. (Superseded/formalized by §15 R3's frozen down-cap
-  band construction, which has since been built but not yet run.)
-- **Earnings-aware entry blackout** — the earnings filter was dropped (stale
-  yfinance dates); a point-in-time earnings history is now being accumulated
-  from the Robinhood calendar to reinstate and backtest it.
-- **Crypto walk-forward** — the crypto venue paper-trades but has never had a
-  deep-history walk-forward (Kraken's ~720-candle retention; deep history now
-  splices from Coinbase). Its go-live additionally requires
-  `fee_drag_vs_gross < 30%`.
-- **Long/short skew spread** (the priority follow-up to §9) — long the lowest-skew,
-  short the highest-skew names, market-neutral, to harvest the skew premium that the
-  long-only book (§9) buries under market beta. skew_v1 already beats momentum on the
-  same names; the question is whether the spread earns clean alpha above SPY.
-- **OPT-3 — skew × momentum overlay** — use the skew signal as a filter/tilt on a
-  momentum (or other) core, now that skew is an established differential signal.
-- **OPT holdout** — once 2026 option cells are gathered, evaluate the reserved
-  ≥2026-01-05 holdout ONCE with the frozen OPT-1 params (go-live gate step 2).
-- **Skew robustness** — broaden beyond 100 names (survivorship-free breadth), test
-  daily vs monthly decision frequency, and sensitivity to the handful of
-  implausible-IV cells.
+*Reconciled 2026-07-11: the equity alpha search is over-determined-complete
+(see the terminal conclusion under "Where this ended up"). Most items below have
+since been RUN or REFUTED; kept for provenance.*
+
+- **Liquidity-floored, survivorship-free breadth** — DONE/REFUTED as §15 R3
+  (down-cap universe): built, run, momentum ties SPY there too.
+- **Earnings-aware / PEAD** — DONE/REFUTED as §20–21: real EDGAR earnings dates,
+  the drift dies in the liquid band and dissolves under the momentum control
+  (it was price momentum in an earnings costume).
+- **Long/short skew spread & market-neutral** — the shorting capability was
+  built and tested (§18 market-neutral gate): on liquid names no edge; amihud
+  market-neutral is the illiquidity artifact. Skew was not swept market-neutral
+  specifically, but skew is already refuted (§9 beta/tuning; §17 dies on option
+  costs), so the spread is moot.
+- **OPT-3 skew×momentum overlay / skew robustness** — MOOT: skew is refuted
+  (§9, §17).
+- **OPT holdout / the reserved 2024+ holdout** — NEVER SPENT. No candidate ever
+  earned it across 21 experiments; the once-only holdout remains 100% intact.
+- **Crypto walk-forward** — still genuinely NOT run (out of the equity search's
+  scope). The crypto venue paper-trades but has never had a deep-history
+  walk-forward; go-live additionally requires `fee_drag_vs_gross < 30%`. This is
+  the one remaining item that is *not* refuted — but it is out of the equity
+  frame.
+
+**Genuinely-open directions (all out of the equity-signal frame that was
+exhausted):** (a) materially more capital, to make the engine's *tiny* real
+premia worth the friction and to enable whole-contract defined-risk options;
+(b) a different asset class or paradigm (crypto carry, event/convexity trades in
+their native instruments) — NOT another long-only/factor/event equity signal.
+Any future gate should carry a Sharpe CI (`stats.sharpe_ci`) from the start.

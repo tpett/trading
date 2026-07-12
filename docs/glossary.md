@@ -553,3 +553,36 @@ placeholder, not a result).
   realism, breadth ≥ 15 tradeable names in every discovery month) computed
   by `downcap_verify.compute_gate` from the diagnostics artifact, decided
   before any sweep trial runs.
+
+## The expanded-capability search (§16–21, 2026-07-11)
+
+- **Concentration axis / top-N book** — a fixed-COUNT long-only book (the N
+  highest-signal-score names, equal weight, monthly) rather than the top-quantile
+  fraction; the construction a small account actually holds. `top_n` on
+  `portfolio_sort`; in-sample top-10 momentum beat SPY but failed out-of-sample
+  (overfitting), see §16.
+- **Sharpe confidence interval (`stats.sharpe_ci`)** — a stationary block-bootstrap
+  95% CI on an annualized Sharpe, cross-checked against the closed-form SE
+  `sqrt((1 + 0.5*SR^2/252)/years)`. The methodological fix for gating on a naked
+  Sharpe point estimate: over ~4.5yr the Sharpe SE is ≈0.5, so promote/refute
+  calls need error bars. Gate on the CI lower bound, not the point.
+- **Market-neutral (long/short) gate** — evaluates the engine's `ls` series
+  (long top bucket, short bottom bucket) as a tradeable strategy: both legs
+  charged the Corwin-Schultz spread, plus a PIT illiquidity-scaled short-borrow
+  model, benchmark CASH, promoted only if the Sharpe CI lower bound > 0 on the
+  full window AND both discovery halves. `leaderboard --market-neutral`. amihud
+  market-neutral passed only on illiquid universes (the artifact), §18.
+- **Illiquidity artifact / the "clean = no edge" wall** — the engine charges the
+  QUOTED spread but trusts illiquid names' RECORDED close-to-close returns, which
+  overstate what's achievable (bid-ask bounce, stale prices). Gates are
+  trustworthy on liquid universes and foolable on illiquid ones; an edge must
+  survive in the LIQUID/fillable band to be real (§18, §19, §21).
+- **VRP / IV-crush study** — the variance-risk-premium trade (sell overpriced
+  option vol, e.g. a short OTM strangle into earnings). Data study
+  (`scripts/research/vrp_strangle_study.py`) found it loses on liquid options and
+  is positive only where un-fillable (§19).
+- **PEAD (post-earnings-announcement drift)** — the behavioral underreaction to
+  earnings surprises. Tested with real SEC 8-K Item-2.02 earnings dates
+  (`scripts/research/fetch_earnings_dates.py`, `pead_event_study.py`): the drift
+  fails the liquid-band test, has a negative typical-event median, and dissolves
+  under a momentum control (it was price momentum in disguise), §20–21.
